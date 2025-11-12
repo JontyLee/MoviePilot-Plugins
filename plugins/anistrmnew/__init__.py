@@ -177,13 +177,59 @@ class ANiStrmNew(_PluginBase):
     @retry(Exception, tries=3, logger=logger, ret=[])
     def get_current_season_list(self) -> List:
         """获取当前季度的番剧列表"""
-        url = f'https://openani.an-i.workers.dev/{self.__get_ani_season()}/'
+        season = self.__get_ani_season()
+        url = f'https://openani.an-i.workers.dev/{season}/'
+
+        headers = {
+            'accept': '*/*',
+            'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6',
+            'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'origin': 'https://openani.an-i.workers.dev',
+            'priority': 'u=1, i',
+            'referer': 'https://openani.an-i.workers.dev/',
+            'sec-ch-ua': '"Chromium";v="142", "Microsoft Edge";v="142", "Not_A Brand";v="99"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"macOS"',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-origin',
+            'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36 Edg/142.0.0.0',
+            'x-requested-with': 'XMLHttpRequest',
+        }
+        data = '{"password":"null"}'
 
         rep = RequestUtils(ua=settings.USER_AGENT if settings.USER_AGENT else None,
-                           proxies=settings.PROXY if settings.PROXY else None).post(url=url)
+                           proxies=settings.PROXY if settings.PROXY else None).post(url=url, headers=headers, data=data)
         logger.debug(rep.text)
-        files_json = rep.json()['files']
-        return [file['name'] for file in files_json]
+        
+        anime_folders = rep.json().get('files', [])
+        episode_files_list = []
+
+        for folder in anime_folders:
+            if folder.get('mimeType') != 'application/vnd.google-apps.folder':
+                continue
+            
+            try:
+                folder_name = folder.get('name')
+                encoded_folder_name = quote(folder_name)
+                folder_url = f'https://openani.an-i.workers.dev/{season}/{encoded_folder_name}/'
+                
+                nested_headers = headers.copy()
+                nested_headers['referer'] = folder_url
+
+                folder_rep = RequestUtils(ua=settings.USER_AGENT if settings.USER_AGENT else None,
+                                          proxies=settings.PROXY if settings.PROXY else None).post(url=folder_url, headers=nested_headers, data=data)
+
+                if folder_rep and folder_rep.status_code == 200:
+                    episodes = folder_rep.json().get('files', [])
+                    for file in episodes:
+                        if 'video' in file.get('mimeType', ''):
+                            episode_files_list.append(file['name'])
+            except Exception as e:
+                logger.warning(f'处理番剧文件夹 {folder.get("name")} 时出错: {str(e)}')
+                continue
+
+        return episode_files_list
     
     def get_all_seasons_list(self) -> List[Dict]:
         """获取所有季度的番剧列表"""
@@ -192,25 +238,75 @@ class ANiStrmNew(_PluginBase):
         
         logger.info(f'准备获取 {len(seasons)} 个季度的番剧: {seasons}')
         
+        headers = {
+            'accept': '*/*',
+            'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6',
+            'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'origin': 'https://openani.an-i.workers.dev',
+            'priority': 'u=1, i',
+            'referer': 'https://openani.an-i.workers.dev/',
+            'sec-ch-ua': '"Chromium";v="142", "Microsoft Edge";v="142", "Not_A Brand";v="99"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"macOS"',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-origin',
+            'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36 Edg/142.0.0.0',
+            'x-requested-with': 'XMLHttpRequest',
+        }
+        data = '{"password":"null"}'
+
         for season in seasons:
             try:
-                url = f'https://openani.an-i.workers.dev/{season}/'
+                # First request: get anime folders in the season
+                season_url = f'https://openani.an-i.workers.dev/{season}/'
                 rep = RequestUtils(ua=settings.USER_AGENT if settings.USER_AGENT else None,
-                                 proxies=settings.PROXY if settings.PROXY else None).post(url=url)
+                                 proxies=settings.PROXY if settings.PROXY else None).post(url=season_url, headers=headers, data=data)
                 
-                if rep and rep.status_code == 200:
-                    files_json = rep.json().get('files', [])
-                    logger.info(f'获取 {season} 季度: {len(files_json)} 个番剧')
-                    
-                    for file in files_json:
-                        all_files.append({
-                            'name': file['name'],
-                            'season': season
-                        })
-                else:
+                if not (rep and rep.status_code == 200):
                     logger.warning(f'获取 {season} 季度失败: HTTP {rep.status_code if rep else "无响应"}')
+                    continue
+
+                anime_folders = rep.json().get('files', [])
+                logger.info(f'获取 {season} 季度: {len(anime_folders)} 个番剧文件夹')
+
+                # Second level: get episode files from each anime folder
+                for folder in anime_folders:
+                    if folder.get('mimeType') != 'application/vnd.google-apps.folder':
+                        continue
+                    
+                    try:
+                        folder_name = folder.get('name')
+                        encoded_folder_name = quote(folder_name)
+                        folder_url = f'https://openani.an-i.workers.dev/{season}/{encoded_folder_name}/'
+                        
+                        # Update referer for the nested request
+                        nested_headers = headers.copy()
+                        nested_headers['referer'] = folder_url
+
+                        folder_rep = RequestUtils(ua=settings.USER_AGENT if settings.USER_AGENT else None,
+                                                  proxies=settings.PROXY if settings.PROXY else None).post(url=folder_url, headers=nested_headers, data=data)
+
+                        if not (folder_rep and folder_rep.status_code == 200):
+                            logger.warning(f'获取番剧 {folder_name} 内容失败: HTTP {folder_rep.status_code if folder_rep else "无响应"}')
+                            continue
+                        
+                        episode_files = folder_rep.json().get('files', [])
+                        logger.info(f'  获取 {folder_name}: {len(episode_files)} 个剧集文件')
+
+                        for file in episode_files:
+                            # We only care about video files, not sub-folders or other types
+                            if 'video' in file.get('mimeType', ''):
+                                all_files.append({
+                                    'name': file['name'],
+                                    'season': season
+                                })
+
+                    except Exception as e:
+                        logger.warning(f'处理番剧文件夹 {folder.get("name")} 时出错: {str(e)}')
+                        continue
                 
-                # 添加延迟避免请求过快
+                # Add delay between seasons
                 time.sleep(0.5)
                 
             except Exception as e:
