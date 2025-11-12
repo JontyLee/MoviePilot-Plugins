@@ -65,7 +65,7 @@ class ANiStrmNew(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/anistrm.png"
     # 插件版本
-    plugin_version = "2.4.4"
+    plugin_version = "2.4.5"
     # 插件作者
     plugin_author = "honue"
     # 作者主页
@@ -478,18 +478,18 @@ class ANiStrmNew(_PluginBase):
             # 将 ?d=mp4 替换为 .mp4?d=true
             url = url.replace("?d=mp4", ".mp4?d=true")
 
-        parts = url.split('?')
+        parts = url.split("?")
         path = parts[0]
         query = parts[1] if len(parts) > 1 else ""
 
-        if not path.endswith('.mp4'):
-            path += '.mp4'
+        if not path.endswith(".mp4"):
+            path += ".mp4"
 
-        query_params = query.split('&') if query else []
-        if not any(p.startswith('d=') for p in query_params):
-            query_params.append('d=true')
-        
-        query = '&'.join(filter(None, query_params))
+        query_params = query.split("&") if query else []
+        if not any(p.startswith("d=") for p in query_params):
+            query_params.append("d=true")
+
+        query = "&".join(filter(None, query_params))
 
         return f"{path}?{query}"
 
