@@ -53,9 +53,9 @@ def retry(ExceptionToCheck: Any,
 
 class ANiStrm(_PluginBase):
     # 插件名称
-    plugin_name = "Ani Strm New"
+    plugin_name = "ANi Strm"
     # 插件描述
-    plugin_desc = "自动获取当季所有番剧，免去下载，轻松拥有一个番剧媒体库"
+    plugin_desc = "自动获取当季所有番剧，生成strm文件，mp刮削入库，emby直接播放，免去下载，轻松拥有一个番剧媒体库"
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/anistrm.png"
     # 插件版本
@@ -99,6 +99,12 @@ class ANiStrm(_PluginBase):
             self._start_year = config.get("start_year")
             self._start_season = config.get("start_season")
             self._processed_files = config.get("processed_files", {})
+            
+            # 验证存储路径
+            if not self._storageplace:
+                logger.error("未配置Strm存储地址，插件无法正常工作")
+                self._enabled = False
+                return
         
         # 加载模块
         if self._enabled or self._onlyonce:
@@ -232,7 +238,12 @@ class ANiStrm(_PluginBase):
             # 链接
             link = DomUtils.tag_value(item, "link", default="")
             rss_info['title'] = title
-            rss_info['link'] = link.replace("resources.ani.rip", "openani.an-i.workers.dev")
+            # 替换域名并确保URL格式正确
+            link = link.replace("resources.ani.rip", "openani.an-i.workers.dev")
+            # 确保URL格式为 .mp4?d=true
+            if not link.endswith('.mp4?d=true'):
+                link = self._convert_url_format(link)
+            rss_info['link'] = link
             ret_array.append(rss_info)
         return ret_array
 
@@ -341,6 +352,11 @@ class ANiStrm(_PluginBase):
 
     def __task(self):
         """统一的增量处理任务"""
+        # 验证存储路径
+        if not self._storageplace:
+            logger.error("未配置Strm存储地址，任务终止")
+            return
+        
         cnt = 0
         
         # 初始化当前季度
