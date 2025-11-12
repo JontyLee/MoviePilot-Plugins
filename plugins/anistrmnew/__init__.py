@@ -410,7 +410,10 @@ class ANiStrmNew(_PluginBase):
         if not file_url:
             # 季度API生成的URL，使用新格式
             encoded_filename = quote(file_name, safe="")
-            src_url = f"https://openani.an-i.workers.dev/{use_season}/{encoded_filename}.mp4?d=true"
+            if file_name.endswith(".mp4"):
+                src_url = f"https://openani.an-i.workers.dev/{use_season}/{encoded_filename}?d=true"
+            else:
+                src_url = f"https://openani.an-i.workers.dev/{use_season}/{encoded_filename}.mp4?d=true"
         else:
             # 检查API获取的URL格式是否符合要求
             if self._is_url_format_valid(file_url):
@@ -473,13 +476,22 @@ class ANiStrmNew(_PluginBase):
         """将URL转换为符合要求的格式"""
         if "?d=mp4" in url:
             # 将 ?d=mp4 替换为 .mp4?d=true
-            return url.replace("?d=mp4", ".mp4?d=true")
-        elif url.endswith(".mp4"):
-            # 如果已经以.mp4结尾，添加?d=true
-            return f"{url}?d=true"
-        else:
-            # 其他情况，添加.mp4?d=true
-            return f"{url}.mp4?d=true"
+            url = url.replace("?d=mp4", ".mp4?d=true")
+
+        parts = url.split('?')
+        path = parts[0]
+        query = parts[1] if len(parts) > 1 else ""
+
+        if not path.endswith('.mp4'):
+            path += '.mp4'
+
+        query_params = query.split('&') if query else []
+        if not any(p.startswith('d=') for p in query_params):
+            query_params.append('d=true')
+        
+        query = '&'.join(filter(None, query_params))
+
+        return f"{path}?{query}"
 
     def __task(self):
         """统一的增量处理任务"""
