@@ -81,6 +81,8 @@ class ANiStrm(_PluginBase):
     _start_season = None
     # 处理记录点：记录已处理的番剧
     _processed_files = {}
+    # 当前季度
+    _date = None
 
     # 定时器
     _scheduler: Optional[BackgroundScheduler] = None
@@ -340,6 +342,9 @@ class ANiStrm(_PluginBase):
     def __task(self):
         """统一的增量处理任务"""
         cnt = 0
+        
+        # 初始化当前季度
+        self.__get_ani_season()
         
         # 获取所有季度的番剧列表
         all_files = self.get_all_seasons_list()
