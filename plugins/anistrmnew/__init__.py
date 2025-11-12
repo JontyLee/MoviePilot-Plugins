@@ -51,7 +51,7 @@ def retry(ExceptionToCheck: Any,
     return deco_retry
 
 
-class ANiStrm(_PluginBase):
+class ANiStrmNew(_PluginBase):
     # 插件名称
     plugin_name = "ANi Strm New"
     # 插件描述
@@ -65,7 +65,7 @@ class ANiStrm(_PluginBase):
     # 作者主页
     author_url = "https://github.com/honue"
     # 插件配置项ID前缀
-    plugin_config_prefix = "anistrm_"
+    plugin_config_prefix = "anistrmnew_"
     # 加载顺序
     plugin_order = 15
     # 可使用的用户级别
@@ -594,6 +594,6 @@ class ANiStrm(_PluginBase):
 
 
 if __name__ == "__main__":
-    anistrm = ANiStrm()
+    anistrm = ANiStrmNew()
     name_list = anistrm.get_latest_list()
     print(name_list)
