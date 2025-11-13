@@ -65,7 +65,7 @@ class ANiStrmNew(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/anistrm.png"
     # 插件版本
-    plugin_version = "2.4.5"
+    plugin_version = "2.4.6"
     # 插件作者
     plugin_author = "honue"
     # 作者主页
@@ -85,6 +85,7 @@ class ANiStrmNew(_PluginBase):
     _storageplace = None
     _start_year = None
     _start_season = None
+    _full_download = False
     # 处理记录点：记录已处理的番剧
     _processed_files = {}
     # 当前季度
@@ -104,6 +105,7 @@ class ANiStrmNew(_PluginBase):
             self._storageplace = config.get("storageplace")
             self._start_year = config.get("start_year")
             self._start_season = config.get("start_season")
+            self._full_download = config.get("full_download")
             self._processed_files = config.get("processed_files", {})
 
             # 验证存储路径
@@ -139,6 +141,8 @@ class ANiStrmNew(_PluginBase):
                 )
                 # 关闭一次性开关
                 self._onlyonce = False
+                # 关闭全量下载开关
+                self._full_download = False
 
             self.__update_config()
 
@@ -163,7 +167,13 @@ class ANiStrmNew(_PluginBase):
         current_year = current_date.year
         current_month = current_date.month
 
-        # 使用配置的开始年份和季度，如果没有配置则默认从2019-1开始
+        # 如果不是全量下载模式，只返回当前季度
+        if not self._full_download:
+            # 获取当前季度
+            current_season = self.__get_ani_season()
+            return [current_season] if current_season else []
+
+        # 全量下载模式：使用配置的开始年份和季度，如果没有配置则默认从2019-1开始
         start_year = int(self._start_year) if self._start_year else 2019
         start_season = int(self._start_season) if self._start_season else 1
 
@@ -409,11 +419,13 @@ class ANiStrmNew(_PluginBase):
 
         if not file_url:
             # 季度API生成的URL，使用新格式
-            encoded_filename = quote(file_name, safe="")
-            if file_name.endswith(".mp4"):
-                src_url = f"https://openani.an-i.workers.dev/{use_season}/{encoded_filename}?d=true"
-            else:
-                src_url = f"https://openani.an-i.workers.dev/{use_season}/{encoded_filename}.mp4?d=true"
+            # 移除所有.mp4后缀，然后统一添加一个.mp4
+            clean_name = file_name
+            while clean_name.endswith(".mp4"):
+                clean_name = clean_name[:-4]
+            
+            encoded_filename = quote(clean_name, safe="")
+            src_url = f"https://openani.an-i.workers.dev/{use_season}/{encoded_filename}.mp4?d=true"
         else:
             # 检查API获取的URL格式是否符合要求
             if self._is_url_format_valid(file_url):
@@ -507,7 +519,10 @@ class ANiStrmNew(_PluginBase):
 
         # 获取所有季度的番剧列表
         all_files = self.get_all_seasons_list()
-        logger.info(f"从开始年份季度到当前，共获取 {len(all_files)} 个番剧文件")
+        if self._full_download:
+            logger.info(f"全量下载模式：从开始年份季度到当前，共获取 {len(all_files)} 个番剧文件")
+        else:
+            logger.info(f"当前季度模式：共获取 {len(all_files)} 个番剧文件")
 
         # 处理每个文件
         for file_info in all_files:
@@ -570,6 +585,19 @@ class ANiStrmNew(_PluginBase):
                                     }
                                 ],
                             },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "full_download",
+                                            "label": "全量下载",
+                                        },
+                                    }
+                                ],
+                            },
                         ],
                     },
                     {
@@ -607,6 +635,9 @@ class ANiStrmNew(_PluginBase):
                     },
                     {
                         "component": "VRow",
+                        "props": {
+                            "v-show": "full_download"
+                        },
                         "content": [
                             {
                                 "component": "VCol",
@@ -662,7 +693,9 @@ class ANiStrmNew(_PluginBase):
                                             + "\n"
                                             + "通过目录监控转移到link媒体库文件夹 如/downloads/link/strm  mp会完成刮削"
                                             + "\n"
-                                            + "插件会从设置的开始年份季度获取到当前的所有番剧，已处理的会自动跳过",
+                                            + "默认只获取当前季度番剧，开启全量下载后会从设置的开始年份季度获取到当前的所有番剧，已处理的会自动跳过"
+                                            + "\n"
+                                            + "全量下载执行完成后会自动关闭",
                                             "style": "white-space: pre-line;",
                                         },
                                     },
@@ -686,6 +719,7 @@ class ANiStrmNew(_PluginBase):
         ], {
             "enabled": False,
             "onlyonce": False,
+            "full_download": False,
             "storageplace": "/downloads/strm",
             "cron": "*/20 22,23,0,1 * * *",
             "start_year": "2019",
@@ -697,6 +731,7 @@ class ANiStrmNew(_PluginBase):
         self.update_config(
             {
                 "onlyonce": self._onlyonce,
+                "full_download": self._full_download,
                 "cron": self._cron,
                 "enabled": self._enabled,
                 "storageplace": self._storageplace,
