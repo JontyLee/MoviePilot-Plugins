@@ -339,7 +339,11 @@ class ANiStrmNew(_PluginBase):
                             # We only care about video files, not sub-folders or other types
                             if "video" in file.get("mimeType", ""):
                                 all_files.append(
-                                    {"name": file["name"], "season": season}
+                                    {
+                                        "name": file["name"],
+                                        "season": season,
+                                        "folder": folder_name,
+                                    }
                                 )
 
                     except Exception as e:
@@ -407,7 +411,7 @@ class ANiStrmNew(_PluginBase):
             return False
 
     def __touch_strm_file(
-        self, file_name, season: str = None, file_url: str = None
+        self, file_name, season: str = None, file_url: str = None, folder: str = None
     ) -> bool:
         """创建strm文件，按照年份季度/番剧名称/文件名.strm的目录结构"""
         # 检查是否已处理过
@@ -441,14 +445,27 @@ class ANiStrmNew(_PluginBase):
             return False
 
         if not file_url:
-            # 季度API生成的URL，使用新格式
-            # 移除所有.mp4后缀，然后统一添加一个.mp4
-            clean_name = file_name
-            while clean_name.endswith(".mp4"):
-                clean_name = clean_name[:-4]
+            # 季度API生成的URL，根据文件后缀动态生成
+            # 直接截取最后一个点号后的扩展名
+            if "." in file_name:
+                # 找到最后一个点的位置
+                last_dot_index = file_name.rfind(".")
+                file_ext = file_name[last_dot_index + 1:]  # 扩展名（不含点号）
+                clean_name = file_name[:last_dot_index]  # 去掉扩展名的文件名
+            else:
+                # 没有扩展名，默认使用 mp4
+                file_ext = "mp4"
+                clean_name = file_name
             
+            # 构建URL，如果有二级目录（folder），需要加上
             encoded_filename = quote(clean_name, safe="")
-            src_url = f"https://openani.an-i.workers.dev/{use_season}/{encoded_filename}.mp4?d=true"
+            if folder:
+                # 有二级目录：season/folder/filename?d=ext
+                encoded_folder = quote(folder, safe="")
+                src_url = f"https://openani.an-i.workers.dev/{use_season}/{encoded_folder}/{encoded_filename}?d={file_ext}"
+            else:
+                # 没有二级目录：season/filename?d=ext
+                src_url = f"https://openani.an-i.workers.dev/{use_season}/{encoded_filename}?d={file_ext}"
         else:
             # 检查API获取的URL格式是否符合要求
             if self._is_url_format_valid(file_url):
@@ -570,7 +587,9 @@ class ANiStrmNew(_PluginBase):
         # 处理每个文件
         for file_info in all_files:
             if self.__touch_strm_file(
-                file_name=file_info["name"], season=file_info["season"]
+                file_name=file_info["name"],
+                season=file_info["season"],
+                folder=file_info.get("folder"),
             ):
                 cnt += 1
 
