@@ -363,34 +363,6 @@ class ANiStrmNew(_PluginBase):
         return all_files
 
     @retry(Exception, tries=3, logger=logger, ret=[])
-    def get_latest_list(self) -> List:
-        addr = "https://api.ani.rip/ani-download.xml"
-        ret = RequestUtils(
-            ua=settings.USER_AGENT if settings.USER_AGENT else None,
-            proxies=settings.PROXY if settings.PROXY else None,
-        ).get_res(addr)
-        ret_xml = ret.text
-        ret_array = []
-        # 解析XML
-        dom_tree = xml.dom.minidom.parseString(ret_xml)
-        rootNode = dom_tree.documentElement
-        items = rootNode.getElementsByTagName("item")
-        for item in items:
-            rss_info = {}
-            # 标题
-            title = DomUtils.tag_value(item, "title", default="")
-            # 链接
-            link = DomUtils.tag_value(item, "link", default="")
-            rss_info["title"] = title
-            # 替换域名并确保URL格式正确
-            link = link.replace("resources.ani.rip", "openani.an-i.workers.dev")
-            # 确保URL格式为 .mp4?d=true
-            if not link.endswith(".mp4?d=true"):
-                link = self._convert_url_format(link)
-            rss_info["link"] = link
-            ret_array.append(rss_info)
-        return ret_array
-
     def _validate_strm_url(self, url: str) -> bool:
         """验证 strm URL 是否可访问"""
         try:
@@ -399,19 +371,21 @@ class ANiStrmNew(_PluginBase):
                 ua=settings.USER_AGENT if settings.USER_AGENT else None,
                 proxies=settings.PROXY if settings.PROXY else None,
             ).get_res(url, allow_redirects=True, timeout=10)
-            
+
             if response and response.status_code in [200, 206, 302, 301]:
                 logger.debug(f"URL 验证成功: {url[:100]}...")
                 return True
             else:
-                logger.warning(f"URL 验证失败 (状态码: {response.status_code if response else 'None'}): {url[:100]}...")
+                logger.warning(
+                    f"URL 验证失败 (状态码: {response.status_code if response else 'None'}): {url[:100]}..."
+                )
                 return False
         except Exception as e:
             logger.warning(f"URL 验证异常: {str(e)[:100]}")
             return False
 
     def __touch_strm_file(
-        self, file_name, season: str = None, file_url: str = None, folder: str = None
+        self, file_name, season: str = None, folder: str = None
     ) -> bool:
         """创建strm文件，按照年份季度/番剧名称/文件名.strm的目录结构"""
         # 检查是否已处理过
@@ -444,36 +418,27 @@ class ANiStrmNew(_PluginBase):
             }
             return False
 
-        if not file_url:
-            # 季度API生成的URL，根据文件后缀动态生成
-            # 直接截取最后一个点号后的扩展名
-            if "." in file_name:
-                # 找到最后一个点的位置
-                last_dot_index = file_name.rfind(".")
-                file_ext = file_name[last_dot_index + 1:]  # 扩展名（不含点号）
-                clean_name = file_name[:last_dot_index]  # 去掉扩展名的文件名
-            else:
-                # 没有扩展名，默认使用 mp4
-                file_ext = "mp4"
-                clean_name = file_name
-            
-            # 构建URL，如果有二级目录（folder），需要加上
-            encoded_filename = quote(clean_name, safe="")
-            if folder:
-                # 有二级目录：season/folder/filename?d=ext
-                encoded_folder = quote(folder, safe="")
-                src_url = f"https://openani.an-i.workers.dev/{use_season}/{encoded_folder}/{encoded_filename}?d={file_ext}"
-            else:
-                # 没有二级目录：season/filename?d=ext
-                src_url = f"https://openani.an-i.workers.dev/{use_season}/{encoded_filename}?d={file_ext}"
+        # 季度API生成的URL，根据文件后缀动态生成
+        # 直接截取最后一个点号后的扩展名
+        if "." in file_name:
+            # 找到最后一个点的位置
+            last_dot_index = file_name.rfind(".")
+            file_ext = file_name[last_dot_index + 1 :]  # 扩展名（不含点号）
+            clean_name = file_name[:last_dot_index]  # 去掉扩展名的文件名
         else:
-            # 检查API获取的URL格式是否符合要求
-            if self._is_url_format_valid(file_url):
-                # 格式符合要求，直接使用
-                src_url = file_url
-            else:
-                # 格式不符合要求，进行转换
-                src_url = self._convert_url_format(file_url)
+            # 没有扩展名，默认使用 mp4
+            file_ext = "mp4"
+            clean_name = file_name
+
+        # 构建URL，如果有二级目录（folder），需要加上
+        encoded_filename = quote(clean_name, safe="")
+        if folder:
+            # 有二级目录：season/folder/filename?d=ext
+            encoded_folder = quote(folder, safe="")
+            src_url = f"https://openani.an-i.workers.dev/{use_season}/{encoded_folder}/{encoded_filename}.{file_ext}?d=true"
+        else:
+            # 没有二级目录：season/filename?d=ext
+            src_url = f"https://openani.an-i.workers.dev/{use_season}/{encoded_filename}.{file_ext}?d=true"
 
         try:
             # 创建目录（如果不存在）
@@ -482,28 +447,26 @@ class ANiStrmNew(_PluginBase):
             # 创建strm文件
             with open(file_path, "w", encoding="utf-8") as file:
                 file.write(src_url)
-            
+
             # 验证文件是否创建成功
             if not os.path.exists(file_path):
                 logger.error(f"strm 文件创建失败: {file_path}")
                 return False
-            
+
             # 验证文件内容
             with open(file_path, "r", encoding="utf-8") as file:
                 content = file.read().strip()
                 if content != src_url:
                     logger.error(f"strm 文件内容验证失败: {file_path}")
                     return False
-            
+
             # 验证文件权限（确保可读）
             if not os.access(file_path, os.R_OK):
                 logger.warning(f"strm 文件权限不足，尝试修改: {file_path}")
                 os.chmod(file_path, 0o644)
-            
-            logger.debug(
-                f"创建 {use_season}/{anime_name}/{file_name}.strm 文件成功"
-            )
-            
+
+            logger.debug(f"创建 {use_season}/{anime_name}/{file_name}.strm 文件成功")
+
             # 添加到处理记录
             self._processed_files[file_name] = {
                 "season": season,
@@ -540,31 +503,6 @@ class ANiStrmNew(_PluginBase):
 
         return name
 
-    def _is_url_format_valid(self, url: str) -> bool:
-        """检查URL格式是否符合要求（.mp4?d=true）"""
-        return url.endswith(".mp4?d=true")
-
-    def _convert_url_format(self, url: str) -> str:
-        """将URL转换为符合要求的格式"""
-        if "?d=mp4" in url:
-            # 将 ?d=mp4 替换为 .mp4?d=true
-            url = url.replace("?d=mp4", ".mp4?d=true")
-
-        parts = url.split("?")
-        path = parts[0]
-        query = parts[1] if len(parts) > 1 else ""
-
-        if not path.endswith(".mp4"):
-            path += ".mp4"
-
-        query_params = query.split("&") if query else []
-        if not any(p.startswith("d=") for p in query_params):
-            query_params.append("d=true")
-
-        query = "&".join(filter(None, query_params))
-
-        return f"{path}?{query}"
-
     def __task(self):
         """统一的增量处理任务"""
         # 验证存储路径
@@ -580,7 +518,9 @@ class ANiStrmNew(_PluginBase):
         # 获取所有季度的番剧列表
         all_files = self.get_all_seasons_list()
         if self._full_download:
-            logger.info(f"全量下载模式：从开始年份季度到当前，共获取 {len(all_files)} 个番剧文件")
+            logger.info(
+                f"全量下载模式：从开始年份季度到当前，共获取 {len(all_files)} 个番剧文件"
+            )
         else:
             logger.info(f"当前季度模式：共获取 {len(all_files)} 个番剧文件")
 
@@ -720,9 +660,7 @@ class ANiStrmNew(_PluginBase):
                     },
                     {
                         "component": "VRow",
-                        "props": {
-                            "v-show": "full_download"
-                        },
+                        "props": {"v-show": "full_download"},
                         "content": [
                             {
                                 "component": "VCol",
@@ -848,5 +786,5 @@ class ANiStrmNew(_PluginBase):
 
 if __name__ == "__main__":
     anistrm = ANiStrmNew()
-    name_list = anistrm.get_latest_list()
+    name_list = anistrm.get_current_season_list()
     print(name_list)
