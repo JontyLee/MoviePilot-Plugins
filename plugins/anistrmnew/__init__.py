@@ -141,8 +141,6 @@ class ANiStrmNew(_PluginBase):
                 )
                 # 关闭一次性开关
                 self._onlyonce = False
-                # 关闭全量下载开关
-                self._full_download = False
 
             self.__update_config()
 
@@ -177,11 +175,14 @@ class ANiStrmNew(_PluginBase):
         start_year = int(self._start_year) if self._start_year else 2019
         start_season = int(self._start_season) if self._start_season else 1
 
+        logger.info(f"全量下载模式：从 {start_year}-{start_season} 开始获取番剧")
+
         seasons = []
         season_months = [1, 4, 7, 10]
 
         # 确保开始季度是有效的季度月份
         if start_season not in season_months:
+            logger.warning(f"开始季度 {start_season} 无效，已调整为 1 月")
             start_season = 1
 
         for year in range(start_year, current_year + 1):
@@ -388,8 +389,8 @@ class ANiStrmNew(_PluginBase):
         self, file_name, season: str = None, file_url: str = None
     ) -> bool:
         """创建strm文件，按照年份季度/番剧名称/文件名.strm的目录结构"""
-        # 检查是否已处理过
-        if file_name in self._processed_files:
+        # 检查是否已处理过（全量下载模式下忽略已处理记录）
+        if not self._full_download and file_name in self._processed_files:
             logger.debug(f"{file_name} 已在处理记录中，跳过")
             return False
 
@@ -531,6 +532,11 @@ class ANiStrmNew(_PluginBase):
             ):
                 cnt += 1
 
+        # 如果是全量下载模式，执行完成后关闭
+        if self._full_download:
+            logger.info("全量下载任务执行完成，关闭全量下载开关")
+            self._full_download = False
+
         # 保存处理记录
         self.__update_config()
 
@@ -649,7 +655,6 @@ class ANiStrmNew(_PluginBase):
                                             "model": "start_year",
                                             "label": "开始年份",
                                             "placeholder": "2019",
-                                            "type": "number",
                                         },
                                     }
                                 ],
@@ -722,7 +727,7 @@ class ANiStrmNew(_PluginBase):
             "full_download": False,
             "storageplace": "/downloads/strm",
             "cron": "*/20 22,23,0,1 * * *",
-            "start_year": "2019",
+            "start_year": 2019,
             "start_season": 1,
             "processed_files": {},
         }
