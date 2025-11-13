@@ -86,6 +86,7 @@ class ANiStrmNew(_PluginBase):
     _start_year = None
     _start_season = None
     _full_download = False
+    _overwrite_existing = False
     # 处理记录点：记录已处理的番剧
     _processed_files = {}
     # 当前季度
@@ -106,6 +107,7 @@ class ANiStrmNew(_PluginBase):
             self._start_year = config.get("start_year")
             self._start_season = config.get("start_season")
             self._full_download = config.get("full_download")
+            self._overwrite_existing = config.get("overwrite_existing")
             self._processed_files = config.get("processed_files", {})
 
             # 验证存储路径
@@ -385,12 +387,32 @@ class ANiStrmNew(_PluginBase):
             ret_array.append(rss_info)
         return ret_array
 
+    def _validate_strm_url(self, url: str) -> bool:
+        """验证 strm URL 是否可访问"""
+        try:
+            # 发送 HEAD 请求检查 URL 是否可访问
+            response = RequestUtils(
+                ua=settings.USER_AGENT if settings.USER_AGENT else None,
+                proxies=settings.PROXY if settings.PROXY else None,
+            ).get_res(url, allow_redirects=True, timeout=10)
+            
+            if response and response.status_code in [200, 206, 302, 301]:
+                logger.debug(f"URL 验证成功: {url[:100]}...")
+                return True
+            else:
+                logger.warning(f"URL 验证失败 (状态码: {response.status_code if response else 'None'}): {url[:100]}...")
+                return False
+        except Exception as e:
+            logger.warning(f"URL 验证异常: {str(e)[:100]}")
+            return False
+
     def __touch_strm_file(
         self, file_name, season: str = None, file_url: str = None
     ) -> bool:
         """创建strm文件，按照年份季度/番剧名称/文件名.strm的目录结构"""
-        # 检查是否已处理过（全量下载模式下忽略已处理记录）
-        if not self._full_download and file_name in self._processed_files:
+        # 检查是否已处理过
+        # 只有在未勾选"覆盖本地已有文件"且不是全量下载模式时，才跳过已处理记录
+        if not self._overwrite_existing and file_name in self._processed_files:
             logger.debug(f"{file_name} 已在处理记录中，跳过")
             return False
 
@@ -441,18 +463,38 @@ class ANiStrmNew(_PluginBase):
             os.makedirs(dir_path, exist_ok=True)
 
             # 创建strm文件
-            with open(file_path, "w") as file:
+            with open(file_path, "w", encoding="utf-8") as file:
                 file.write(src_url)
-                logger.debug(
-                    f"创建 {use_season}/{anime_name}/{file_name}.strm 文件成功"
-                )
-                # 添加到处理记录
-                self._processed_files[file_name] = {
-                    "season": season,
-                    "anime_name": anime_name,
-                    "created_at": datetime.now().isoformat(),
-                }
-                return True
+            
+            # 验证文件是否创建成功
+            if not os.path.exists(file_path):
+                logger.error(f"strm 文件创建失败: {file_path}")
+                return False
+            
+            # 验证文件内容
+            with open(file_path, "r", encoding="utf-8") as file:
+                content = file.read().strip()
+                if content != src_url:
+                    logger.error(f"strm 文件内容验证失败: {file_path}")
+                    return False
+            
+            # 验证文件权限（确保可读）
+            if not os.access(file_path, os.R_OK):
+                logger.warning(f"strm 文件权限不足，尝试修改: {file_path}")
+                os.chmod(file_path, 0o644)
+            
+            logger.debug(
+                f"创建 {use_season}/{anime_name}/{file_name}.strm 文件成功"
+            )
+            
+            # 添加到处理记录
+            self._processed_files[file_name] = {
+                "season": season,
+                "anime_name": anime_name,
+                "created_at": datetime.now().isoformat(),
+                "url": src_url,
+            }
+            return True
         except Exception as e:
             logger.error(f"创建strm源文件失败：{str(e)}")
             return False
@@ -614,6 +656,24 @@ class ANiStrmNew(_PluginBase):
                                 "props": {"cols": 12, "md": 4},
                                 "content": [
                                     {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "overwrite_existing",
+                                            "label": "覆盖本地已有文件",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
                                         "component": "VTextField",
                                         "props": {
                                             "model": "cron",
@@ -698,9 +758,11 @@ class ANiStrmNew(_PluginBase):
                                             + "\n"
                                             + "通过目录监控转移到link媒体库文件夹 如/downloads/link/strm  mp会完成刮削"
                                             + "\n"
-                                            + "默认只获取当前季度番剧，开启全量下载后会从设置的开始年份季度获取到当前的所有番剧，已处理的会自动跳过"
+                                            + "默认只获取当前季度番剧，开启全量下载后会从设置的开始年份季度获取到当前的所有番剧"
                                             + "\n"
-                                            + "全量下载执行完成后会自动关闭",
+                                            + "全量下载执行完成后会自动关闭"
+                                            + "\n"
+                                            + "勾选'覆盖本地已有文件'后，会跳过已处理记录，重新创建所有文件",
                                             "style": "white-space: pre-line;",
                                         },
                                     },
@@ -725,6 +787,7 @@ class ANiStrmNew(_PluginBase):
             "enabled": False,
             "onlyonce": False,
             "full_download": False,
+            "overwrite_existing": False,
             "storageplace": "/downloads/strm",
             "cron": "*/20 22,23,0,1 * * *",
             "start_year": 2019,
@@ -737,6 +800,7 @@ class ANiStrmNew(_PluginBase):
             {
                 "onlyonce": self._onlyonce,
                 "full_download": self._full_download,
+                "overwrite_existing": self._overwrite_existing,
                 "cron": self._cron,
                 "enabled": self._enabled,
                 "storageplace": self._storageplace,
