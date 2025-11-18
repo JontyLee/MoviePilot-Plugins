@@ -63,13 +63,13 @@ class ANiStrmNew(_PluginBase):
     # 插件描述
     plugin_desc = "自动获取当季所有番剧，生成strm文件，mp刮削入库，emby直接播放，免去下载，轻松拥有一个番剧媒体库"
     # 插件图标
-    plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/anistrm.png"
+    plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/anistrm.png"
     # 插件版本
     plugin_version = "2.4.6"
     # 插件作者
-    plugin_author = "honue"
+    plugin_author = "JontyLee"
     # 作者主页
-    author_url = "https://github.com/honue"
+    author_url = "https://github.com/JontyLee"
     # 插件配置项ID前缀
     plugin_config_prefix = "anistrmnew_"
     # 加载顺序
@@ -538,6 +538,9 @@ class ANiStrmNew(_PluginBase):
             logger.info("全量下载任务执行完成，关闭全量下载开关")
             self._full_download = False
 
+        if self._overwrite_existing:
+            logger.info("下载任务执行完成，关闭覆盖本地已有文件开关")
+            self._overwrite_existing = False
         # 保存处理记录
         self.__update_config()
 
