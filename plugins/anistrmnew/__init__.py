@@ -87,6 +87,7 @@ class ANiStrmNew(_PluginBase):
     _start_season = None
     _full_download = False
     _overwrite_existing = False
+    _sync_ani_dir = False
     # 处理记录点：记录已处理的番剧
     _processed_files = {}
     # 当前季度
@@ -108,6 +109,7 @@ class ANiStrmNew(_PluginBase):
             self._start_season = config.get("start_season")
             self._full_download = config.get("full_download")
             self._overwrite_existing = config.get("overwrite_existing")
+            self._sync_ani_dir = config.get("sync_ani_dir")
             self._processed_files = config.get("processed_files", {})
 
             # 验证存储路径
@@ -363,6 +365,102 @@ class ANiStrmNew(_PluginBase):
         return all_files
 
     @retry(Exception, tries=3, logger=logger, ret=[])
+    def get_ani_list(self) -> List[Dict]:
+        """获取ANi目录的番剧列表"""
+        all_files = []
+        url = f"https://openani.an-i.workers.dev/ANi/"
+        logger.info(f"准备获取 ANi 目录的番剧")
+
+        headers = {
+            "accept": "*/*",
+            "accept-language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
+            "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "origin": "https://openani.an-i.workers.dev",
+            "priority": "u=1, i",
+            "referer": "https://openani.an-i.workers.dev/",
+            "sec-ch-ua": '"Chromium";v="142", "Microsoft Edge";v="142", "Not_A Brand";v="99"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"macOS"',
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin",
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36 Edg/142.0.0.0",
+            "x-requested-with": "XMLHttpRequest",
+        }
+        data = '{"password":"null"}'
+
+        try:
+            # First request: get anime folders in ANi dir
+            rep = RequestUtils(
+                ua=settings.USER_AGENT if settings.USER_AGENT else None,
+                proxies=settings.PROXY if settings.PROXY else None,
+            ).post(url=url, headers=headers, data=data)
+
+            if not (rep and rep.status_code == 200):
+                logger.warning(
+                    f'获取 ANi 目录失败: HTTP {rep.status_code if rep else "无响应"}'
+                )
+                return all_files
+
+            anime_folders = rep.json().get("files", [])
+            logger.info(f"获取 ANi 目录: {len(anime_folders)} 个番剧文件夹")
+
+            # Second level: get episode files from each anime folder
+            for folder in anime_folders:
+                if folder.get("mimeType") != "application/vnd.google-apps.folder":
+                    continue
+
+                try:
+                    folder_name = folder.get("name")
+                    encoded_folder_name = quote(folder_name)
+                    folder_url = (
+                        f"https://openani.an-i.workers.dev/ANi/{encoded_folder_name}/"
+                    )
+
+                    # Update referer for the nested request
+                    nested_headers = headers.copy()
+                    nested_headers["referer"] = folder_url
+
+                    folder_rep = RequestUtils(
+                        ua=settings.USER_AGENT if settings.USER_AGENT else None,
+                        proxies=settings.PROXY if settings.PROXY else None,
+                    ).post(url=folder_url, headers=nested_headers, data=data)
+
+                    if not (folder_rep and folder_rep.status_code == 200):
+                        logger.warning(
+                            f'获取番剧 {folder_name} 内容失败: HTTP {folder_rep.status_code if folder_rep else "无响应"}'
+                        )
+                        continue
+
+                    episode_files = folder_rep.json().get("files", [])
+                    logger.info(
+                        f"  获取 {folder_name}: {len(episode_files)} 个剧集文件"
+                    )
+
+                    for file in episode_files:
+                        # We only care about video files, not sub-folders or other types
+                        if "video" in file.get("mimeType", ""):
+                            all_files.append(
+                                {
+                                    "name": file["name"],
+                                    "season": "ANi",
+                                    "folder": folder_name,
+                                }
+                            )
+
+                except Exception as e:
+                    logger.warning(
+                        f'处理番剧文件夹 {folder.get("name")} 时出错: {str(e)}'
+                    )
+                    continue
+
+        except Exception as e:
+            logger.warning(f"获取 ANi 目录失败: {str(e)}")
+
+        logger.info(f"总共从ANi目录获取到 {len(all_files)} 个番剧文件")
+        return all_files
+
+    @retry(Exception, tries=3, logger=logger, ret=[])
     def _validate_strm_url(self, url: str) -> bool:
         """验证 strm URL 是否可访问"""
         try:
@@ -524,6 +622,13 @@ class ANiStrmNew(_PluginBase):
         else:
             logger.info(f"当前季度模式：共获取 {len(all_files)} 个番剧文件")
 
+        if self._sync_ani_dir:
+            logger.info("ANi目录同步已开启，开始获取番剧列表...")
+            ani_files = self.get_ani_list()
+            all_files.extend(ani_files)
+            logger.info(f"ANi目录同步完成，共获取 {len(ani_files)} 个番剧文件")
+            self._sync_ani_dir = False
+
         # 处理每个文件
         for file_info in all_files:
             if self.__touch_strm_file(
@@ -604,6 +709,19 @@ class ANiStrmNew(_PluginBase):
                                         "props": {
                                             "model": "full_download",
                                             "label": "全量下载",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "sync_ani_dir",
+                                            "label": "同步ANi目录",
                                         },
                                     }
                                 ],
@@ -747,6 +865,7 @@ class ANiStrmNew(_PluginBase):
             "enabled": False,
             "onlyonce": False,
             "full_download": False,
+            "sync_ani_dir": False,
             "overwrite_existing": False,
             "storageplace": "/downloads/strm",
             "cron": "*/20 22,23,0,1 * * *",
@@ -761,6 +880,7 @@ class ANiStrmNew(_PluginBase):
                 "onlyonce": self._onlyonce,
                 "full_download": self._full_download,
                 "overwrite_existing": self._overwrite_existing,
+                "sync_ani_dir": self._sync_ani_dir,
                 "cron": self._cron,
                 "enabled": self._enabled,
                 "storageplace": self._storageplace,
