@@ -65,7 +65,7 @@ class ANiStrmNew(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/anistrm.png"
     # 插件版本
-    plugin_version = "2.4.6"
+    plugin_version = "2.4.7"
     # 插件作者
     plugin_author = "JontyLee"
     # 作者主页
@@ -234,33 +234,37 @@ class ANiStrmNew(_PluginBase):
         anime_folders = rep.json().get("files", [])
         episode_files_list = []
 
-        for folder in anime_folders:
-            if folder.get("mimeType") != "application/vnd.google-apps.folder":
-                continue
+        for item in anime_folders:
+            # Case 1: Item is a folder
+            if item.get("mimeType") == "application/vnd.google-apps.folder":
+                try:
+                    folder_name = item.get("name")
+                    encoded_folder_name = quote(folder_name)
+                    folder_url = f"https://openani.an-i.workers.dev/{season}/{encoded_folder_name}/"
 
-            try:
-                folder_name = folder.get("name")
-                encoded_folder_name = quote(folder_name)
-                folder_url = (
-                    f"https://openani.an-i.workers.dev/{season}/{encoded_folder_name}/"
-                )
+                    nested_headers = headers.copy()
+                    nested_headers["referer"] = folder_url
 
-                nested_headers = headers.copy()
-                nested_headers["referer"] = folder_url
+                    folder_rep = RequestUtils(
+                        ua=settings.USER_AGENT if settings.USER_AGENT else None,
+                        proxies=settings.PROXY if settings.PROXY else None,
+                    ).post(url=folder_url, headers=nested_headers, data=data)
 
-                folder_rep = RequestUtils(
-                    ua=settings.USER_AGENT if settings.USER_AGENT else None,
-                    proxies=settings.PROXY if settings.PROXY else None,
-                ).post(url=folder_url, headers=nested_headers, data=data)
-
-                if folder_rep and folder_rep.status_code == 200:
-                    episodes = folder_rep.json().get("files", [])
-                    for file in episodes:
-                        if "video" in file.get("mimeType", ""):
-                            episode_files_list.append(file["name"])
-            except Exception as e:
-                logger.warning(f'处理番剧文件夹 {folder.get("name")} 时出错: {str(e)}')
-                continue
+                    if folder_rep and folder_rep.status_code == 200:
+                        episodes = folder_rep.json().get("files", [])
+                        for file in episodes:
+                            if "video" in file.get("mimeType", ""):
+                                episode_files_list.append(file["name"])
+                except Exception as e:
+                    logger.warning(
+                        f'处理番剧文件夹 {item.get("name")} 时出错: {str(e)}'
+                    )
+                    continue
+            # Case 2: Item is a video file directly in the season directory
+            elif "video" in item.get("mimeType", ""):
+                file_name = item.get("name")
+                logger.info(f"  发现根目录文件: {file_name}")
+                episode_files_list.append(file_name)
 
         return episode_files_list
 
@@ -308,51 +312,53 @@ class ANiStrmNew(_PluginBase):
                 logger.info(f"获取 {season} 季度: {len(anime_folders)} 个番剧文件夹")
 
                 # Second level: get episode files from each anime folder
-                for folder in anime_folders:
-                    if folder.get("mimeType") != "application/vnd.google-apps.folder":
-                        continue
+                for item in anime_folders:
+                    if item.get("mimeType") == "application/vnd.google-apps.folder":
+                        try:
+                            folder_name = item.get("name")
+                            encoded_folder_name = quote(folder_name)
+                            folder_url = f"https://openani.an-i.workers.dev/{season}/{encoded_folder_name}/"
 
-                    try:
-                        folder_name = folder.get("name")
-                        encoded_folder_name = quote(folder_name)
-                        folder_url = f"https://openani.an-i.workers.dev/{season}/{encoded_folder_name}/"
+                            # Update referer for the nested request
+                            nested_headers = headers.copy()
+                            nested_headers["referer"] = folder_url
 
-                        # Update referer for the nested request
-                        nested_headers = headers.copy()
-                        nested_headers["referer"] = folder_url
+                            folder_rep = RequestUtils(
+                                ua=settings.USER_AGENT if settings.USER_AGENT else None,
+                                proxies=settings.PROXY if settings.PROXY else None,
+                            ).post(url=folder_url, headers=nested_headers, data=data)
 
-                        folder_rep = RequestUtils(
-                            ua=settings.USER_AGENT if settings.USER_AGENT else None,
-                            proxies=settings.PROXY if settings.PROXY else None,
-                        ).post(url=folder_url, headers=nested_headers, data=data)
+                            if not (folder_rep and folder_rep.status_code == 200):
+                                logger.warning(
+                                    f'获取番剧 {folder_name} 内容失败: HTTP {folder_rep.status_code if folder_rep else "无响应"}'
+                                )
+                                continue
 
-                        if not (folder_rep and folder_rep.status_code == 200):
+                            episode_files = folder_rep.json().get("files", [])
+                            logger.info(
+                                f"  获取 {folder_name}: {len(episode_files)} 个剧集文件"
+                            )
+
+                            for file in episode_files:
+                                # We only care about video files, not sub-folders or other types
+                                if "video" in file.get("mimeType", ""):
+                                    all_files.append(
+                                        {
+                                            "name": file["name"],
+                                            "season": season,
+                                            "folder": folder_name,
+                                        }
+                                    )
+
+                        except Exception as e:
                             logger.warning(
-                                f'获取番剧 {folder_name} 内容失败: HTTP {folder_rep.status_code if folder_rep else "无响应"}'
+                                f'处理番剧文件夹 {item.get("name")} 时出错: {str(e)}'
                             )
                             continue
-
-                        episode_files = folder_rep.json().get("files", [])
-                        logger.info(
-                            f"  获取 {folder_name}: {len(episode_files)} 个剧集文件"
-                        )
-
-                        for file in episode_files:
-                            # We only care about video files, not sub-folders or other types
-                            if "video" in file.get("mimeType", ""):
-                                all_files.append(
-                                    {
-                                        "name": file["name"],
-                                        "season": season,
-                                        "folder": folder_name,
-                                    }
-                                )
-
-                    except Exception as e:
-                        logger.warning(
-                            f'处理番剧文件夹 {folder.get("name")} 时出错: {str(e)}'
-                        )
-                        continue
+                    elif "video" in item.get("mimeType", ""):
+                        file_name = item.get("name")
+                        logger.info(f"  发现根目录文件: {file_name}")
+                        all_files.append({"name": file_name, "season": season})
 
                 # Add delay between seasons
                 time.sleep(0.5)
