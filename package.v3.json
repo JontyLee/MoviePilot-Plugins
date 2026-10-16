@@ -1,0 +1,16 @@
+{
+  "MusicLibraryScraper": {
+    "name": "音乐库刮削 (MTW)",
+    "description": "定时扫描音乐目录，用 Music Tag Web 的网易云/QQ/酷我等源做识别，写入沿用 MP 原生 ScrapingChain 链路。",
+    "labels": "音乐,刮削",
+    "version": "0.1.0",
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/163music_A.png",
+    "author": "JontyLee",
+    "level": 1,
+    "release": true,
+    "system_version": ">=3.1.2",
+    "history": {
+      "v0.1.0": "初版：MTW fetch_id3_by_title 候选 + MP ScrapingChain 写入；跳过已打 tag；Jellyfin .trickplay 排除。"
+    }
+  }
+}
