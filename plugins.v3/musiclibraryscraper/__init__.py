@@ -133,10 +133,10 @@ class MusicLibraryScraper(_PluginBase):
                 name="音乐库刮削",
             )
         elif self._enabled:
-            logger.info("[music-scraper] 未配置 cron，使用默认 0 3 * * 7")
+            logger.info("[music-scraper] 未配置 cron，使用默认 0 3 * * 0")
             self._scheduler.add_job(
                 func=self.__scan,
-                trigger=CronTrigger.from_crontab("0 3 * * 7"),
+                trigger=CronTrigger.from_crontab("0 3 * * 0"),
                 name="音乐库刮削",
             )
 
@@ -193,7 +193,7 @@ class MusicLibraryScraper(_PluginBase):
                     {"component": "VRow", "content": [
                         {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                             {"component": "VCronField", "props": {
-                                "model": "cron", "label": "执行周期", "placeholder": "5 位 cron，留空默认 0 3 * * 7"
+                                "model": "cron", "label": "执行周期", "placeholder": "5 位 cron，留空默认 0 3 * * 0"
                             }}
                         ]},
                         {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
@@ -274,7 +274,7 @@ class MusicLibraryScraper(_PluginBase):
             "enabled": False,
             "onlyonce": False,
             "mode": "",
-            "cron": "0 3 * * 7",
+            "cron": "0 3 * * 0",
             "scraper_paths": "",
             "exclude_paths": "",
             "mtw_base_url": "",
