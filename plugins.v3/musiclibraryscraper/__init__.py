@@ -125,18 +125,19 @@ class MusicLibraryScraper(_PluginBase):
         if self._enabled and not self._scheduler:
             self._scheduler = BackgroundScheduler(timezone=settings.TZ)
 
-        if self._enabled and self._cron:
-            logger.info(f"[music-scraper] 注册定时任务 cron={self._cron}")
+        if self._enabled:
+            raw_cron = (self._cron or "").strip() or "0 3 * * 0"
+            try:
+                trigger = CronTrigger.from_crontab(raw_cron)
+            except (ValueError, KeyError) as err:
+                logger.warning(
+                    f"[music-scraper] cron 表达式非法：{raw_cron!r} → {err}，回落默认 0 3 * * 0"
+                )
+                trigger = CronTrigger.from_crontab("0 3 * * 0")
+            logger.info(f"[music-scraper] 注册定时任务 cron={raw_cron}")
             self._scheduler.add_job(
                 func=self.__scan,
-                trigger=CronTrigger.from_crontab(self._cron),
-                name="音乐库刮削",
-            )
-        elif self._enabled:
-            logger.info("[music-scraper] 未配置 cron，使用默认 0 3 * * 0")
-            self._scheduler.add_job(
-                func=self.__scan,
-                trigger=CronTrigger.from_crontab("0 3 * * 0"),
+                trigger=trigger,
                 name="音乐库刮削",
             )
 
