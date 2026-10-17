@@ -299,7 +299,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
             ]),
             _cache[15] || (_cache[15] = _createElementVNode("div", { class: "mb-2" }, [
               _createElementVNode("div", { class: "font-weight-medium" }, "查询与选取"),
-              _createTextVNode(" 每个文件按源顺序逐源查询，某源出现 3/3 满分候选就立刻停止，不再问后面的源；都没满分则合并所有候选取最高分。 分数为曲名 / 艺人 / 专辑 各 1 分（先做繁简与大小写归一，互相包含即算命中）；同分时按源顺序、同源内按 MTW 返回顺序取第一个。最高分仍低于「最低匹配分数」（默认 3，即要求三项全中）就记为失败、不写入。 这个阈值只在 1-3 之间生效，越界会按最近的一界执行：调到 1 表示只要曲名对上就写入，很容易把翻唱、钢琴版 当成原曲写进文件且无法回滚。 用于匹配的本地身份优先读文件已有的 tag，缺哪项就按 艺人/专辑 (年)/NN - 曲名 的目录结构兜底。 ")
+              _createTextVNode(" 每个文件按源顺序逐源查询，某源出现 3/3 满分候选就立刻停止，不再问后面的源；都没满分则合并所有候选取最高分。 分数为曲名 / 艺人 / 专辑 各 1 分（先做繁简与大小写归一，互相包含即算命中）；同分时按源顺序、同源内按 MTW 返回顺序取第一个。最高分仍低于「最低匹配分数」（默认 3，即要求三项全中）就记为失败、不写入。 这个阈值只在 1-3 之间生效，越界会按最近的一界执行：调到 1 表示只要曲名对上就写入，很容易把翻唱、钢琴版 当成原曲写进文件且无法回滚。 用于匹配的本地身份优先读文件已有的 tag，缺哪项就按 艺人/专辑 (年)/NN - 曲名 的目录结构兜底；只有严格位于「音乐库路径」之下的目录 才算艺人/专辑，库根本身的名字不参与猜测 —— 猜不出来就留空，宁可判「未达阈值」也不拿目录名凑一个假身份去改写标签（写进文件无法回滚）。 ")
             ], -1)),
             _createElementVNode("div", _hoisted_3, [
               _createElementVNode("div", _hoisted_4, "写入模式 · " + _toDisplayString(modeNote.value), 1),
@@ -348,6 +348,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const Config = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-9884b1d0"]]);
+const Config = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-c54eaf87"]]);
 
 export { Config as default };

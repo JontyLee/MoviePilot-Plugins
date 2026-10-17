@@ -108,6 +108,38 @@ v0.3.3（第二轮复盘）：
   会递归进软链目录，库内一个回环软链能让枚举永不返回、互斥槽被永久占住。
   /files?bucket=pending 的 30s TTL 缓存同时覆盖数据页搜索框每停顿一次的重算。
 
+v0.3.5（第四轮复盘）：
+- 内嵌封面终于判得出来：补空判据是 title+artist+album+内嵌封面，而封面只按帧名
+  tags.get("APIC") 直取 —— APIC 是可重复帧，mutagen 的取法是 getall("APIC")（键还带描述），
+  APEv2 的封面 key 更是 "Cover Art (Front)"，压根不在那份表里。后果比判不出来更贵：
+  已经刮齐标签、只差封面的 MP3/APE 会被永远判成"没齐"，每轮重打最多 7 次 MTW 请求，
+  候选不达标还白涨 retries，五轮之后一个本来完整的文件被永久列成超限。改成一整套读法
+  （通用 pictures 接口 + getall + 键名前缀/全名匹配）。这条链路此前一条测试都没有：
+  测试环境没有 mutagen，_read_music_tags 恒返回空值、has_cover 恒为 False。
+- 目录兜底的身份不再拿库根的名字当专辑、拿库根的上一级当艺人：/media/music/01 - 轨迹.flac
+  会得到 album="music"、artist="media"，这两个假身份既被当搜索词发给 MTW，比对又是双向
+  包含（want in got 也算命中），一个目录名就能白送两分 —— min_score 放宽到 1-2 时足以把
+  错的艺人写进文件，而写标签不可回滚。现在只认严格落在 scraper_paths 之下的目录，
+  猜不出来就留空判"未达阈值"。
+- 账本里的 retries 要归一成整数：它是 int(prev.get("retries", 0)) 直接吃的值，写成 null、
+  "三次" 或旧版本的 dict 都会抛 TypeError，而抛在逐文件循环里等于整轮中止 —— 崩的位置由
+  账本键序决定，下一轮枚举走到同一条路径还是同一个位置，那之后的文件永远处理不到、
+  汇总永远不落账、/status 一起 500。v0.3.3 说的"读账本时把坏条目归一"只归一了外层不是
+  dict 的条目，字段级坏值仍然会崩。
+- 单个文件把插件或宿主打崩不再带走整轮：__scrape_file 直接调用宿主 ScrapingChain，外面
+  一层保护都没有。落账每 60 秒一次，一轮跑到第七千个文件崩掉等于前面六千多个判断白做，
+  槽位释放、下一轮从头再跑。现在一个文件的异常只影响它自己（不记成功也不记失败，
+  下一轮照原样再来），连着出现按环境异常熔断，汇总新增 error 一档。
+- 复位停止信号挪进锁内、占位之前：此前 clear() 落在锁外，置位 → 出锁 → clear 之间挤进来
+  的 stop_service 会被抹掉，而它想停的正是紧接着这一轮 —— 界面按了"停止"、日志里一句
+  "收到停止信号"都没有。
+- 枚举的停止信号要挡住外层库循环：内层 break 只退掉当前这个库的 os.walk，下一个库照走，
+  按了停止还在扫全盘，走完后还被当成"这一轮扫过的文件"写进汇总。
+- /files 不认识的桶名不再悄悄落到 done 那一档：回显仍是请求的那个名字，调用方拿到一批
+  "已处理"的行却以为是自己传的桶。现在明确回 unknown_bucket、空列表。
+- 熔断与待处理口径不变：MTW 故障与处理异常都不记在文件头上，汇总的"待处理"仍按账本算，
+  和数据页的桶一致（顺带删掉计数器时代留下的 max(0, pending)）。
+
 v0.3.4（第三轮复盘）：
 - MTW 的 HTTP 状态码重新可见：宿主 RequestUtils.post_json 里那句 `if response:` 判的是 requests
   的 Response.__bool__（等价 status_code < 400），401/403/5xx 会连状态码带错误体一起被折成 None。
@@ -148,7 +180,7 @@ import time
 import unicodedata
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import Request
@@ -222,7 +254,9 @@ _FORM_NOTES = (
     "最高分仍低于「最低匹配分数」（默认 3，即要求三项全中）就记为失败、不写入。"
     "该项只接受 1-3，越界会被收回到边界值：调到 1-2 表示只对上曲名或艺人也照样改写标签，"
     "标签是写进文件的、无法回滚；调到 3 以上则永远不会达标，整库都会被记成失败。"
-    "用于匹配的本地身份优先读文件已有的 tag，缺哪项就按 艺人/专辑 (年)/NN - 曲名 的目录结构兜底。\n"
+    "用于匹配的本地身份优先读文件已有的 tag，缺哪项就按 艺人/专辑 (年)/NN - 曲名 的目录结构兜底；"
+    "只有严格位于「音乐库路径」之下的目录才算艺人/专辑，库根本身的名字不参与猜测，"
+    "猜不出来就留空（宁可判未达阈值，也不拿目录名凑一个假身份去改写标签）。\n"
     "【写入模式】只补缺：曲名+艺人+专辑+内嵌封面 四项齐全的文件按 mtime+size 记账直接跳过"
     "（不再请求 MTW），缺哪项补哪项，已有非空标签保持不动，手工修改不会被覆盖。"
     "强制覆盖：每轮忽略增量账、全库重扫重问，候选与现有标签不同就重写，封面重新下载内嵌、"
@@ -246,8 +280,10 @@ _TAG_KEYS = {
     "artist": ("TPE1", "\u00a9ART", "artist", "ARTIST"),
     "album": ("TALB", "\u00a9alb", "album", "ALBUM"),
 }
-# 内嵌封面：ID3 用 APIC，MP4 用 covr，Vorbis/APE 用 picture 注释块。
-_COVER_KEYS = ("APIC", "covr", "picture", "metadata_block_picture", "METADATA_BLOCK_PICTURE")
+# 内嵌封面的 key 形状（各容器读法不同，见 _has_embedded_cover）：
+# MP4 atom / Vorbis 注释按全名匹配，ID3 的 APIC 帧与 APEv2 的 Cover Art 按前缀匹配。
+_COVER_KEYS = ("covr", "picture", "metadata_block_picture")
+_COVER_KEY_PREFIXES = ("apic", "cover art")
 # 常见 “NN - 曲名” / “NN. 曲名” 前缀。
 _TRACK_PREFIX_RE = re.compile(r"^\s*\d{1,3}\s*[-._)]\s*")
 # 目录名尾部的 “ (2017)” / “ [2017]” 年份。
@@ -508,6 +544,43 @@ def _first_tag_value(tags, keys) -> str:
     return ""
 
 
+def _has_embedded_cover(audio: Any, tags: Any) -> bool:
+    """容器里是否已经内嵌封面。
+
+    不能只按帧名 `tags.get("APIC")` 判 ID3：APIC 是可重复帧，mutagen 取这类帧的口径是
+    `getall("APIC")`（键还可能带描述）；APEv2 的封面 key 是 "Cover Art (Front)"，
+    根本不在按帧名罗列的那份表里。判错的代价不对称 —— 已经有封面的文件被判成没封面，
+    补空模式就永远认为它"没刮齐"：每轮重打最多 7 次 MTW 请求，还因为候选不达标白涨
+    retries，几轮之后一个本来完整的文件被永久列成超限。
+    """
+    # mutagen 的通用图片接口：文件对象（FLAC/OGG/MP4/APE…）和 tag 容器（ID3）两处都可能暴露
+    for holder in (audio, tags):
+        try:
+            if getattr(holder, "pictures", None):
+                return True
+        except Exception:
+            continue
+    try:
+        if tags.getall("APIC"):
+            return True
+    except Exception:
+        pass
+    try:
+        keys = list(tags.keys())
+    except Exception:
+        return False
+    for key in keys:
+        name = str(key).lower()
+        if not (name.startswith(_COVER_KEY_PREFIXES) or name in _COVER_KEYS):
+            continue
+        try:
+            if tags.get(key):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _read_music_tags(path: Path) -> Dict[str, Any]:
     """读取本地音乐 tag。
 
@@ -539,18 +612,7 @@ def _read_music_tags(path: Path) -> Dict[str, Any]:
                                 break
                 except Exception:
                     pass
-        for key in _COVER_KEYS:
-            try:
-                if tags.get(key):
-                    out["has_cover"] = True
-                    break
-            except Exception:
-                continue
-    if not out["has_cover"]:
-        try:
-            out["has_cover"] = bool(getattr(audio, "pictures", None))
-        except Exception:
-            pass
+        out["has_cover"] = _has_embedded_cover(audio, tags)
     try:
         info = getattr(audio, "info", None)
         length = getattr(info, "length", None) if info else None
@@ -561,19 +623,37 @@ def _read_music_tags(path: Path) -> Dict[str, Any]:
     return out
 
 
-def _path_identity(path: Path) -> Dict[str, str]:
-    """按 “艺人/专辑 (年)/NN - 曲名” 目录结构推断身份，供未打 tag 的文件参与匹配。"""
+def _path_identity(path: Path, roots: Sequence[Path] = ()) -> Dict[str, str]:
+    """按 “艺人/专辑 (年)/NN - 曲名” 目录结构推断身份，供未打 tag 的文件参与匹配。
+
+    roots 给定时只认严格落在库根之下的目录：库根自己以及它上面的层级不是专辑/艺人目录。
+    不 clamp 的话 /media/music/01 - 轨迹.flac 会得到 album="music"、
+    /media/music/周杰伦/01 - x.flac 会得到 artist="media" —— 这种凭空造出来的名字
+    既会被当搜索词发给 MTW，比对又是双向包含（want in got 也算命中），一个目录名
+    就可能白送一个匹配分；把 min_score 放宽到 1-2 时，够格的文件会被按错艺人改标签，
+    而写进文件的标签没法回滚。宁可留空判「未达阈值」，也不要假身份。
+    """
     parents = list(path.parents)
-    album_dir = parents[0].name if len(parents) >= 1 else ""
-    artist_dir = parents[1].name if len(parents) >= 2 else ""
+
+    def _name(index: int) -> str:
+        if len(parents) <= index:
+            return ""
+        dirpath = parents[index]
+        if roots and not any(
+            dirpath != root and dirpath.is_relative_to(root) for root in roots
+        ):
+            return ""
+        return dirpath.name
+
     return {
         "title": _TRACK_PREFIX_RE.sub("", path.stem).strip(),
-        "artist": artist_dir.strip(),
-        "album": _YEAR_SUFFIX_RE.sub("", album_dir).strip(),
+        "artist": _name(1).strip(),
+        "album": _YEAR_SUFFIX_RE.sub("", _name(0)).strip(),
     }
 
 
-def _local_identity(path: Path, tags: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _local_identity(path: Path, tags: Optional[Dict[str, Any]] = None,
+                    roots: Sequence[Path] = ()) -> Dict[str, Any]:
     """本地身份：tag 优先，缺失字段用目录结构兜底。
 
     MTW 的 fetch_id3_by_title 是把 title 当搜索关键词用的，传原始文件名
@@ -584,7 +664,7 @@ def _local_identity(path: Path, tags: Optional[Dict[str, Any]] = None) -> Dict[s
     """
     if tags is None:
         tags = _read_music_tags(path)
-    from_path = _path_identity(path)
+    from_path = _path_identity(path, roots)
     return {
         "title": (tags["title"] or from_path["title"]).strip(),
         "artist": (tags["artist"] or from_path["artist"]).strip(),
@@ -626,7 +706,7 @@ class MusicLibraryScraper(_PluginBase):
         "再沿用 MP 原生音乐刮削链路写入标签与封面。"
     )
     plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/avator.webp"
-    plugin_version = "0.3.4"
+    plugin_version = "0.3.5"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "musiclibraryscraper_"
@@ -866,7 +946,6 @@ class MusicLibraryScraper(_PluginBase):
     def api_files(self, request: Request) -> Dict[str, Any]:
         """GET /files —— bucket=done|failed|pending&limit&offset&search 分页查询。"""
         qp = request.query_params
-        bucket = (qp.get("bucket") or "done").lower()
         try:
             limit = max(1, min(int(qp.get("limit") or 50), 500))
         except (TypeError, ValueError):
@@ -875,6 +954,14 @@ class MusicLibraryScraper(_PluginBase):
             offset = max(0, int(qp.get("offset") or 0))
         except (TypeError, ValueError):
             offset = 0
+        bucket = (qp.get("bucket") or "done").lower()
+        if bucket not in ("done", "failed", "pending"):
+            # 不认识的桶名不能悄悄落到 done 那一档：回显的还是请求的那个名字，
+            # 调用方拿到一批"已处理"的行却以为是自己传的桶，看着像筛选坏了。
+            return {
+                "bucket": bucket, "total": 0, "offset": offset,
+                "limit": limit, "items": [], "reason": "unknown_bucket",
+            }
         search = (qp.get("search") or "").strip().lower()
 
         rows = self._collect_rows(bucket)
@@ -1087,16 +1174,33 @@ class MusicLibraryScraper(_PluginBase):
     # ---------------- 状态账 ----------------
 
     def _load_book(self, key: str) -> Dict[str, dict]:
-        """读一本账：外层和条目都必须是 dict。
+        """读一本账：外层和条目都必须是 dict，retries 必须是整数。
 
         plugindata 可能来自旧版本、手工编辑或写到一半的 JSON。条目不是 dict 时，
         后面每一处 prev.get() 都会抛 AttributeError，从 /status 到整轮扫描一起崩；
         归一成空 dict 只表示"这条记录什么都不知道"，那个文件会被重新刮一次。
+
+        retries 也要归一：它是 `int(prev.get("retries", 0))` 直接吃的那个值，写成非数字
+        （null、"三次"、旧版本的 dict）都会抛 TypeError，而抛在逐文件循环里等于整轮中止 ——
+        崩的位置由账本里的键序决定，下一轮枚举走到同一个键还是同一个位置，于是那之后的
+        文件永远处理不到、汇总也永远不落账。
         """
         data = self.get_data(key)
         if not isinstance(data, dict):
             return {}
-        return {k: (v if isinstance(v, dict) else {}) for k, v in data.items()}
+        out: Dict[str, dict] = {}
+        for k, v in data.items():
+            if not isinstance(v, dict):
+                out[k] = {}
+                continue
+            # 只在坏值上动手：done 条目本来没有 retries，不该为此多写一个键
+            if "retries" in v and not isinstance(v["retries"], int):
+                try:
+                    v["retries"] = int(v["retries"] or 0)
+                except (TypeError, ValueError):
+                    v["retries"] = 0
+            out[k] = v
+        return out
 
     def _load_done(self) -> Dict[str, dict]:
         return self._load_book(_KEY_DONE)
@@ -1137,8 +1241,11 @@ class MusicLibraryScraper(_PluginBase):
         with lock:
             if self.__dict__.get("_scan_running"):
                 return False
+            # 复位停止信号必须在锁内、占位之前：放在锁外时，恰好挤在这个窗口里到达的
+            # stop_service 会被抹掉，而它想停的正是紧接着要开始的这一轮 —— 界面按了
+            # "停止"、日志里却一句"收到停止信号"都没有，只能等整轮跑完。
+            self._stop_event().clear()
             self.__dict__["_scan_running"] = True
-        self._stop_event().clear()
         return True
 
     def _end_scan(self):
@@ -1242,6 +1349,11 @@ class MusicLibraryScraper(_PluginBase):
         files: List[Path] = []
         links_out = 0
         for root in (p for p in (self._scraper_paths or "").split("\n") if p.strip()):
+            if self._stop_event().is_set():
+                # 内层 break 只退出了当前这个库的 os.walk；不在这儿也挡一次，
+                # 停止之后剩下的库照样被遍历，只是最后被整轮当成"扫过的文件"记账。
+                logger.info("[music-scraper] 收到停止信号")
+                break
             root_path = Path(root)
             if not root_path.exists():
                 logger.warning(f"[music-scraper] 路径不存在: {root}")
@@ -1290,6 +1402,22 @@ class MusicLibraryScraper(_PluginBase):
                 "（写标签会落到 scraper_paths 之外；确有需要请把目标目录也加进库路径）"
             )
         return files
+
+    def _identity_roots(self) -> List[Path]:
+        """配置里写的库根（不做 realpath）：给目录兜底的身份当边界用。
+
+        不 realpath 是有意的 —— 待判定的路径都是 os.walk 从这份配置拼出来的，字符串
+        形式一致才比得对；库根本身是软链时，realpath 反而会让每一个文件都判成"在库根之外"。
+        按配置原文缓存，改配置立刻换 key，不需要 TTL。
+        """
+        raw = self._scraper_paths or ""
+        cached = self.__dict__.get("_roots_cache")
+        if cached and cached[0] == raw:
+            return cached[1]
+        roots = [Path(item).expanduser() for item in
+                 (p for p in raw.split("\n") if p.strip())]
+        self.__dict__["_roots_cache"] = (raw, roots)
+        return roots
 
     def _library_bounds(self) -> Tuple[List[Path], List[Path]]:
         """配置库路径与排除路径的 realpath 列表：软链收敛判定和 /retry 库内判定共用同一份基准。
@@ -1346,7 +1474,7 @@ class MusicLibraryScraper(_PluginBase):
             files = self._enumerate_files()
 
         scanned = from_cache = skipped_tagged = ok = failed_n = exhausted = 0
-        transport = aborted = 0
+        transport = errors = aborted = 0
         now_iso = self._now_iso()
         effective_force = force or (self._force_all and not targeted)
         # 覆盖写只由"强制覆盖"模式或界面上的"全量覆盖"决定：定向重试的 force 只是要绕过
@@ -1360,7 +1488,8 @@ class MusicLibraryScraper(_PluginBase):
         live_keys = set()  # 整盘扫描时实际存在（stat 成功）的文件，供 prune 用
         dirty = False  # 自上次落账以来两本账有没有变更
         last_flush = time.time()
-        transport_streak = 0  # 连续 MTW 故障的文件数（命中缓存不计入，也不算中断）
+        # 连续"插件没学到任何东西"的文件数：MTW 故障或单文件异常都算
+        transport_streak = 0
         # 定向重试的批次也可能很大（/retry 全部失败项）：MTW 真挂着时一样要熔断，
         # 否则几千个文件 × 全部源会一路打到底。只有小批次才值得整批跑完。
         may_abort = len(files) > _ABORT_AFTER_TRANSPORT
@@ -1379,37 +1508,56 @@ class MusicLibraryScraper(_PluginBase):
                 continue
             live_keys.add(key)
 
-            # 增量：命中 done 缓存直接跳过（不读 tag）。
-            if not effective_force and not targeted and key in done:
-                prev = done[key]
-                if isinstance(prev, dict) and prev.get("mtime") == mtime and prev.get("size") == size:
-                    from_cache += 1
+            try:
+                # 增量：命中 done 缓存直接跳过（不读 tag）。
+                if not effective_force and not targeted and key in done:
+                    prev = done[key]
+                    if isinstance(prev, dict) and prev.get("mtime") == mtime and prev.get("size") == size:
+                        from_cache += 1
+                        continue
+
+                # 失败上限：非强制、非定向时，超限且文件未变则不再自动重试。
+                if not effective_force and not targeted and key in failed:
+                    prev = failed[key]
+                    if isinstance(prev, dict) \
+                            and int(prev.get("retries", 0)) >= self.MAX_RETRY \
+                            and prev.get("mtime") == mtime and prev.get("size") == size:
+                        exhausted += 1
+                        continue
+
+                # 每个文件的 tag 只解析一次：补空判定与匹配身份共用这份读取结果
+                tags = _read_music_tags(fp)
+
+                # 补空模式：tag 与封面都齐了才跳过。
+                if not effective_force and self.__is_complete(fp, tags):
+                    prev = done.get(key)
+                    source = prev.get("source") if isinstance(prev, dict) else None
+                    done[key] = {"mtime": mtime, "size": size, "ts": now_iso, "source": source}
+                    failed.pop(key, None)
+                    skipped_tagged += 1
+                    dirty = True
                     continue
 
-            # 失败上限：非强制、非定向时，超限且文件未变则不再自动重试。
-            if not effective_force and not targeted and key in failed:
-                prev = failed[key]
-                if isinstance(prev, dict) \
-                        and int(prev.get("retries", 0)) >= self.MAX_RETRY \
-                        and prev.get("mtime") == mtime and prev.get("size") == size:
-                    exhausted += 1
-                    continue
-
-            # 每个文件的 tag 只解析一次：补空判定与匹配身份共用这份读取结果
-            tags = _read_music_tags(fp)
-
-            # 补空模式：tag 与封面都齐了才跳过。
-            if not effective_force and self.__is_complete(fp, tags):
-                prev = done.get(key)
-                source = prev.get("source") if isinstance(prev, dict) else None
-                done[key] = {"mtime": mtime, "size": size, "ts": now_iso, "source": source}
-                failed.pop(key, None)
-                skipped_tagged += 1
-                dirty = True
+                okf, reason, score, source = self.__scrape_file(
+                    fp, tags=tags, overwrite=effective_overwrite)
+            except Exception as err:
+                # 单个文件把插件或宿主打崩不能带走整轮：崩在第七千个文件上，前面六千多个
+                # 判断还没落账（落账每 60 秒一次），槽位释放、下一轮从头又崩在同一条路径上
+                # —— 账本里的坏值、宿主 ScrapingChain 的内部异常都是确定性的，于是全库
+                # 永远停在待处理。这个文件既不记成功也不记失败，下一轮照原样再来；
+                # 连着出现就按环境异常熔断，不烧这个文件的 retries。
+                errors += 1
+                transport_streak += 1
+                logger.error(f"[music-scraper] 处理异常：{key} — {err}")
+                if may_abort and transport_streak >= _ABORT_AFTER_TRANSPORT:
+                    logger.warning(
+                        f"[music-scraper] 连续 {transport_streak} 个文件处理异常，"
+                        f"判为环境异常，本轮中止"
+                    )
+                    aborted = True
+                    break
                 continue
 
-            okf, reason, score, source = self.__scrape_file(
-                fp, tags=tags, overwrite=effective_overwrite)
             if reason.startswith(_TRANSPORT_REASONS):
                 # MTW 侧故障：插件没学到任何关于这个文件的信息，所以既不写 failed 账、
                 # 也不涨 retries，原样留着下一轮再处理。连续踩满就熔断中止本轮。
@@ -1461,8 +1609,8 @@ class MusicLibraryScraper(_PluginBase):
 
         # "待处理"要和同一时刻数据页的待处理桶是同一个口径，否则两边对不上号、
         # 看着像有文件凭空消失。桶是"这份文件列表里既不在 done 也不在 failed 的那些"，
-        # 这里就直接照它算：MTW 故障的文件不落账所以仍然待处理，熔断/停止没走到的也一样，
-        # 上一轮已经记过失败的则回到失败桶（用计数器加减时这三种情形很容易漏一种）。
+        # 这里就直接照它算：MTW 故障、处理异常的文件都不落账所以仍然待处理，熔断/停止
+        # 没走到的也一样，上一轮已经记过失败的则回到失败桶（用计数器加减时很容易漏一种）。
         pending = sum(
             1 for fp in files
             if str(fp) not in done and str(fp) not in failed
@@ -1476,8 +1624,9 @@ class MusicLibraryScraper(_PluginBase):
             "failed": failed_n,
             "exhausted": exhausted,
             "transport": transport,
+            "error": errors,
             "aborted": aborted,
-            "pending": max(0, pending),
+            "pending": pending,
             "force": effective_force,
             "targeted": targeted,
             "cron": self._cron or _DEFAULT_CRON,
@@ -1493,6 +1642,7 @@ class MusicLibraryScraper(_PluginBase):
             f"[music-scraper] {'定向重试' if targeted else '扫描'}完成："
             f"命中缓存 {from_cache}，已有tag {skipped_tagged}，"
             f"成功 {ok}，失败 {failed_n}，超限跳过 {exhausted}，MTW 故障 {transport}"
+            f"{'，处理异常 ' + str(errors) if errors else ''}"
             f"{'（本轮熔断中止，未处理的下轮再来）' if aborted else ''}"
             f"（{summary['duration_s']}s）"
         )
@@ -1512,7 +1662,7 @@ class MusicLibraryScraper(_PluginBase):
     def __scrape_file(self, path: Path, tags: Optional[Dict[str, Any]] = None,
                       overwrite: bool = False) -> Tuple[bool, str, Optional[int], str]:
         """处理单个文件，返回 (是否成功, 失败原因, 命中分数, 命中来源)。"""
-        identity = _local_identity(path, tags)
+        identity = _local_identity(path, tags, roots=self._identity_roots())
         candidates, failure = self._mtw_fetch_candidates(path, identity=identity)
         if failure:
             # MTW 侧故障：不能算这个文件的锅，调用方按原因前缀区分后不记 retries。
@@ -1728,7 +1878,7 @@ class MusicLibraryScraper(_PluginBase):
         （musicbrainz 限流、咪咕 500）就会让整轮在前几个文件就熔断，全库永远停在待处理。
         """
         if identity is None:
-            identity = _local_identity(path)
+            identity = _local_identity(path, roots=self._identity_roots())
         if not identity["title"]:
             return [], None
         want = _want_from(identity)
@@ -1775,7 +1925,7 @@ class MusicLibraryScraper(_PluginBase):
                        identity: Optional[Dict[str, Any]] = None
                        ) -> Tuple[Optional[dict], int]:
         if identity is None:
-            identity = _local_identity(path)
+            identity = _local_identity(path, roots=self._identity_roots())
         want = _want_from(identity)
         best, best_score = None, 0
         for c in candidates:

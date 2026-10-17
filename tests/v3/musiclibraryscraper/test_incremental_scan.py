@@ -228,14 +228,14 @@ class IncrementalScanTest(unittest.TestCase):
         self.assertNotIn(str(tmp / "gone.mp3"), p.get_data("done"))
         self.assertEqual(len(p.get_data("done")), 1)
 
-    def _transport_outage(self, names, existing_failed=None):
+    def _transport_outage(self, names, existing_failed=None, reason=None):
         """造一个"每次抓取都是 MTW 侧故障"的插件实例。"""
         files = {n: "ok" for n in names}
         p, tmp, counters = self._plugin(files)
 
         def outage(fp, tags=None, overwrite=False):
             counters["scrape"] += 1
-            return (False, mls._UNREACHABLE_REASON, None, "")
+            return (False, reason or mls._UNREACHABLE_REASON, None, "")
 
         setattr(p, _SCRAPE, outage)
         if existing_failed:
@@ -305,6 +305,80 @@ class IncrementalScanTest(unittest.TestCase):
         )
         self.assertEqual(c["scrape"], mls._ABORT_AFTER_TRANSPORT)
         self.assertTrue(p.get_data("last_targeted")["aborted"])
+
+    def test_transport_outage_covers_every_documented_reason(self):
+        """三种故障归因在批量循环里走同一条分支：鉴权失败、接口报错和不可达一样不记在
+        文件头上、一样计入 transport、一样能熔断。批量侧此前只有"不可达"被验证过 ——
+        另两种是 v0.3.4 新增的归因，之前只证明了它们存在于那个元组里。"""
+        for reason in mls._TRANSPORT_REASONS:
+            with self.subTest(reason=reason):
+                p, tmp, c = self._transport_outage(
+                    [f"{i}.mp3" for i in range(12)], reason=reason
+                )
+                self._scan(p)
+                self.assertEqual(c["scrape"], mls._ABORT_AFTER_TRANSPORT)
+                self.assertEqual(p.get_data("failed"), {})
+                runs = p.get_data("runs")
+                self.assertTrue(runs["aborted"])
+                self.assertEqual(runs["transport"], mls._ABORT_AFTER_TRANSPORT)
+
+    def test_non_numeric_retries_does_not_wedge_the_round(self):
+        """账本里的 retries 不是数字（手工编辑、写到一半的 JSON）不能带走整轮。
+
+        它是 int(prev.get("retries", 0)) 直接吃的值：抛在逐文件循环里等于整轮中止，
+        而崩的位置由账本键序决定，下一轮枚举走到同一条路径还是同一个位置 —— 那之后的
+        文件永远处理不到、汇总永远不落账，/status 也一起 500。
+        """
+        p, tmp, c = self._plugin({f"{i}.mp3": "ok" for i in range(4)})
+        p.save_data("failed", {
+            str(tmp / "0.mp3"): {"retries": "三次"},
+            str(tmp / "1.mp3"): {"retries": None},
+        })
+        self._scan(p)
+        self.assertEqual(c["scrape"], 4)
+        self.assertEqual(len(p.get_data("done")), 4)
+        self.assertEqual(p.get_data("failed"), {})
+        self.assertEqual(p._build_status()["counts"]["failed"], 0)
+
+    def test_raising_file_does_not_take_the_round_down(self):
+        """宿主 ScrapingChain 内部异常只该影响那一个文件：一轮跑到第七千个文件崩掉，
+        前面六千多个判断还没落账（每 60 秒才落一次），下一轮又崩在同一条路径上。"""
+        p, tmp, c = self._plugin({f"{i}.mp3": "ok" for i in range(6)})
+
+        def flaky(fp, tags=None, overwrite=False):
+            c["scrape"] += 1
+            if Path(fp).name == "2.mp3":
+                raise RuntimeError("宿主内部异常")
+            return (True, "", 3, "netease")
+
+        setattr(p, _SCRAPE, flaky)
+        self._scan(p)
+        self.assertEqual(c["scrape"], 6)
+        runs = p.get_data("runs")
+        self.assertEqual(runs["error"], 1)
+        self.assertEqual(runs["transport"], 0)
+        self.assertEqual(len(p.get_data("done")), 5)
+        # 插件对这个文件什么也没学到：不记失败、不涨 retries，下一轮照原样再来
+        self.assertNotIn(str(tmp / "2.mp3"), p.get_data("failed"))
+        self.assertEqual(runs["pending"], 1)
+        self.assertEqual(len(p._collect_rows("pending")), runs["pending"])
+
+    def test_raising_files_break_the_round_like_an_outage(self):
+        """连着崩要按环境异常熔断，不能几千个文件一路崩到底。"""
+        p, tmp, c = self._plugin({f"{i}.mp3": "ok" for i in range(12)})
+
+        def always_raises(fp, tags=None, overwrite=False):
+            c["scrape"] += 1
+            raise RuntimeError("宿主内部异常")
+
+        setattr(p, _SCRAPE, always_raises)
+        self._scan(p)
+        self.assertEqual(c["scrape"], mls._ABORT_AFTER_TRANSPORT)
+        runs = p.get_data("runs")
+        self.assertTrue(runs["aborted"])
+        self.assertEqual(runs["error"], mls._ABORT_AFTER_TRANSPORT)
+        self.assertEqual(p.get_data("failed"), {})
+        self.assertEqual(runs["pending"], 12)
 
     def test_progress_flushed_mid_scan(self):
         """整轮动辄几小时：中途就得落账，容器重启不能把已刮好的部分全丢掉。"""
@@ -762,11 +836,133 @@ class MatchTest(unittest.TestCase):
         finally:
             mls._music_text_key = orig
 
+    def test_path_identity_ignores_library_root_and_above(self):
+        """库根自己的名字不是专辑，它上面一层更不是艺人。
+
+        不 clamp 时 /media/music/01 - 轨迹.flac 会得到 album="music"、artist=<库根的上一级>，
+        这两个假身份既会当搜索词发给 MTW，比对又是双向包含，一个目录名就能白送一个匹配分。
+        """
+        roots = [Path("/media/music")]
+        flat = Path("/media/music/01 - 轨迹.flac")
+        self.assertEqual(
+            mls._path_identity(flat, roots),
+            {"title": "轨迹", "artist": "", "album": ""},
+        )
+        one = Path("/media/music/七里香 (2003)/01 - 七里香.flac")
+        self.assertEqual(mls._path_identity(one, roots)["album"], "七里香")
+        self.assertEqual(mls._path_identity(one, roots)["artist"], "")
+        two = Path("/media/music/周杰伦/七里香 (2003)/01 - 七里香.flac")
+        self.assertEqual(
+            mls._path_identity(two, roots),
+            {"title": "七里香", "artist": "周杰伦", "album": "七里香"},
+        )
+        # 不给 roots 保持老行为：调用方可以只看文件名兜底
+        self.assertEqual(mls._path_identity(one)["artist"], "music")
+
+    def test_root_dir_name_no_longer_buys_a_free_match_point(self):
+        """上一条的实际后果：库根名凑出来的 album 能把 1 分抬成 3 分。"""
+        roots = [Path("/media/music")]
+        flat = Path("/media/music/01 - 轨迹.flac")
+        blank = {"title": "", "artist": "", "album": "", "duration": None}
+        want = mls._want_from(mls._local_identity(flat, blank, roots=roots))
+        noisy = {"name": "轨迹", "artist": "Media", "album": "music"}
+        self.assertEqual(mls.MusicLibraryScraper._score_candidate(noisy, want), 1)
+        # 没有 clamp 时 artist="media"、album="music" 都是从库根及其上一级目录名凑出来的，
+        # 同一份候选刚好凑满 3 分并被写进文件（写标签不可回滚）
+        unchecked = mls._want_from(mls._local_identity(flat, blank))
+        self.assertEqual(unchecked["artist"], "media")
+        self.assertEqual(mls.MusicLibraryScraper._score_candidate(noisy, unchecked), 3)
+
+    def test_identity_roots_are_the_configured_paths(self):
+        """clamp 用的边界是配置原文：库根本身是软链时 realpath 会让每个文件都判成库外。"""
+        p = self._plugin()
+        p._scraper_paths = "/media/music\n/data/另一库/\n\n"
+        self.assertEqual(
+            p._identity_roots(), [Path("/media/music"), Path("/data/另一库")]
+        )
+        # 按配置原文缓存，改过配置立刻换一份，不需要 TTL
+        again = p._identity_roots()
+        self.assertIs(again, p._identity_roots())
+        p._scraper_paths = "/srv/musik"
+        self.assertEqual(p._identity_roots(), [Path("/srv/musik")])
+
     def test_read_music_tags_never_raises(self):
         out = mls._read_music_tags(Path("/nonexistent/dir/01 - x.flac"))
         self.assertEqual(
             out, {"title": "", "artist": "", "album": "", "duration": None, "has_cover": False}
         )
+
+    def test_cover_detected_through_id3_repeated_frame(self):
+        """ID3 的 APIC 是可重复帧，mutagen 的取法是 getall("APIC")，按键直取会落空。
+
+        判不出封面比判不出来更贵：标签已经刮齐、只差封面的库（真实曲库最常见的剩余缺口）
+        会被补空模式永远判成"没齐"，每轮重打最多 7 次 MTW 请求，候选不达标还白涨 retries，
+        几轮之后一个本来完整的文件被永久列成超限。
+        """
+        class Id3:
+            def __init__(self, frames):
+                self._frames = frames
+
+            def get(self, key, default=None):
+                return self._frames.get(key, default)
+
+            def keys(self):
+                return list(self._frames)
+
+            def getall(self, frameid):
+                return [v for k, v in self._frames.items()
+                        if k.split(":", 1)[0] == frameid]
+
+        covered = Id3({"APIC:Cover (front)": object(), "TALB": "黑白灰"})
+        self.assertTrue(mls._has_embedded_cover(object(), covered))
+        # 按帧名直取拿不到（正是插件此前唯一依赖的读法）
+        self.assertIsNone(covered.get("APIC"))
+        self.assertFalse(mls._has_embedded_cover(object(), Id3({"TALB": "黑白灰"})))
+
+    def test_cover_detected_in_every_other_container(self):
+        """其余容器各有各的读法：任何一档判错都会让补空模式反复重刮。"""
+        class NoGetall(dict):
+            """Vorbis/APE/MP4 的 tag 容器没有 getall，helper 不能因为它就整段放弃。"""
+
+        flac_like = NoGetall({"metadata_block_picture": "ZgBsAG8AZw=="})
+        self.assertTrue(mls._has_embedded_cover(object(), flac_like))
+        self.assertTrue(mls._has_embedded_cover(
+            object(), NoGetall({"Cover Art (Front)": (b"front", b"jpegdata")})))
+        self.assertTrue(mls._has_embedded_cover(object(), NoGetall({"covr": [b"\xff\xd8"]})))
+        # 通用图片接口挂在文件对象上（FLAC/MP4 这一类）
+        class HasPictures:
+            pictures = [object()]
+
+        self.assertTrue(mls._has_embedded_cover(HasPictures(), NoGetall()))
+        self.assertFalse(mls._has_embedded_cover(NoGetall({"title": "黑面"}), None))
+
+    def test_read_music_tags_reports_embedded_cover(self):
+        """整条 tag 读取链路此前没有测试：环境里没有 mutagen，_read_music_tags 一律返回
+        空值、has_cover 恒为 False，补空判据实际上从没被验证过。"""
+        import types
+
+        class Tags(dict):
+            def getall(self, frameid):
+                return [object()] if frameid == "APIC" else []
+
+        holder = types.SimpleNamespace(
+            tags=Tags({"TIT2": "黑面", "TPE1": "陈奕迅", "TALB": "黑白灰"}),
+            info=None,
+        )
+        fake = types.ModuleType("mutagen")
+        fake.File = lambda path: holder
+        orig = sys.modules.get("mutagen")
+        sys.modules["mutagen"] = fake
+        try:
+            out = mls._read_music_tags(Path("/music/07 - 黑面.flac"))
+        finally:
+            if orig is None:
+                sys.modules.pop("mutagen", None)
+            else:
+                sys.modules["mutagen"] = orig
+        self.assertEqual(out["title"], "黑面")
+        self.assertEqual(out["artist"], "陈奕迅")
+        self.assertTrue(out["has_cover"])
 
     def test_path_identity_strips_track_prefix_and_year(self):
         tmp = Path(tempfile.mkdtemp())
@@ -1525,6 +1721,81 @@ class RobustnessTest(unittest.TestCase):
         self.assertEqual(status["counts"]["retryable"], 2)
         # 记账侧同样要把坏条目当成"没有记录"，而不是在它上面 .get()
         self.assertEqual(int(p._load_failed()["/music/a.mp3"].get("retries", 0)), 0)
+
+    def test_stop_signal_after_the_round_starts_is_never_cleared(self):
+        """复位停止信号必须发生在占位之前。
+
+        此前 clear() 落在锁外：置位 → 出锁 → clear 之间挤进来的 stop_service 会被抹掉，
+        而它想停的正是紧接着这一轮 —— 界面按了"停止"、日志里一句"收到停止信号"都没有，
+        只能等整轮跑完。
+        """
+        p = self._plugin()
+        real = p._stop_event()
+        seen = {}
+
+        class Spy:
+            def set(self):
+                real.set()
+
+            def clear(self):
+                seen["running"] = p.__dict__.get("_scan_running")
+                real.clear()
+
+            def is_set(self):
+                return real.is_set()
+
+        p.__dict__["_stop_flag"] = Spy()
+        self.assertTrue(p._begin_scan())
+        self.assertIn("running", seen)
+        self.assertFalse(seen["running"])
+        # 真的跑起来之后到达的停止信号，下一轮占位时才复位
+        real.set()
+        p._end_scan()
+        p._begin_scan()
+        self.assertFalse(real.is_set())
+
+    def test_enumerate_stops_before_the_next_root(self):
+        """停止信号要让剩下的库也不再遍历：内层 break 只退掉当前库的 os.walk，
+        外层还接着走下一个库，用户按了停止却还在扫全盘。"""
+        first = Path(tempfile.mkdtemp())
+        second = Path(tempfile.mkdtemp())
+        (first / "a.mp3").write_bytes(b"x")
+        (second / "b.mp3").write_bytes(b"x")
+        p = self._plugin()
+        p._scraper_paths = f"{first}\n{second}"
+        visited = []
+        real_walk = mls.os.walk
+
+        def spy(top, *args, **kwargs):
+            visited.append(str(top))
+            p._stop_event().set()
+            return iter(())
+
+        mls.os.walk = spy
+        try:
+            files = p._enumerate_files()
+        finally:
+            mls.os.walk = real_walk
+        self.assertEqual(files, [])
+        self.assertEqual(visited, [str(first)])
+
+    def test_files_api_rejects_unknown_bucket(self):
+        """不认识的桶名不能悄悄落到 done 那一档：回显的还是请求的那个名字，
+        调用方拿到一批"已处理"的行却以为是自己传的桶。"""
+        p = self._plugin()
+        p.save_data("done", {"/music/a.mp3": {"mtime": 1, "size": 1, "ts": "x"}})
+
+        class _Req:
+            def __init__(self, q):
+                self.query_params = q
+
+        data = p.api_files(_Req({"bucket": "deined"}))
+        self.assertEqual(data["items"], [])
+        self.assertEqual(data["total"], 0)
+        self.assertEqual(data["bucket"], "deined")
+        self.assertEqual(data["reason"], "unknown_bucket")
+        # 不传桶名仍是原来的默认（done）
+        self.assertEqual(p.api_files(_Req({}))["total"], 1)
 
     def test_form_defaults_keep_resources_empty(self):
         """原生表单不要把 7 个源预填上：留空=全部源才是配置页的口径。"""
