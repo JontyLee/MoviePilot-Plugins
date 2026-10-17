@@ -77,16 +77,16 @@ class _FileItem:
 
 
 class _RequestUtils:
+    """宿主 RequestUtils 的桩：插件只用同步 post()，它返回 Response（任何状态码）或
+    连不上时的 None。桩一律"连不上"，要响应的用例自己替换 mls.RequestUtils。"""
+
     def __init__(self, *a, **k):
         pass
 
     def get(self, *a, **k):
         return None
 
-    def post_json(self, *a, **k):
-        return None
-
-    def post_dict(self, *a, **k):
+    def post(self, *a, **k):
         return None
 
 

@@ -93,7 +93,7 @@ async function loadStatus() {
   }
 }
 
-async function loadFiles() {
+async function loadFiles(retryOutOfRange = true) {
   loading.value = true
   try {
     const data = await (props.api as MoviePilotApi).get(`${base.value}/files`, {
@@ -104,6 +104,17 @@ async function loadFiles() {
     })
     rows.value = data?.items || []
     total.value = data?.total || 0
+    // 桶变小时页码会越界（重试成功后失败项就没了几十条）：越界的 offset 拿回空页，
+    // 界面看着像"该桶暂无数据"，其实后面还有内容。收敛到最后一页再取一次。
+    if (retryOutOfRange && total.value > 0 && !rows.value.length) {
+      const lastPage = Math.max(1, Math.ceil(total.value / limit.value))
+      if (page.value > lastPage) {
+        page.value = lastPage
+        offset.value = (lastPage - 1) * limit.value
+        await loadFiles(false)
+        return
+      }
+    }
   } catch (e: any) {
     rows.value = []
     total.value = 0
@@ -119,8 +130,9 @@ async function refresh() {
 }
 
 // /retry 的三种拒绝要分开说：全部路径在库外（out_of_library）和被扫描占着（busy）
-// 是完全不同的原因，混成"稍后再试"会让人反复点。
-function retryResult(res: any, label: string) {
+// 是完全不同的原因，混成"稍后再试"会让人反复点。label 只用于成功文案，
+// 失败提示带上文件名反而读不通。
+function retryResult(res: any, label = '') {
   if (res?.accepted) {
     const rejected = res?.rejected ? `，忽略 ${res.rejected} 个库外路径` : ''
     notify(`已提交重试 ${res.count} 个${label}${rejected}`)
@@ -129,7 +141,7 @@ function retryResult(res: any, label: string) {
   } else if (res?.reason === 'no_paths') {
     notify('没有可重试的路径', 'warning')
   } else {
-    notify(`已有扫描在运行，稍后再试${label}`, 'warning')
+    notify('已有扫描在运行，请稍后再试', 'warning')
   }
 }
 
@@ -166,8 +178,7 @@ async function doRetryAll() {
       bucket: 'failed',
       all: true
     })
-    if (res?.accepted) notify(`已提交重试 ${res.count} 个失败项`)
-    else notify('已有扫描在运行，稍后再试', 'warning')
+    retryResult(res, '失败项')
     await refresh()
   } catch (e: any) {
     notify(`重试失败：${e?.message || e}`, 'error')
@@ -237,6 +248,9 @@ function fmtSize(bytes?: number) {
 
 const counts = computed(() => status.value?.counts || {})
 const runs = computed(() => status.value?.runs || {})
+// 定向重试不再覆盖 runs（否则 scanned=1 会让整库看着像刚扫完），它单独记在
+// last_targeted；卡片补一行，界面才不会停在"上次扫描是三天前"。
+const lastTargeted = computed(() => status.value?.last_targeted || {})
 const running = computed(() => !!status.value?.running)
 
 onMounted(refresh)
@@ -294,6 +308,9 @@ onMounted(refresh)
             <div v-if="runs.aborted" class="text-caption text-warning">
               MTW 连续故障，本轮已中止，未处理的留到下一轮
             </div>
+            <div v-if="lastTargeted.ts" class="text-caption text-grey">
+              最近定向重试 {{ fmtTime(lastTargeted.ts) }}：成功{{ lastTargeted.ok ?? 0 }}｜失败{{ lastTargeted.failed ?? 0 }}
+            </div>
           </v-card-text>
         </v-card>
       </v-col>
@@ -301,8 +318,14 @@ onMounted(refresh)
 
     <!-- 操作条 -->
     <div class="d-flex align-center flex-wrap gap-2 mb-2">
-      <v-tabs density="compact" model-value="failed" bg-color="transparent" show-arrows>
-        <v-tab v-for="t in tabs" :key="t.key" :value="t.key" @click="switchTab(t.key)">
+      <v-tabs
+        density="compact"
+        :model-value="bucket"
+        bg-color="transparent"
+        show-arrows
+        @update:model-value="switchTab($event as any)"
+      >
+        <v-tab v-for="t in tabs" :key="t.key" :value="t.key">
           {{ t.label }}
           <v-badge v-if="t.key === 'failed'" :content="counts.failed || 0" inline class="ml-1" color="warning" />
         </v-tab>
@@ -324,15 +347,17 @@ onMounted(refresh)
     </div>
 
     <!-- 数据表：items 是服务端分页好的一页，必须用 v-data-table-server 并把总条数交给
-         items-length，否则 pageCount 按当前页条数算、翻页永远停在第一页 -->
+         items-length，否则 pageCount 按当前页条数算、翻页永远停在第一页。
+         列一律 sortable:false：/files 恒按路径排序（服务端只知道这一种顺序），留着表头
+         箭头会让人以为排的是整个桶，实际只重排了眼前这一页 -->
     <v-data-table-server
       :headers="[
         { title: '文件名', key: 'name', sortable: false },
-        { title: '状态', key: 'status', width: 130 },
+        { title: '状态', key: 'status', width: 130, sortable: false },
         { title: '原因/分数', key: 'reason', sortable: false },
-        { title: '重试', key: 'retries', width: 70 },
-        { title: '大小', key: 'size', width: 90 },
-        { title: '修改时间', key: 'mtime', width: 180 },
+        { title: '重试', key: 'retries', width: 70, sortable: false },
+        { title: '大小', key: 'size', width: 90, sortable: false },
+        { title: '修改时间', key: 'mtime', width: 180, sortable: false },
         { title: '操作', key: 'actions', sortable: false, width: 90 }
       ]"
       :items="rows"

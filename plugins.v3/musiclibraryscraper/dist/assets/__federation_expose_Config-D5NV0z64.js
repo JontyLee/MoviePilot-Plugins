@@ -88,7 +88,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       const _component_v_spacer = _resolveComponent("v-spacer");
       const _component_v_btn = _resolveComponent("v-btn");
       return _openBlock(), _createElementBlock("div", _hoisted_1, [
-        _cache[20] || (_cache[20] = _createElementVNode("div", { class: "text-h6 mb-3" }, "MusicTagWeb音乐库刮削 · 配置", -1)),
+        _cache[21] || (_cache[21] = _createElementVNode("div", { class: "text-h6 mb-3" }, "MusicTagWeb音乐库刮削 · 配置", -1)),
         _createVNode(_component_v_row, { dense: "" }, {
           default: _withCtx(() => [
             _createVNode(_component_v_col, {
@@ -205,9 +205,9 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   modelValue: config.value.min_score,
                   "onUpdate:modelValue": _cache[6] || (_cache[6] = ($event) => config.value.min_score = $event),
                   modelModifiers: { number: true },
-                  label: "最低匹配分数（0-3）",
+                  label: "最低匹配分数（1-3）",
                   type: "number",
-                  min: "0",
+                  min: "1",
                   max: "3",
                   "hide-details": ""
                 }, null, 8, ["modelValue"])
@@ -299,7 +299,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
             ]),
             _cache[15] || (_cache[15] = _createElementVNode("div", { class: "mb-2" }, [
               _createElementVNode("div", { class: "font-weight-medium" }, "查询与选取"),
-              _createTextVNode(" 每个文件按源顺序逐源查询，某源出现 3/3 满分候选就立刻停止，不再问后面的源；都没满分则合并所有候选取最高分。 分数为曲名 / 艺人 / 专辑 各 1 分（先做繁简与大小写归一，互相包含即算命中）；同分时按源顺序、同源内按 MTW 返回顺序取第一个。最高分仍低于「最低匹配分数」（默认 3，即要求三项全中）就记为失败、不写入。 用于匹配的本地身份优先读文件已有的 tag，缺哪项就按 艺人/专辑 (年)/NN - 曲名 的目录结构兜底。 ")
+              _createTextVNode(" 每个文件按源顺序逐源查询，某源出现 3/3 满分候选就立刻停止，不再问后面的源；都没满分则合并所有候选取最高分。 分数为曲名 / 艺人 / 专辑 各 1 分（先做繁简与大小写归一，互相包含即算命中）；同分时按源顺序、同源内按 MTW 返回顺序取第一个。最高分仍低于「最低匹配分数」（默认 3，即要求三项全中）就记为失败、不写入。 这个阈值只在 1-3 之间生效，越界会按最近的一界执行：调到 1 表示只要曲名对上就写入，很容易把翻唱、钢琴版 当成原曲写进文件且无法回滚。 用于匹配的本地身份优先读文件已有的 tag，缺哪项就按 艺人/专辑 (年)/NN - 曲名 的目录结构兜底。 ")
             ], -1)),
             _createElementVNode("div", _hoisted_3, [
               _createElementVNode("div", _hoisted_4, "写入模式 · " + _toDisplayString(modeNote.value), 1),
@@ -310,7 +310,11 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               _createElementVNode("div", { class: "font-weight-medium" }, "叠加宿主策略"),
               _createTextVNode(" 最终是否覆盖还取宿主「设置 → 媒体刮削」音乐三项策略与这里的较强者：宿主标签策略=覆盖时，即使这里选只补缺也会重写； =跳过时，两种模式都不写该项。宿主默认 标签仅缺失、封面仅缺失、歌词更优才换。 ")
             ], -1)),
-            _cache[17] || (_cache[17] = _createElementVNode("div", null, [
+            _cache[17] || (_cache[17] = _createElementVNode("div", { class: "mb-2" }, [
+              _createElementVNode("div", { class: "font-weight-medium" }, "会处理的文件"),
+              _createTextVNode(" 只扫描宿主音频白名单（设置 → 媒体刮削 → 音频扩展名）与本插件支持列表的交集：宿主不收的扩展名写标签时 会被原生刮削链直接拒成「刮削路径中没有支持的音频文件」，先排除掉才不会白打请求、又把文件记成失败并烧满重试次数。 Jellyfin 的 .trickplay 预览缓存目录整棵跳过；目录软链不跟随，避免回环目录把这一轮卡死。 指向库外的音频软链同样会跳过并在日志里报数量 —— 写标签是按路径落到真实文件的， 让扫描改到音乐库之外的文件不可接受；确有需要请把它指向的目录也加进库路径。 ")
+            ], -1)),
+            _cache[18] || (_cache[18] = _createElementVNode("div", null, [
               _createElementVNode("div", { class: "font-weight-medium" }, "同一份库"),
               _createTextVNode(" MTW 与 MP 需挂载同一份音乐库路径，否则写标签会落到不同文件。 ")
             ], -1))
@@ -323,7 +327,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
             variant: "text",
             onClick: _cache[11] || (_cache[11] = ($event) => emit("switch"))
           }, {
-            default: _withCtx(() => [..._cache[18] || (_cache[18] = [
+            default: _withCtx(() => [..._cache[19] || (_cache[19] = [
               _createTextVNode("查看数据页", -1)
             ])]),
             _: 1
@@ -333,7 +337,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
             "prepend-icon": "mdi-content-save",
             onClick: saveConfig
           }, {
-            default: _withCtx(() => [..._cache[19] || (_cache[19] = [
+            default: _withCtx(() => [..._cache[20] || (_cache[20] = [
               _createTextVNode("保存配置", -1)
             ])]),
             _: 1
@@ -344,6 +348,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const Config = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-1f028c0e"]]);
+const Config = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-9884b1d0"]]);
 
 export { Config as default };
