@@ -1,0 +1,7 @@
+
+/* 仅插件内局部样式；不得写全局 v- 或 mdi- 类规则（构建有 postcss 门禁）。 */
+.plugin-root .text-truncate[data-v-42db8f93] {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

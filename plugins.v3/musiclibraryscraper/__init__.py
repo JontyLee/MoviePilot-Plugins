@@ -2,34 +2,53 @@
 musiclibraryscraper — MoviePilot v3 插件
 
 用 Music Tag Web 作为音乐元数据来源，MP 侧走 ScrapingChain 原生 MUSIC 写入。
+
+v0.2.0：
+- 增量扫描：done/failed 状态账（存 plugindata），mtime+size 命中即跳过，不再重复解析 tag。
+- 数据页：Vue 联邦交互页（Page.vue），展示 已处理/失败/待重试，支持逐行与批量重试。
+- 调度：改用宿主 get_service() 周期任务 + 一次性任务，插件不再自建 BackgroundScheduler。
+- 对外：get_api() 提供 /status /files /retry /scan；get_command() 提供状态与重试命令。
 """
 from __future__ import annotations
 
+import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from threading import Event
 from typing import Any, Dict, List, Optional, Tuple
 
-import pytz
-from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from fastapi import Request
 
 from app import schemas
 from app.chain.scraping import ScrapingChain
+from app.plugins import _PluginBase
+from app.schemas.types import EventType
 from app.sdk.config import settings
+from app.sdk.events import Event, eventmanager
 from app.sdk.logging import logger
 from app.sdk.media import (
     MetaInfoPath,
     MusicInfo,
 )
 from app.sdk.network import RequestUtils
-from app.plugins import _PluginBase
+
+try:  # 宿主较新版本才有 SDK 调度门面；缺失时回退到后台线程
+    from app.sdk import scheduler as scheduler_sdk
+except Exception:  # pragma: no cover - 视宿主版本而定
+    scheduler_sdk = None
 
 
 # MP 支持的音乐扩展名，独立于视频扩展名白名单。
 _MUSIC_EXT = (".flac", ".mp3", ".m4a", ".ape", ".wav", ".wv", ".tta",
-              ".aiff", ".aif", ".opus", ".ogg", ".mpc", ".dsf", ".dff", ".mka")
+              ".aif", ".aiff", ".opus", ".ogg", ".mpc", ".dsf", ".dff", ".mka")
+
+# done/failed/runs 状态账的 plugindata key。
+_KEY_DONE = "done"
+_KEY_FAILED = "failed"
+_KEY_RUNS = "runs"
+# 默认 cron：每周日 03:00（POSIX DoW 0=周日）。
+_DEFAULT_CRON = "0 3 * * 0"
 
 
 class _MusicScrapeChain(ScrapingChain):
@@ -47,16 +66,14 @@ class MusicLibraryScraper(_PluginBase):
     plugin_name = "音乐库刮削 (MTW)"
     plugin_desc = "定时扫描音乐目录，用 Music Tag Web 的网易云 / QQ / 酷我等源做识别，写入沿用 MP 原生刮削链路。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/163music_A.png"
-    plugin_version = "0.1.0"
+    plugin_version = "0.2.0"
     plugin_author = "local"
     author_url = ""
     plugin_config_prefix = "musiclibraryscraper_"
     plugin_order = 8
     user_level = 1
 
-    _scheduler: Optional[BackgroundScheduler] = None
-    _event = Event()
-
+    # 配置项
     _enabled: bool = False
     _onlyonce: bool = False
     _cron: Optional[str] = None
@@ -69,10 +86,21 @@ class MusicLibraryScraper(_PluginBase):
     _mtw_resource: str = "netease"
     _mtw_select_mode: int = 0
     _min_score: int = 3
+
+    # MTW 令牌缓存
     _token: Optional[str] = None
     _token_expiry: float = 0.0
 
+    # 失败自动重试上限：retries 达到该值后，定时扫描不再自动重试（仅手动重试）。
+    MAX_RETRY: int = 5
+    # 扫描停止信号。
+    _event = threading.Event()
+
     def init_plugin(self, config: Dict[str, Any] = None):
+        # 每实例独立的扫描锁与运行标志（放在 __dict__，避免类属性被多实例共享）。
+        self.__dict__.setdefault("_scan_lock", threading.Lock())
+        self.__dict__["_scan_running"] = False
+
         if config:
             self._enabled = bool(config.get("enabled"))
             self._onlyonce = bool(config.get("onlyonce"))
@@ -93,23 +121,12 @@ class MusicLibraryScraper(_PluginBase):
             except (TypeError, ValueError):
                 self._min_score = 3
 
-        self.stop_service()
-
-        if not (self._enabled or self._onlyonce):
-            return
-
+        # 勾选“立即运行一次”：回写配置关闭该开关，并投递一次性扫描。
         if self._onlyonce:
-            self._scheduler = BackgroundScheduler(timezone=settings.TZ)
-            self._scheduler.add_job(
-                func=self.__scan,
-                trigger="date",
-                run_date=datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(seconds=3),
-                name="音乐库刮削（一次性）",
-            )
             self._onlyonce = False
             self.update_config({
-                "onlyonce": False,
                 "enabled": self._enabled,
+                "onlyonce": False,
                 "cron": self._cron,
                 "scraper_paths": self._scraper_paths,
                 "exclude_paths": self._exclude_paths,
@@ -121,53 +138,208 @@ class MusicLibraryScraper(_PluginBase):
                 "mtw_select_mode": self._mtw_select_mode,
                 "min_score": self._min_score,
             })
-
-        if self._enabled and not self._scheduler:
-            self._scheduler = BackgroundScheduler(timezone=settings.TZ)
-
-        if self._enabled:
-            raw_cron = (self._cron or "").strip() or "0 3 * * 0"
-            try:
-                trigger = CronTrigger.from_crontab(raw_cron)
-            except (ValueError, KeyError) as err:
-                logger.warning(
-                    f"[music-scraper] cron 表达式非法：{raw_cron!r} → {err}，回落默认 0 3 * * 0"
-                )
-                trigger = CronTrigger.from_crontab("0 3 * * 0")
-            logger.info(f"[music-scraper] 注册定时任务 cron={raw_cron}")
-            self._scheduler.add_job(
-                func=self.__scan,
-                trigger=trigger,
-                name="音乐库刮削",
-            )
-
-        if self._scheduler and self._scheduler.get_jobs() and not self._scheduler.running:
-            self._scheduler.start()
+            self._kick_scan()
 
     def get_state(self) -> bool:
         return self._enabled
 
+    # ---------------- 命令 ----------------
+
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
-        return []
+        """注册远程命令：查询刮削状态 / 重试失败项。"""
+        return [
+            {
+                "cmd": "/music_scraper_status",
+                "event": EventType.PluginAction,
+                "desc": "音乐库刮削：查看运行状态与统计",
+                "category": "音乐刮削",
+                "data": {"action": "music_scraper_status"},
+            },
+            {
+                "cmd": "/music_scraper_retry",
+                "event": EventType.PluginAction,
+                "desc": "音乐库刮削：重试全部失败项",
+                "category": "音乐刮削",
+                "data": {"action": "music_scraper_retry"},
+            },
+        ]
+
+    @eventmanager.register(EventType.PluginAction)
+    def handle_command(self, event: Event = None):
+        """处理属于本插件的 PluginAction 事件。"""
+        event_data = (event.event_data if event else None) or {}
+        action = event_data.get("action")
+        if action == "music_scraper_status":
+            self._cmd_status()
+        elif action == "music_scraper_retry":
+            self._cmd_retry()
+
+    def _cmd_status(self):
+        """命令：打印最近一次运行汇总与分桶计数。"""
+        stats = self._build_status()
+        self.post_message(
+            title=f"{self.plugin_name} 状态",
+            text=(
+                f"最近扫描：{stats['runs'].get('ts') or '从未运行'}\n"
+                f"发现 {stats['runs'].get('scanned', 0)}｜命中缓存跳过 "
+                f"{stats['runs'].get('from_cache', 0)}｜已有tag跳过 "
+                f"{stats['runs'].get('skipped_tagged', 0)}\n"
+                f"成功 {stats['runs'].get('ok', 0)}｜失败 "
+                f"{stats['runs'].get('failed', 0)}\n"
+                f"已处理 {stats['counts']['done']}｜待重试 "
+                f"{stats['counts']['retryable']}｜超限 "
+                f"{stats['counts']['exhausted']}｜待处理 "
+                f"{stats['counts']['pending_unknown']}"
+            ),
+        )
+
+    def _cmd_retry(self):
+        """命令：投递一次“重试全部失败项”的扫描。"""
+        failed = self._load_failed()
+        paths = list(failed.keys())
+        if not paths:
+            self.post_message(title=f"{self.plugin_name} 重试", text="没有失败项可重试。")
+            return
+        started = self._kick_scan(force=True, paths=paths)
+        self.post_message(
+            title=f"{self.plugin_name} 重试",
+            text=f"已提交 {len(paths)} 个失败项的重试。" if started else "已有扫描在运行，请稍后再试。",
+        )
+
+    # ---------------- API ----------------
 
     def get_api(self) -> List[Dict[str, Any]]:
+        """插件对外接口，供 Vue 数据页与 Agent 调用（bear 认证）。"""
+        return [
+            {
+                "path": "/status",
+                "endpoint": self.api_status,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "扫描状态与统计汇总",
+            },
+            {
+                "path": "/files",
+                "endpoint": self.api_files,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "按桶分页查询文件（done/failed/pending）",
+            },
+            {
+                "path": "/retry",
+                "endpoint": self.api_retry,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "重试指定路径或全部失败项",
+            },
+            {
+                "path": "/scan",
+                "endpoint": self.api_scan,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "触发一次扫描",
+            },
+        ]
+
+    def api_status(self, request: Request) -> Dict[str, Any]:
+        """GET /status —— 返回汇总、计数、配置回显（不含密码）与最近失败。"""
+        return self._build_status()
+
+    def api_files(self, request: Request) -> Dict[str, Any]:
+        """GET /files —— bucket=done|failed|pending&limit&offset&search 分页查询。"""
+        qp = request.query_params
+        bucket = (qp.get("bucket") or "done").lower()
+        try:
+            limit = max(1, min(int(qp.get("limit") or 50), 500))
+        except (TypeError, ValueError):
+            limit = 50
+        try:
+            offset = max(0, int(qp.get("offset") or 0))
+        except (TypeError, ValueError):
+            offset = 0
+        search = (qp.get("search") or "").strip().lower()
+
+        rows = self._collect_rows(bucket)
+        if search:
+            rows = [r for r in rows if search in r["path"].lower() or search in (r["name"] or "").lower()]
+        rows.sort(key=lambda r: r["path"])
+        return {
+            "bucket": bucket,
+            "total": len(rows),
+            "offset": offset,
+            "limit": limit,
+            "items": rows[offset:offset + limit],
+        }
+
+    async def api_retry(self, request: Request) -> Dict[str, Any]:
+        """POST /retry —— body {paths:[...]} 或 {bucket:"failed", all:true}。"""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        paths = body.get("paths") if isinstance(body, dict) else None
+        all_failed = bool(isinstance(body, dict) and body.get("all"))
+        if (not paths) and all_failed:
+            paths = list(self._load_failed().keys())
+        if not paths:
+            return {"accepted": False, "reason": "no_paths", "count": 0}
+        paths = [str(p) for p in paths]
+        started = self._kick_scan(force=True, paths=paths)
+        return {
+            "accepted": started,
+            "count": len(paths),
+            "running": self._is_running(),
+            "reason": None if started else "busy",
+        }
+
+    async def api_scan(self, request: Request) -> Dict[str, Any]:
+        """POST /scan —— body {force?:bool}，触发一次（增量或全量）扫描。"""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        force = bool(isinstance(body, dict) and body.get("force")) or self._force_all
+        started = self._kick_scan(force=force)
+        return {"accepted": started, "running": self._is_running(),
+                "reason": None if started else "busy"}
+
+    # ---------------- 页面 / 渲染 ----------------
+
+    @staticmethod
+    def get_render_mode() -> Tuple[str, str]:
+        """声明 Vue 联邦渲染，产物目录 dist/assets。"""
+        return "vue", "dist/assets"
+
+    def get_page(self) -> List[dict]:
+        """Vue 模式下详情页由远程 ./Page 渲染，这里返回空。"""
         return []
 
     def get_service(self) -> List[Dict[str, Any]]:
-        return []
+        """周期扫描服务，由宿主调度器托管（插件自建 scheduler 已移除）。"""
+        if not self._enabled:
+            return []
+        return [
+            {
+                "id": "MusicLibraryScraper.Scan",
+                "name": "音乐库刮削",
+                "trigger": self._build_cron_trigger(self._cron),
+                "func": self.__scan,
+                "kwargs": {},
+            }
+        ]
 
     def stop_service(self):
+        """插件停用：投递停止信号并取消宿主一次性任务（可重复调用）。"""
+        self._event.set()
         try:
-            if self._scheduler:
-                self._scheduler.remove_all_jobs()
-                if self._scheduler.running:
-                    self._event.set()
-                    self._scheduler.shutdown()
-                    self._event.clear()
-                self._scheduler = None
-        except Exception as err:
-            logger.debug(f"[music-scraper] 停止任务异常: {err}")
+            remove = getattr(scheduler_sdk, "remove_plugin_once_job", None) if scheduler_sdk else None
+            if remove:
+                remove(self.__class__.__name__, "scan_once")
+        except Exception as err:  # pragma: no cover
+            logger.debug(f"[music-scraper] 取消一次性任务异常: {err}")
+        finally:
+            self._event.clear()
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         return [
@@ -275,7 +447,7 @@ class MusicLibraryScraper(_PluginBase):
             "enabled": False,
             "onlyonce": False,
             "mode": "",
-            "cron": "0 3 * * 0",
+            "cron": _DEFAULT_CRON,
             "scraper_paths": "",
             "exclude_paths": "",
             "mtw_base_url": "",
@@ -286,19 +458,82 @@ class MusicLibraryScraper(_PluginBase):
             "min_score": 3,
         }
 
-    def get_page(self) -> List[dict]:
-        return []
+    # ---------------- 状态账 ----------------
+
+    def _load_done(self) -> Dict[str, dict]:
+        data = self.get_data(_KEY_DONE)
+        return data if isinstance(data, dict) else {}
+
+    def _load_failed(self) -> Dict[str, dict]:
+        data = self.get_data(_KEY_FAILED)
+        return data if isinstance(data, dict) else {}
+
+    def _load_runs(self) -> dict:
+        data = self.get_data(_KEY_RUNS)
+        return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _now_iso() -> str:
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # ---------------- 主体流程 ----------------
 
-    def __scan(self):
-        if not self._scraper_paths or not self._mtw_base_url:
-            logger.warning("[music-scraper] 未配置 scraper_paths 或 mtw_base_url，跳过")
-            return
+    def _build_cron_trigger(self, raw_cron: Optional[str]) -> CronTrigger:
+        """非法/空 cron 回落默认，避免插件整体 load_failed。"""
+        raw = (raw_cron or "").strip() or _DEFAULT_CRON
+        try:
+            trigger = CronTrigger.from_crontab(raw)
+        except (ValueError, KeyError) as err:
+            logger.warning(f"[music-scraper] cron 表达式非法：{raw!r} → {err}，回落默认 {_DEFAULT_CRON}")
+            trigger = CronTrigger.from_crontab(_DEFAULT_CRON)
+        return trigger
 
+    def _is_running(self) -> bool:
+        return bool(self.__dict__.get("_scan_running"))
+
+    def _kick_scan(self, force: bool = False, paths: Optional[List[str]] = None) -> bool:
+        """投递一次扫描：无参优先交宿主一次性任务，带参/强制走后台线程。"""
+        if not force and not paths:
+            add = getattr(scheduler_sdk, "add_plugin_once_job", None) if scheduler_sdk else None
+            if add:
+                try:
+                    add(
+                        self.__class__.__name__,
+                        "scan_once",
+                        self.__scan,
+                        "音乐库刮削（一次性）",
+                        delay_seconds=3,
+                    )
+                    return True
+                except Exception as err:  # pragma: no cover
+                    logger.debug(f"[music-scraper] 一次性任务投递失败，回落后台线程: {err}")
+        return self._start_scan_async(force=force, paths=paths)
+
+    def _start_scan_async(self, force: bool = False, paths: Optional[List[str]] = None) -> bool:
+        """在后台线程执行扫描；若已有扫描在跑则拒绝，避免并发重复处理。"""
+        lock = self.__dict__.setdefault("_scan_lock", threading.Lock())
+        with lock:
+            if self.__dict__.get("_scan_running"):
+                return False
+            self.__dict__["_scan_running"] = True
+
+        def _worker():
+            try:
+                self.__scan(force=force, target_paths=paths)
+            except Exception as err:  # pragma: no cover
+                logger.error(f"[music-scraper] 后台扫描异常: {err}")
+            finally:
+                with lock:
+                    self.__dict__["_scan_running"] = False
+
+        threading.Thread(target=_worker, name="music-scraper-scan", daemon=True).start()
+        return True
+
+    def _enumerate_files(self) -> List[Path]:
+        """按配置枚举音频文件（保留扩展名、trickplay、排除路径过滤）。"""
         exclude_paths = [p for p in (self._exclude_paths or "").split("\n") if p.strip()]
         files: List[Path] = []
-        for root in (p for p in self._scraper_paths.split("\n") if p.strip()):
+        for root in (p for p in (self._scraper_paths or "").split("\n") if p.strip()):
             root_path = Path(root)
             if not root_path.exists():
                 logger.warning(f"[music-scraper] 路径不存在: {root}")
@@ -306,7 +541,7 @@ class MusicLibraryScraper(_PluginBase):
             for fp in root_path.rglob("*"):
                 if self._event.is_set():
                     logger.info("[music-scraper] 收到停止信号")
-                    return
+                    return files
                 if not fp.is_file():
                     continue
                 if fp.suffix.lower() not in _MUSIC_EXT:
@@ -316,51 +551,158 @@ class MusicLibraryScraper(_PluginBase):
                 if any(fp.is_relative_to(Path(ex)) for ex in exclude_paths if ex):
                     continue
                 files.append(fp)
+        return files
 
-        logger.info(f"[music-scraper] 发现 {len(files)} 个音频文件，开始处理")
+    def __scan(self, force: bool = False, target_paths: Optional[List[str]] = None):
+        """增量扫描主流程。
 
-        ok, skipped, failed = 0, 0, 0
+        force：忽略 done 缓存并强制重打（覆盖模式下也强制）。
+        target_paths：仅处理这批路径（供手动重试），此时跳过缓存与重试上限。
+        """
+        if not self._scraper_paths or not self._mtw_base_url:
+            logger.warning("[music-scraper] 未配置 scraper_paths 或 mtw_base_url，跳过")
+            return
+
+        started = time.time()
+        done = self._load_done()
+        failed = self._load_failed()
+        targeted = bool(target_paths)
+
+        if targeted:
+            files = [Path(p) for p in target_paths if p]
+        else:
+            files = self._enumerate_files()
+
+        logger.info(
+            f"[music-scraper] 开始处理 {len(files)} 个文件"
+            f"（mode={'覆盖' if (force or self._force_all) else '补空'}"
+            f"{'，定向重试' if targeted else '，增量'}）"
+        )
+
+        scanned = from_cache = skipped_tagged = ok = failed_n = exhausted = 0
+        now_iso = self._now_iso()
+        effective_force = force or (self._force_all and not targeted)
+        live_keys = set()  # 整盘扫描时实际存在（stat 成功）的文件，供 prune 用
+
         for fp in files:
             if self._event.is_set():
+                logger.info("[music-scraper] 收到停止信号，提前结束")
                 break
-            if not self._force_all and self.__has_core_tags(fp):
-                skipped += 1
+            scanned += 1
+            key = str(fp)
+            try:
+                st = fp.stat()
+                mtime, size = int(st.st_mtime), int(st.st_size)
+            except OSError as err:
+                logger.debug(f"[music-scraper] 无法 stat：{key} — {err}")
                 continue
-            if self.__scrape_file(fp):
+            live_keys.add(key)
+
+            # 增量：命中 done 缓存直接跳过（不读 tag）。
+            if not effective_force and not targeted and key in done:
+                prev = done[key]
+                if isinstance(prev, dict) and prev.get("mtime") == mtime and prev.get("size") == size:
+                    from_cache += 1
+                    continue
+
+            # 失败上限：非强制、非定向时，超限且文件未变则不再自动重试。
+            if not effective_force and not targeted and key in failed:
+                prev = failed[key]
+                if isinstance(prev, dict) \
+                        and int(prev.get("retries", 0)) >= self.MAX_RETRY \
+                        and prev.get("mtime") == mtime and prev.get("size") == size:
+                    exhausted += 1
+                    continue
+
+            # 补空模式：已有核心 tag 则直接标记 done（无需再解析）。
+            if not effective_force and self.__has_core_tags(fp):
+                prev = done.get(key)
+                source = prev.get("source") if isinstance(prev, dict) else None
+                done[key] = {"mtime": mtime, "size": size, "ts": now_iso, "source": source}
+                failed.pop(key, None)
+                skipped_tagged += 1
+                continue
+
+            okf, reason, score = self.__scrape_file(fp)
+            if okf:
+                done[key] = {"mtime": mtime, "size": size, "ts": now_iso, "source": self._mtw_resource}
+                failed.pop(key, None)
                 ok += 1
             else:
-                failed += 1
+                prev = failed.get(key)
+                prev_retries = int(prev.get("retries", 0)) if isinstance(prev, dict) else 0
+                failed[key] = {
+                    "mtime": mtime, "size": size,
+                    "retries": prev_retries + 1,
+                    "last_ts": now_iso, "reason": reason, "score": score,
+                }
+                done.pop(key, None)
+                failed_n += 1
 
-        logger.info(f"[music-scraper] 完成：成功 {ok}，跳过已打 tag {skipped}，失败 {failed}")
+        # 清理：仅整盘扫描（未中断）时剔除磁盘上已消失的记账项，避免状态无限膨胀。
+        if not targeted and not self._event.is_set():
+            for k in list(done.keys()):
+                if k not in live_keys:
+                    done.pop(k, None)
+            for k in list(failed.keys()):
+                if k not in live_keys:
+                    failed.pop(k, None)
+
+        pending = scanned - from_cache - skipped_tagged - ok - failed_n - exhausted
+        summary = {
+            "ts": now_iso,
+            "scanned": scanned,
+            "from_cache": from_cache,
+            "skipped_tagged": skipped_tagged,
+            "ok": ok,
+            "failed": failed_n,
+            "exhausted": exhausted,
+            "pending": max(0, pending),
+            "force": effective_force,
+            "targeted": targeted,
+            "cron": self._cron or _DEFAULT_CRON,
+            "duration_s": round(time.time() - started, 1),
+        }
+        self.save_data(_KEY_DONE, done)
+        self.save_data(_KEY_FAILED, failed)
+        self.save_data(_KEY_RUNS, summary)
+        logger.info(
+            f"[music-scraper] 完成：命中缓存 {from_cache}，已有tag {skipped_tagged}，"
+            f"成功 {ok}，失败 {failed_n}，超限跳过 {exhausted}（{summary['duration_s']}s）"
+        )
 
     def __has_core_tags(self, path: Path) -> bool:
-        """粗略判断是否已具备 artist/album/title。用 MetaInfoPath 会读 tag 里的 title。"""
+        """粗略判断是否已具备 artist/album/title。用 MetaInfoPath 读 tag 里的 title。"""
         try:
             meta = MetaInfoPath(path)
             return bool(meta.title and (meta.artist or getattr(meta, "artists", None)))
         except Exception:
             return False
 
-    def __scrape_file(self, path: Path) -> bool:
+    def __scrape_file(self, path: Path) -> Tuple[bool, str, Optional[int]]:
+        """处理单个文件，返回 (是否成功, 失败原因, 命中分数)。"""
         candidates = self._mtw_fetch_candidates(path)
         if not candidates:
-            logger.debug(f"[music-scraper] 无候选: {path}")
-            return False
-        picked = self._mtw_pick_best(path, candidates)
+            return False, "MTW 无候选", None
+        picked, score = self._mtw_pick_best(path, candidates)
         if not picked:
-            logger.info(f"[music-scraper] 未达阈值 min_score={self._min_score}: {path.name}")
-            return False
+            return False, f"未达阈值 min_score={self._min_score}", score
         info = self._candidate_to_musicinfo(picked, path)
         if not info:
-            logger.debug(f"[music-scraper] 候选转 MusicInfo 失败: {path}")
-            return False
-        fileitem = schemas.FileItem(
-            type="file",
-            name=path.name,
-            path=str(path),
-            extension=path.suffix.lstrip("."),
-            size=path.stat().st_size if path.exists() else 0,
-        )
+            return False, "候选转 MusicInfo 失败", score
+        try:
+            fileitem = schemas.FileItem(
+                type="file",
+                name=path.name,
+                path=str(path),
+                extension=path.suffix.lstrip("."),
+                size=path.stat().st_size if path.exists() else 0,
+            )
+        except OSError:
+            fileitem = schemas.FileItem(
+                type="file", name=path.name, path=str(path),
+                extension=path.suffix.lstrip("."), size=0,
+            )
         ok, msg = _MusicScrapeChain().scrape_metadata(
             fileitem=fileitem,
             mediainfo=info,
@@ -368,9 +710,96 @@ class MusicLibraryScraper(_PluginBase):
         )
         if ok:
             logger.info(f"[music-scraper] 刮削成功: {path.name} → {info.title}")
-            return True
+            return True, "", score
         logger.warning(f"[music-scraper] 刮削失败: {path.name} — {msg}")
-        return False
+        return False, f"写入失败：{msg}", score
+
+    # ---------------- 查询辅助（供 status/files） ----------------
+
+    def _build_status(self) -> Dict[str, Any]:
+        """组装状态汇总：runs + 分桶计数 + 配置回显（不含密码）+ 最近失败。"""
+        done = self._load_done()
+        failed = self._load_failed()
+        runs = self._load_runs()
+        retryable = sum(1 for v in failed.values() if int(v.get("retries", 0)) < self.MAX_RETRY)
+        exhausted = len(failed) - retryable
+        recent_failed = sorted(
+            ({"path": k, **(v if isinstance(v, dict) else {})} for k, v in failed.items()),
+            key=lambda r: r.get("last_ts") or "",
+            reverse=True,
+        )[:10]
+        return {
+            "enabled": self._enabled,
+            "running": self._is_running(),
+            "max_retry": self.MAX_RETRY,
+            "runs": runs,
+            "counts": {
+                "done": len(done),
+                "failed": len(failed),
+                "retryable": retryable,
+                "exhausted": exhausted,
+                "pending_unknown": runs.get("pending", 0),
+            },
+            "config": {
+                "cron": self._cron or _DEFAULT_CRON,
+                "mode": "force_all" if self._force_all else "fill_empty",
+                "scraper_paths": self._scraper_paths,
+                "exclude_paths": self._exclude_paths,
+                "mtw_base_url": self._mtw_base_url,
+                "mtw_resource": self._mtw_resource,
+                "mtw_select_mode": self._mtw_select_mode,
+                "min_score": self._min_score,
+                "has_username": bool(self._mtw_username),
+                # 绝不回传密码。
+            },
+            "recent_failed": recent_failed,
+        }
+
+    def _collect_rows(self, bucket: str) -> List[Dict[str, Any]]:
+        """把某桶整理成表格行 {path,name,mtime,size,status,reason,retries,score,ts}。"""
+        rows: List[Dict[str, Any]] = []
+        if bucket == "failed":
+            failed = self._load_failed()
+            for path, v in failed.items():
+                v = v if isinstance(v, dict) else {}
+                rows.append({
+                    "path": path, "name": Path(path).name,
+                    "mtime": v.get("mtime"), "size": v.get("size"),
+                    "status": "failed", "reason": v.get("reason"),
+                    "retries": v.get("retries"), "score": v.get("score"),
+                    "ts": v.get("last_ts"),
+                })
+        elif bucket == "pending":
+            done = self._load_done()
+            failed = self._load_failed()
+            known = set(done) | set(failed)
+            for fp in self._enumerate_files():
+                key = str(fp)
+                if key in known:
+                    continue
+                try:
+                    st = fp.stat()
+                    mtime, size = int(st.st_mtime), st.st_size
+                except OSError:
+                    mtime, size = None, None
+                rows.append({
+                    "path": key, "name": fp.name,
+                    "mtime": mtime, "size": size,
+                    "status": "pending", "reason": None,
+                    "retries": None, "score": None, "ts": None,
+                })
+        else:  # done
+            done = self._load_done()
+            for path, v in done.items():
+                v = v if isinstance(v, dict) else {}
+                rows.append({
+                    "path": path, "name": Path(path).name,
+                    "mtime": v.get("mtime"), "size": v.get("size"),
+                    "status": "done", "reason": None,
+                    "retries": None, "score": None,
+                    "ts": v.get("ts"), "source": v.get("source"),
+                })
+        return rows
 
     # ---------------- MTW HTTP 客户端 ----------------
 
@@ -428,7 +857,7 @@ class MusicLibraryScraper(_PluginBase):
 
     # ---------------- 候选匹配 & 字段映射 ----------------
 
-    def _mtw_pick_best(self, path: Path, candidates: List[dict]) -> Optional[dict]:
+    def _mtw_pick_best(self, path: Path, candidates: List[dict]) -> Tuple[Optional[dict], int]:
         meta = MetaInfoPath(path)
         want = {
             "title": (meta.title or "").strip().lower(),
@@ -441,7 +870,7 @@ class MusicLibraryScraper(_PluginBase):
             score = self._score_candidate(c, want)
             if score > best_score:
                 best, best_score = c, score
-        return best if best_score >= self._min_score else None
+        return (best if best_score >= self._min_score else None), best_score
 
     @staticmethod
     def _score_candidate(c: dict, want: dict) -> int:

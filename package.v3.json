@@ -3,13 +3,14 @@
     "name": "音乐库刮削 (MTW)",
     "description": "定时扫描音乐目录，用 Music Tag Web 的网易云/QQ/酷我等源做识别，写入沿用 MP 原生 ScrapingChain 链路。",
     "labels": "音乐,刮削",
-    "version": "0.1.2",
+    "version": "0.2.0",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/163music_A.png",
     "author": "JontyLee",
     "level": 1,
     "release": true,
-    "system_version": ">=3.1.2",
+    "system_version": ">=3.1.6",
     "history": {
+      "v0.2.0": "增量扫描 + 状态账（done/failed/runs 落 plugindata，mtime+size 命中即跳过，不再重复解析 tag）；Vue 联邦数据页（已处理/失败/待重试，逐行与批量重试）；get_api(/status /files /retry /scan) 与 /music_scraper_status、/music_scraper_retry 命令；调度改由宿主 get_service 托管，插件不再自建 BackgroundScheduler；修正 plugin_version 与索引版本一致。",
       "v0.1.2": "加固：cron 表达式非法时 try/except 回落默认，不再让插件整体 load_failed。",
       "v0.1.1": "修复：默认 cron `0 3 * * 7` 被 apscheduler POSIX 校验拒绝（DoW 只允许 0-6），改为 `0 3 * * 0`。",
       "v0.1.0": "初版：MTW fetch_id3_by_title 候选 + MP ScrapingChain 写入；跳过已打 tag；Jellyfin .trickplay 排除。"
