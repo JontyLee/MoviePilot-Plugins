@@ -73,7 +73,7 @@ V3 新插件使用 `plugins.v3/<plugin_id_lower>/`、`tests/v3/<plugin_id_lower>
 | 配置前缀 | `musiclibraryscraper_` |
 | 版本 | 0.3.1 |
 | 元数据来源 | Music Tag Web（MTW），插件不直连任何音乐平台 API |
-| 图标 | <https://music.speedtest.jontylee.com:8443/static/dist/img/avator.webp>（MTW 实例自带；仓库保留 `icons/music-tag.png` 作离线备份） |
+| 图标 | `icons/avator.webp`（MTW 界面自带的头像图，已下载到仓库，市场走 raw 地址，不热链 MTW 实例） |
 
 定时扫描音乐目录，把每个文件按配置顺序交给 MTW 的 `/apimt/fetch_id3_by_title/`
 识别，再沿用 MP 原生音乐刮削链路写入标签与封面。

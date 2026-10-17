@@ -48,7 +48,7 @@ v0.3.1：
   :footer-props 会被当成未知属性丢掉，页脚一直读 locale 默认值。v3 把 makeVDataTableFooterProps
   平铺进 VDataTable 自身，所以 items-per-page-text / items-per-page-options / page-text
   必须直接写在 <v-data-table> 上。
-- 图标改用 MTW 实例自带的 avator.webp 在线地址。
+- 图标改用 MTW 界面自带的 avator.webp，已下载进仓库 icons/，市场引用仓库 raw 地址而不是热链实例。
 """
 from __future__ import annotations
 
@@ -307,7 +307,7 @@ class MusicLibraryScraper(_PluginBase):
         "（网易云 / QQ / 酷我 / 酷狗 / 咪咕 / MusicBrainz / smart_tag），"
         "再沿用 MP 原生音乐刮削链路写入标签与封面。"
     )
-    plugin_icon = "https://music.speedtest.jontylee.com:8443/static/dist/img/avator.webp"
+    plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/avator.webp"
     plugin_version = "0.3.1"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"

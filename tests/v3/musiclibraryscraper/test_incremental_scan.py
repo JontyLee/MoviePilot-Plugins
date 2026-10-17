@@ -290,6 +290,14 @@ class ContractTest(unittest.TestCase):
         self.assertNotIn("mtw_select_mode", defaults)
         self.assertNotIn("候选排序", src)
 
+    def test_icon_is_vendored_in_repo(self):
+        """图标必须走本仓库 raw 地址，不能热链 MTW 实例（实例下线会连带市场图标一起裂）。"""
+        self.assertTrue(
+            mls.MusicLibraryScraper.plugin_icon.startswith(
+                "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/"
+            )
+        )
+
     def test_mtw_endpoints_use_apimt_prefix(self):
         """MTW 的 Django 路由挂在 /apimt/ 下，写成 /api/ 会一律 404。"""
         src = Path(mls.__file__).read_text(encoding="utf-8")
