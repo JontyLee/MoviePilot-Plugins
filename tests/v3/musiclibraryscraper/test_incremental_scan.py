@@ -1,8 +1,8 @@
-"""MusicLibraryScraper v0.2.0 增量扫描 & 状态账 单测。
+"""MusicLibraryScraper 增量扫描 & 状态账 单测。
 
 只验证插件自身逻辑（done/failed 记账、mtime+size 增量跳过、失败重试上限、定向重试、
 prune、status 汇总不泄漏密码）。MTW 网络与 MP 写入通过替换私有方法 __scrape_file /
-__has_core_tags 完全屏蔽。
+__is_complete 完全屏蔽。
 
 运行：python3 tests/v3/musiclibraryscraper/test_incremental_scan.py
 """
@@ -61,7 +61,7 @@ sys.path.insert(0, str(_ROOT / "plugins.v3"))
 import musiclibraryscraper as mls  # noqa: E402
 
 _SCAN = "_MusicLibraryScraper__scan"
-_HAS_TAGS = "_MusicLibraryScraper__has_core_tags"
+_HAS_TAGS = "_MusicLibraryScraper__is_complete"
 _SCRAPE = "_MusicLibraryScraper__scrape_file"
 
 
@@ -232,6 +232,129 @@ class ContractTest(unittest.TestCase):
         apis = p.get_api()
         self.assertEqual({a["path"] for a in apis}, {"/status", "/files", "/retry", "/scan"})
         self.assertTrue(all(a["auth"] == "bear" for a in apis))
+
+    def test_mtw_endpoints_use_apimt_prefix(self):
+        """MTW 的 Django 路由挂在 /apimt/ 下，写成 /api/ 会一律 404。"""
+        src = Path(mls.__file__).read_text(encoding="utf-8")
+        self.assertIn("/apimt/token/", src)
+        self.assertIn("/apimt/fetch_id3_by_title/", src)
+        self.assertNotIn('/api/token/', src)
+        self.assertNotIn('/api/fetch_id3_by_title/', src)
+
+
+class MatchTest(unittest.TestCase):
+    """候选比对这些坑：繁简之外的空格/标点差异、文件名当搜索词、tag 读不到时的目录兜底。"""
+
+    def _plugin(self, min_score=3):
+        p = mls.MusicLibraryScraper()
+        p._min_score = min_score
+        p._mtw_resource = "netease"
+        p._mtw_base_url = "http://mtw:8002"
+        p._mtw_username = ""
+        p._mtw_password = ""
+        return p
+
+    def test_norm_text_strips_space_and_punctuation(self):
+        self.assertEqual(mls._norm_text("你的陈奕迅 国语精选"), "你的陈奕迅国语精选")
+        self.assertEqual(mls._norm_text("  CHIN UP! "), "chinup")
+        # 全角转半角后比较
+        self.assertEqual(mls._norm_text("Ｔｈｅ Ｌｉｎｅ-Ｕｐ"), "thelineup")
+        self.assertEqual(mls._norm_text(None), "")
+
+    def test_read_music_tags_never_raises(self):
+        out = mls._read_music_tags(Path("/nonexistent/dir/01 - x.flac"))
+        self.assertEqual(
+            out, {"title": "", "artist": "", "album": "", "duration": None, "has_cover": False}
+        )
+
+    def test_path_identity_strips_track_prefix_and_year(self):
+        tmp = Path(tempfile.mkdtemp())
+        fp = tmp / "陈奕迅" / "黑白灰 (2003)" / "07 - 黑面.flac"
+        fp.parent.mkdir(parents=True)
+        fp.write_bytes(b"x")
+        self.assertEqual(
+            mls._path_identity(fp), {"title": "黑面", "artist": "陈奕迅", "album": "黑白灰"}
+        )
+
+    def test_score_candidate_counts_title_artist_album(self):
+        want = {"title": "黑面", "artist": "陈奕迅", "album": "黑白灰"}
+        score = mls.MusicLibraryScraper._score_candidate
+        self.assertEqual(
+            score({"name": "黑面", "artist": "陈奕迅", "album": "黑白灰"}, want), 3
+        )
+        # 只差空格：不该算失配
+        self.assertEqual(
+            score({"name": "黑面", "artist": "陈奕迅", "album": "黑白 灰"}, want), 3
+        )
+        # 专辑对不上 -> 2
+        self.assertEqual(
+            score({"name": "黑面", "artist": "陈奕迅", "album": "The Line-Up"}, want), 2
+        )
+        # 艺人是 dict 列表（qmusic 形状）
+        self.assertEqual(
+            score({"title": "黑面", "artists": [{"name": "陈奕迅"}],
+                   "album": {"name": "黑白灰"}}, want), 3
+        )
+        self.assertEqual(score({"name": "完全无关", "artist": "别人"}, want), 0)
+
+    def test_pick_best_threshold_and_fallback_to_path(self):
+        # 未打 tag（测试环境无 mutagen）→ 用目录结构兜底，仍能匹配
+        tmp = Path(tempfile.mkdtemp())
+        fp = tmp / "陈奕迅" / "黑白灰" / "07 - 黑面.flac"
+        fp.parent.mkdir(parents=True)
+        fp.write_bytes(b"x")
+        p = self._plugin(min_score=3)
+        cands = [{"name": "黑面", "artist": "陈奕迅", "album": "黑白灰"}]
+        picked, sc = p._mtw_pick_best(fp, cands)
+        self.assertEqual(sc, 3)
+        self.assertIsNotNone(picked)
+        # 阈值抬高到 4（满分 3）→ 不返回候选，但仍回报真实分数
+        p2 = self._plugin(min_score=4)
+        picked2, sc2 = p2._mtw_pick_best(fp, cands)
+        self.assertIsNone(picked2)
+        self.assertEqual(sc2, 3)
+
+    def test_fetch_candidates_queries_clean_title_not_filename(self):
+        """搜索词必须是清洗后的曲名；传 "07 - 黑面.flac" 只会召回噪音。"""
+        captured = {}
+
+        class _Ru:
+            def __init__(self, *a, **k):
+                pass
+
+            def post_json(self, url=None, json=None, **kw):
+                captured["url"] = url
+                captured["body"] = json
+                return {"result": True, "data": []}
+
+        tmp = Path(tempfile.mkdtemp())
+        fp = tmp / "陈奕迅" / "黑白灰" / "07 - 黑面.flac"
+        fp.parent.mkdir(parents=True)
+        fp.write_bytes(b"x")
+        p = self._plugin()
+        orig = mls.RequestUtils
+        mls.RequestUtils = _Ru
+        try:
+            self.assertEqual(p._mtw_fetch_candidates(fp), [])
+        finally:
+            mls.RequestUtils = orig
+        self.assertIn("/apimt/fetch_id3_by_title/", captured["url"])
+        self.assertEqual(captured["body"]["title"], "黑面")
+        self.assertEqual(captured["body"]["artist"], "陈奕迅")
+        self.assertEqual(captured["body"]["album"], "黑白灰")
+        self.assertEqual(captured["body"]["resource"], "netease")
+
+    def test_musicinfo_has_no_type_or_artist_init_arg(self):
+        """宿主 MusicInfo 的 type 是 init=False，artist 也不是参数，传了会 TypeError。"""
+        import re
+        src = Path(mls.__file__).read_text(encoding="utf-8")
+        block = src.split("return MusicInfo(", 1)[1].split("\n        )\n", 1)[0]
+        # 只认顶层参数名，避免把 music_type= / album_artist= 误判成 type= / artist=
+        names = set(re.findall(r"^\s{12}(\w+)=", block, re.MULTILINE))
+        self.assertNotIn("type", names)
+        self.assertNotIn("artist", names)
+        self.assertIn("music_type", names)
+        self.assertIn("artists", names)
 
 
 if __name__ == "__main__":

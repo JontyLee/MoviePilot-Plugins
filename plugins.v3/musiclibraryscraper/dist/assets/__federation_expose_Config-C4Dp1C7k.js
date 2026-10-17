@@ -39,8 +39,8 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
     };
     const config = ref({ ...DEFAULTS, ...props.initialConfig || {} });
     const modeItems = [
-      { title: "只补空 tag", value: "" },
-      { title: "覆盖已有 tag", value: "force_all" }
+      { title: "只补缺（标签/封面）", value: "" },
+      { title: "强制覆盖已有标签", value: "force_all" }
     ];
     const resourceItems = [
       { title: "网易云 netease", value: "netease" },
@@ -237,7 +237,9 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   label: "最低匹配分数",
                   type: "number",
                   min: "0",
-                  "hide-details": ""
+                  max: "3",
+                  hint: "曲名/艺人/专辑 各 1 分，满分 3。3 最稳但会漏掉繁简字形与合辑专辑名差异；2 会接受“同名 Live 版”",
+                  "persistent-hint": ""
                 }, null, 8, ["modelValue"])
               ]),
               _: 1
@@ -287,7 +289,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
           density: "compact"
         }, {
           default: _withCtx(() => [..._cache[13] || (_cache[13] = [
-            _createTextVNode(" MTW 与 MP 需挂载同一份音乐库路径，否则写标签会落到不同文件。覆盖模式=覆盖已有 tag 时，任何非空 tag 都会被重写。 ", -1)
+            _createTextVNode(" 「补空」判定为 曲名+艺人+专辑+内嵌封面 齐全，缺一即会重新刮削；封面由 MP 下载后内嵌写入。覆盖模式会重写所有非空 tag。MTW 与 MP 需挂载同一份音乐库路径，否则写标签会落到不同文件。 ", -1)
           ])]),
           _: 1
         }),
@@ -318,6 +320,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const Config = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-16e70edf"]]);
+const Config = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-3d28c508"]]);
 
 export { Config as default };

@@ -58,7 +58,7 @@ class _ScrapingChain:
 
 
 class _MetaInfoPath:
-    # 测试里 __has_core_tags / _mtw_pick_best 均被替换，这里只需可实例化。
+    # 测试里 __is_complete / _mtw_pick_best 均被替换，这里只需可实例化。
     def __init__(self, path):
         self.title = ""
         self.artist = ""

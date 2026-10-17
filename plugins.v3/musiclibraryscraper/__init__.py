@@ -8,11 +8,26 @@ v0.2.0：
 - 数据页：Vue 联邦交互页（Page.vue），展示 已处理/失败/待重试，支持逐行与批量重试。
 - 调度：改用宿主 get_service() 周期任务 + 一次性任务，插件不再自建 BackgroundScheduler。
 - 对外：get_api() 提供 /status /files /retry /scan；get_command() 提供状态与重试命令。
+
+v0.2.1（修好 MTW 调用契约，之前一次都没真的刮成功过）：
+- 路径前缀 /api/ → /apimt/（MTW 的 Django 路由挂在 /apimt/ 下，旧写法一律 404）。
+- 检索关键词用清洗后的曲名（tag 优先、目录结构兜底），不再传 "01 - 轨迹.flac" 这种原始文件名 ——
+  MTW 的 fetch_id3_by_title 是拿 title 当搜索词用的，传文件名只会召回噪音。
+- 请求体补齐 title/artist/album/full_path/resource，与 MTW 前端调用完全一致。
+- RequestUtils.post_dict(jsondata=) → post_json(json=)（宿主没有 post_dict 这个方法）。
+- 本地 tag 改由 mutagen 读取：MP 的 MetaInfoPath 对音频返回 MetaVideo，根本没有
+  artist/album，导致“已有 tag 跳过”永远判 False、匹配也无从下手。
+- 比对前做 NFKC + 去空白/标点归一化（“你的陈奕迅 国语精选” vs “你的陈奕迅国语精选”
+  这类假失配实测占失败的一部分，归一化后命中率 47% → 60%）。
+- 补空模式的完成判据从 title+artist 收紧为 title+artist+album+内嵌封面：实测整库
+  1039 个文件的文字标签早已刮齐，只剩约 36% 缺封套图，旧判据会让插件永远空转。
 """
 from __future__ import annotations
 
+import re
 import threading
 import time
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -27,10 +42,7 @@ from app.schemas.types import EventType
 from app.sdk.config import settings
 from app.sdk.events import Event, eventmanager
 from app.sdk.logging import logger
-from app.sdk.media import (
-    MetaInfoPath,
-    MusicInfo,
-)
+from app.sdk.media import MusicInfo
 from app.sdk.network import RequestUtils
 
 try:  # 宿主较新版本才有 SDK 调度门面；缺失时回退到后台线程
@@ -50,6 +62,137 @@ _KEY_RUNS = "runs"
 # 默认 cron：每周日 03:00（POSIX DoW 0=周日）。
 _DEFAULT_CRON = "0 3 * * 0"
 
+# 各容器格式的 tag key：ID3 帧名 / MP4 atom / Vorbis 注释 / APEv2。
+_TAG_KEYS = {
+    "title": ("TIT2", "\u00a9nam", "title", "TITLE"),
+    "artist": ("TPE1", "\u00a9ART", "artist", "ARTIST"),
+    "album": ("TALB", "\u00a9alb", "album", "ALBUM"),
+}
+# 内嵌封面：ID3 用 APIC，MP4 用 covr，Vorbis/APE 用 picture 注释块。
+_COVER_KEYS = ("APIC", "covr", "picture", "metadata_block_picture", "METADATA_BLOCK_PICTURE")
+# 常见 “NN - 曲名” / “NN. 曲名” 前缀。
+_TRACK_PREFIX_RE = re.compile(r"^\s*\d{1,3}\s*[-._)]\s*")
+# 目录名尾部的 “ (2017)” / “ [2017]” 年份。
+_YEAR_SUFFIX_RE = re.compile(r"\s*[\[(]\s*(?:19|20)\d{2}\s*[\])]\s*$")
+# 比较用归一化：去掉所有空白与非字母数字符号。
+_NORM_STRIP_RE = re.compile(r"[^0-9a-z\u4e00-\u9fff]+")
+
+
+def _norm_text(value: Any) -> str:
+    """归一化标题/艺人/专辑，供候选比对。
+
+    同一张专辑在本地与在线源里常见 “你的陈奕迅 国语精选” vs “你的陈奕迅国语精选”
+    这类纯空格/标点差异，NFKC + 去符号能把这类假失配消掉。
+    """
+    if value is None:
+        return ""
+    text = unicodedata.normalize("NFKC", str(value)).casefold()
+    return _NORM_STRIP_RE.sub("", text)
+
+
+def _first_tag_value(tags, keys) -> str:
+    """从 mutagen 标签容器里按候选 key 取第一个非空文本。"""
+    for key in keys:
+        try:
+            value = tags.get(key)
+        except Exception:
+            continue
+        if value is None:
+            continue
+        # ID3 Frame 把文本放在 .text 列表里
+        text = getattr(value, "text", value)
+        if isinstance(text, (list, tuple)):
+            text = text[0] if text else None
+        if isinstance(text, bytes):
+            try:
+                text = text.decode("utf-8", "ignore")
+            except Exception:
+                continue
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+    return ""
+
+
+def _read_music_tags(path: Path) -> Dict[str, Any]:
+    """读取本地音乐 tag。
+
+    MP 的 MetaInfoPath 对音频返回 MetaVideo（没有 artist/album），不能用于音乐判定，
+    因此这里直接用 mutagen。失败时返回空值，由调用方按“缺 tag”处理。
+    """
+    out: Dict[str, Any] = {
+        "title": "", "artist": "", "album": "", "duration": None, "has_cover": False,
+    }
+    try:
+        from mutagen import File as MutagenFile
+
+        audio = MutagenFile(str(path))
+    except Exception:
+        return out
+    if audio is None:
+        return out
+    tags = getattr(audio, "tags", None)
+    if tags is not None:
+        for field, keys in _TAG_KEYS.items():
+            out[field] = _first_tag_value(tags, keys)
+            if not out[field] and field in ("title", "artist"):
+                # Vorbis/APE 的 key 大小写不敏感，mutagen 已归一，这里兜底遍历一次
+                try:
+                    for key in list(tags.keys()):
+                        if key.lower() == field:
+                            out[field] = _first_tag_value(tags, (key,))
+                            if out[field]:
+                                break
+                except Exception:
+                    pass
+        for key in _COVER_KEYS:
+            try:
+                if tags.get(key):
+                    out["has_cover"] = True
+                    break
+            except Exception:
+                continue
+    if not out["has_cover"]:
+        try:
+            out["has_cover"] = bool(getattr(audio, "pictures", None))
+        except Exception:
+            pass
+    try:
+        info = getattr(audio, "info", None)
+        length = getattr(info, "length", None) if info else None
+        if length:
+            out["duration"] = int(length)
+    except Exception:
+        pass
+    return out
+
+
+def _path_identity(path: Path) -> Dict[str, str]:
+    """按 “艺人/专辑 (年)/NN - 曲名” 目录结构推断身份，供未打 tag 的文件参与匹配。"""
+    parents = list(path.parents)
+    album_dir = parents[0].name if len(parents) >= 1 else ""
+    artist_dir = parents[1].name if len(parents) >= 2 else ""
+    return {
+        "title": _TRACK_PREFIX_RE.sub("", path.stem).strip(),
+        "artist": artist_dir.strip(),
+        "album": _YEAR_SUFFIX_RE.sub("", album_dir).strip(),
+    }
+
+
+def _local_identity(path: Path) -> Dict[str, Any]:
+    """本地身份：tag 优先，缺失字段用目录结构兜底。
+
+    MTW 的 fetch_id3_by_title 是把 title 当搜索关键词用的，传原始文件名
+    （"01 - 轨迹.flac"）只会召回一堆噪音，必须先清洗成干净曲名。
+    """
+    tags = _read_music_tags(path)
+    from_path = _path_identity(path)
+    return {
+        "title": (tags["title"] or from_path["title"]).strip(),
+        "artist": (tags["artist"] or from_path["artist"]).strip(),
+        "album": (tags["album"] or from_path["album"]).strip(),
+        "duration": tags["duration"],
+    }
+
 
 class _MusicScrapeChain(ScrapingChain):
     """复用 libraryscraper 的 trickplay 排除策略，避免 Jellyfin 预览目录被递归。"""
@@ -66,7 +209,7 @@ class MusicLibraryScraper(_PluginBase):
     plugin_name = "音乐库刮削 (MTW)"
     plugin_desc = "定时扫描音乐目录，用 Music Tag Web 的网易云 / QQ / 酷我等源做识别，写入沿用 MP 原生刮削链路。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/163music_A.png"
-    plugin_version = "0.2.0"
+    plugin_version = "0.2.1"
     plugin_author = "local"
     author_url = ""
     plugin_config_prefix = "musiclibraryscraper_"
@@ -614,8 +757,8 @@ class MusicLibraryScraper(_PluginBase):
                     exhausted += 1
                     continue
 
-            # 补空模式：已有核心 tag 则直接标记 done（无需再解析）。
-            if not effective_force and self.__has_core_tags(fp):
+            # 补空模式：tag 与封面都齐了才跳过。
+            if not effective_force and self.__is_complete(fp):
                 prev = done.get(key)
                 source = prev.get("source") if isinstance(prev, dict) else None
                 done[key] = {"mtime": mtime, "size": size, "ts": now_iso, "source": source}
@@ -671,13 +814,16 @@ class MusicLibraryScraper(_PluginBase):
             f"成功 {ok}，失败 {failed_n}，超限跳过 {exhausted}（{summary['duration_s']}s）"
         )
 
-    def __has_core_tags(self, path: Path) -> bool:
-        """粗略判断是否已具备 artist/album/title。用 MetaInfoPath 读 tag 里的 title。"""
-        try:
-            meta = MetaInfoPath(path)
-            return bool(meta.title and (meta.artist or getattr(meta, "artists", None)))
-        except Exception:
-            return False
+    def __is_complete(self, path: Path) -> bool:
+        """补空模式的“够格”判据：title + artist + album + 内嵌封面。
+
+        只判 title/artist 会让已刮齐标签、但缺封面的文件永远被跳过，而那恰恰是
+        真实音乐库最常见剩下的缺口（MP 写入链路会把 cover_url 下载后内嵌）。
+        """
+        tags = _read_music_tags(path)
+        return bool(
+            tags["title"] and tags["artist"] and tags["album"] and tags["has_cover"]
+        )
 
     def __scrape_file(self, path: Path) -> Tuple[bool, str, Optional[int]]:
         """处理单个文件，返回 (是否成功, 失败原因, 命中分数)。"""
@@ -813,9 +959,9 @@ class MusicLibraryScraper(_PluginBase):
         if not (self._mtw_username and self._mtw_password):
             logger.warning("[music-scraper] 未配置 MTW 账密，将匿名请求（可能失败）")
             return None
-        resp = RequestUtils(headers={"Content-Type": "application/json"}).post_dict(
-            url=f"{self._mtw_base_url}/api/token/",
-            jsondata={"username": self._mtw_username, "password": self._mtw_password},
+        resp = RequestUtils(headers={"Content-Type": "application/json"}).post_json(
+            url=f"{self._mtw_base_url}/apimt/token/",
+            json={"username": self._mtw_username, "password": self._mtw_password},
         )
         if not resp or not resp.get("token"):
             logger.error(f"[music-scraper] MTW JWT 获取失败: {resp}")
@@ -825,16 +971,22 @@ class MusicLibraryScraper(_PluginBase):
         return self._token
 
     def _mtw_fetch_candidates(self, path: Path) -> List[dict]:
+        identity = _local_identity(path)
+        if not identity["title"]:
+            return []
+        # MTW 前端契约：title/artist/album 取自本地 tag，full_path 仅作参考
         body = {
             "resource": self._mtw_resource,
-            "title": path.name,
+            "title": identity["title"],
+            "artist": identity["artist"],
+            "album": identity["album"],
             "full_path": str(path),
         }
         resp = RequestUtils(
             headers={"Content-Type": "application/json", **self._mtw_headers()},
-        ).post_dict(
-            url=f"{self._mtw_base_url}/api/fetch_id3_by_title/",
-            jsondata=body,
+        ).post_json(
+            url=f"{self._mtw_base_url}/apimt/fetch_id3_by_title/",
+            json=body,
         )
         if not resp:
             return []
@@ -843,27 +995,15 @@ class MusicLibraryScraper(_PluginBase):
             data = data["data"]
         return data if isinstance(data, list) else []
 
-    def _mtw_fetch_lyric(self, song_id: str) -> Optional[str]:
-        resp = RequestUtils(
-            headers={"Content-Type": "application/json", **self._mtw_headers()},
-        ).post_dict(
-            url=f"{self._mtw_base_url}/api/fetch_lyric/",
-            jsondata={"resource": self._mtw_resource, "song_id": str(song_id)},
-        )
-        if not resp:
-            return None
-        data = resp.get("data")
-        return data if isinstance(data, str) and data and not data.startswith("未找到") else None
-
     # ---------------- 候选匹配 & 字段映射 ----------------
 
     def _mtw_pick_best(self, path: Path, candidates: List[dict]) -> Tuple[Optional[dict], int]:
-        meta = MetaInfoPath(path)
+        identity = _local_identity(path)
         want = {
-            "title": (meta.title or "").strip().lower(),
-            "artist": (meta.artist or "").strip().lower(),
-            "album": (meta.album or "").strip().lower(),
-            "duration": getattr(meta, "duration", None),
+            "title": identity["title"],
+            "artist": identity["artist"],
+            "album": identity["album"],
+            "duration": identity["duration"],
         }
         best, best_score = None, 0
         for c in candidates:
@@ -876,27 +1016,27 @@ class MusicLibraryScraper(_PluginBase):
     def _score_candidate(c: dict, want: dict) -> int:
         """MTW utils.match_song 简化版：title / artist / album 各 0/1。"""
         score = 0
-        got_title = str(c.get("name") or c.get("title") or "").strip().lower()
-        if want["title"] and got_title and (want["title"] in got_title or got_title in want["title"]):
+        want_title = _norm_text(want.get("title"))
+        got_title = _norm_text(c.get("name") or c.get("title"))
+        if want_title and got_title and (want_title in got_title or got_title in want_title):
             score += 1
-        artists_raw = c.get("artists") or c.get("artist") or []
-        if isinstance(artists_raw, str):
-            got_artist = artists_raw.strip().lower()
-        elif isinstance(artists_raw, list):
-            got_artist = " ".join(
+        artists_raw = c.get("artists") or c.get("artist") or c.get("singer") or []
+        if isinstance(artists_raw, (list, tuple)):
+            got_artist = _norm_text(" ".join(
                 str(a.get("name") if isinstance(a, dict) else a) for a in artists_raw
-            ).strip().lower()
+            ))
         else:
-            got_artist = ""
-        if want["artist"] and got_artist and (want["artist"] in got_artist or got_artist in want["artist"]):
+            got_artist = _norm_text(artists_raw)
+        want_artist = _norm_text(want.get("artist"))
+        if want_artist and got_artist and (want_artist in got_artist or got_artist in want_artist):
             score += 1
         album_obj = c.get("album") or {}
-        got_album = ""
         if isinstance(album_obj, dict):
-            got_album = str(album_obj.get("name") or album_obj.get("title") or "").strip().lower()
-        elif isinstance(album_obj, str):
-            got_album = album_obj.strip().lower()
-        if want["album"] and got_album and (want["album"] in got_album or got_album in want["album"]):
+            got_album = _norm_text(album_obj.get("name") or album_obj.get("title"))
+        else:
+            got_album = _norm_text(album_obj)
+        want_album = _norm_text(want.get("album"))
+        if want_album and got_album and (want_album in got_album or got_album in want_album):
             score += 1
         return score
 
@@ -990,11 +1130,12 @@ class MusicLibraryScraper(_PluginBase):
         song_id = str(c.get("id") or c.get("song_id") or c.get("mid") or "").strip() or None
         source = str(c.get("resource") or self._mtw_resource).strip()
 
+        # MusicInfo 的 type / artist 不是 init 参数（type 是 init=False 派生字段，
+        # 艺人统一走 artists: list[str]）；media_source 枚举里没有 netease/qmusic，
+        # 留着不填，来源与歌曲 id 记在 raw_data 里。
         return MusicInfo(
-            type="音乐",
             music_type="recording",
             title=title,
-            artist=artist_list[0] if artist_list else None,
             artists=artist_list,
             composers=composers,
             album=album,
@@ -1015,7 +1156,7 @@ class MusicLibraryScraper(_PluginBase):
             },
             field_sources={
                 "title": "remote",
-                "artist": "remote",
+                "artists": "remote",
                 "album": "remote",
                 "year": "remote",
                 "lyrics": "remote",

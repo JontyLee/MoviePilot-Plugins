@@ -37,8 +37,8 @@ const DEFAULTS = {
 const config = ref<Record<string, any>>({ ...DEFAULTS, ...(props.initialConfig || {}) })
 
 const modeItems = [
-  { title: '只补空 tag', value: '' },
-  { title: '覆盖已有 tag', value: 'force_all' }
+  { title: '只补缺（标签/封面）', value: '' },
+  { title: '强制覆盖已有标签', value: 'force_all' }
 ]
 
 const resourceItems = [
@@ -130,7 +130,9 @@ function saveConfig() {
           label="最低匹配分数"
           type="number"
           min="0"
-          hide-details
+          max="3"
+          hint="曲名/艺人/专辑 各 1 分，满分 3。3 最稳但会漏掉繁简字形与合辑专辑名差异；2 会接受“同名 Live 版”"
+          persistent-hint
         />
       </v-col>
     </v-row>
@@ -154,8 +156,8 @@ function saveConfig() {
     </v-row>
 
     <v-alert type="info" variant="tonal" class="mt-2" density="compact">
-      MTW 与 MP 需挂载同一份音乐库路径，否则写标签会落到不同文件。覆盖模式=覆盖已有 tag
-      时，任何非空 tag 都会被重写。
+      「补空」判定为 曲名+艺人+专辑+内嵌封面 齐全，缺一即会重新刮削；封面由 MP
+      下载后内嵌写入。覆盖模式会重写所有非空 tag。MTW 与 MP 需挂载同一份音乐库路径，否则写标签会落到不同文件。
     </v-alert>
 
     <div class="d-flex align-center gap-2 mt-4">
