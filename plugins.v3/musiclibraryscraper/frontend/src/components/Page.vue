@@ -29,8 +29,10 @@ const rows = ref<any[]>([])
 const total = ref(0)
 const bucket = ref<'done' | 'failed' | 'pending'>('failed')
 const search = ref('')
+const page = ref(1)
 const limit = ref(50)
 const offset = ref(0)
+let searchTimer: ReturnType<typeof setTimeout> | null = null
 
 const tabs: { key: 'done' | 'failed' | 'pending'; label: string }[] = [
   { key: 'done', label: '已处理' },
@@ -38,8 +40,11 @@ const tabs: { key: 'done' | 'failed' | 'pending'; label: string }[] = [
   { key: 'pending', label: '待处理' }
 ]
 
-// 表格是分页取回的（items 只有当前页），Vuetify 自己算的页码文案会按当前页条数错报，
-// 所以直接用 offset/limit/total 生成，顺带把默认的英文 "1 of 1" 换掉。
+// 表格是分页取回的（items 只有当前页），所以：
+// 1) 用 v-data-table-server 并把 total 交给 items-length —— v-data-table 的 pageCount 是拿
+//    内存里的 items 长度算的，一页 50 条时 pageCount 恒等于 1，下一页按钮直接永久禁用；
+// 2) 页码文案也不能让 Vuetify 按当前页条数算，直接用 offset/limit/total 生成
+//    （顺带替掉默认的英文 "1 of 1"）。
 const pageText = computed(() => {
   if (!total.value) return '共 0 条'
   const from = offset.value + 1
@@ -113,13 +118,27 @@ async function refresh() {
   emit('action')
 }
 
+// /retry 的三种拒绝要分开说：全部路径在库外（out_of_library）和被扫描占着（busy）
+// 是完全不同的原因，混成"稍后再试"会让人反复点。
+function retryResult(res: any, label: string) {
+  if (res?.accepted) {
+    const rejected = res?.rejected ? `，忽略 ${res.rejected} 个库外路径` : ''
+    notify(`已提交重试 ${res.count} 个${label}${rejected}`)
+  } else if (res?.reason === 'out_of_library') {
+    notify('这些路径不在配置的音乐库范围内，已拒绝', 'warning')
+  } else if (res?.reason === 'no_paths') {
+    notify('没有可重试的路径', 'warning')
+  } else {
+    notify(`已有扫描在运行，稍后再试${label}`, 'warning')
+  }
+}
+
 async function retryPaths(paths: string[], label: string) {
   if (!paths.length) return
   busy.value = true
   try {
     const res = await (props.api as MoviePilotApi).post(`${base.value}/retry`, { paths })
-    if (res?.accepted) notify(`已提交重试 ${res.count} 个${label}`)
-    else notify(`已有扫描在运行，稍后再试${label}`, 'warning')
+    retryResult(res, label)
     await refresh()
   } catch (e: any) {
     notify(`重试失败：${e?.message || e}`, 'error')
@@ -172,13 +191,32 @@ async function scanNow(force: boolean) {
 
 function switchTab(key: 'done' | 'failed' | 'pending') {
   bucket.value = key
+  page.value = 1
   offset.value = 0
   loadFiles()
 }
 
-function onPage(nextOffset: number) {
-  offset.value = Math.max(0, nextOffset)
+function onPage(nextPage: number) {
+  page.value = Math.max(1, nextPage)
+  offset.value = (page.value - 1) * limit.value
   loadFiles()
+}
+
+function onItemsPerPage(next: number) {
+  limit.value = next > 0 ? next : 50
+  page.value = 1
+  offset.value = 0
+  loadFiles()
+}
+
+// 每敲一个字就发一次 /files 的话，后端每次都要把整桶排序、pending 桶还要全库 stat。
+function onSearch() {
+  if (searchTimer) clearTimeout(searchTimer)
+  searchTimer = setTimeout(() => {
+    page.value = 1
+    offset.value = 0
+    loadFiles()
+  }, 300)
 }
 
 function fmtTime(unix?: number | string) {
@@ -250,7 +288,11 @@ onMounted(refresh)
             <div class="text-caption">上次扫描</div>
             <div class="text-caption text-no-wrap">{{ fmtTime(runs.ts) }}</div>
             <div class="text-caption">
-              缓存{{ runs.from_cache ?? 0 }}｜成功{{ runs.ok ?? 0 }}｜失败{{ runs.failed ?? 0 }}
+              缓存{{ runs.from_cache ?? 0 }}｜成功{{ runs.ok ?? 0 }}｜失败{{ runs.failed ?? 0 }}｜
+              MTW故障{{ runs.transport ?? 0 }}
+            </div>
+            <div v-if="runs.aborted" class="text-caption text-warning">
+              MTW 连续故障，本轮已中止，未处理的留到下一轮
             </div>
           </v-card-text>
         </v-card>
@@ -274,15 +316,16 @@ onMounted(refresh)
         prepend-inner-icon="mdi-magnify"
         style="max-width: 260px"
         clearable
-        @update:model-value="onPage(0)"
+        @update:model-value="onSearch"
       />
       <v-btn size="small" variant="tonal" color="warning" :loading="busy" @click="retryAllFailed">重试全部失败</v-btn>
       <v-btn size="small" variant="tonal" color="info" :loading="busy" @click="scanNow(false)">增量扫描</v-btn>
       <v-btn size="small" variant="tonal" color="error" :loading="busy" @click="scanNow(true)">全量覆盖</v-btn>
     </div>
 
-    <!-- 数据表 -->
-    <v-data-table
+    <!-- 数据表：items 是服务端分页好的一页，必须用 v-data-table-server 并把总条数交给
+         items-length，否则 pageCount 按当前页条数算、翻页永远停在第一页 -->
+    <v-data-table-server
       :headers="[
         { title: '文件名', key: 'name', sortable: false },
         { title: '状态', key: 'status', width: 130 },
@@ -293,14 +336,17 @@ onMounted(refresh)
         { title: '操作', key: 'actions', sortable: false, width: 90 }
       ]"
       :items="rows"
+      :items-length="total"
       :loading="loading"
       items-per-page-text="每页条数"
       :items-per-page-options="[20, 50, 100]"
       :page-text="pageText"
+      :page="page"
       :items-per-page="limit"
       density="compact"
       class="elevation-1"
-      @update:page="onPage(($event - 1) * limit)"
+      @update:page="onPage"
+      @update:items-per-page="onItemsPerPage"
     >
       <template #item.name="{ item }">
         <div :title="item.path">{{ item.name }}</div>
@@ -333,7 +379,7 @@ onMounted(refresh)
       <template #no-data>
         <div class="text-center pa-6 text-grey">该桶暂无数据</div>
       </template>
-    </v-data-table>
+    </v-data-table-server>
 
     <v-snackbar v-model="snackbar.show" :color="snackbar.color" timeout="3000" location="bottom">
       {{ snackbar.text }}

@@ -49,9 +49,31 @@ v0.3.1：
   平铺进 VDataTable 自身，所以 items-per-page-text / items-per-page-options / page-text
   必须直接写在 <v-data-table> 上。
 - 图标改用 MTW 界面自带的 avator.webp，已下载进仓库 icons/，市场引用仓库 raw 地址而不是热链实例。
+
+v0.3.2（整体复盘后的健壮性修复）：
+- 扫描只有一个入口：宿主周期任务与一次性任务都改走带互斥的 _run_scan_guarded()。此前
+  get_service() 把 __scan 直接交给调度器，绕开了 _scan_running 标志，周 cron 与手动
+  /scan、/retry、"立即运行一次" 可以并发跑；两本账各自在开头读、结尾写，后写完的会把
+  先写的整本盖掉，已刮成功的记录退回未处理。
+- MTW 侧故障不再烧重试额度：响应异常/401/接口错误归类成"MTW 不可达"或"MTW 接口或鉴权失败"，
+  既不计入 MAX_RETRY、也不写 failed 账。此前 MTW 重启一次或 JWT 过期，一整轮会把整库每个文件
+  各记一次失败，连错 5 轮就全体永久跳过（mtime+size 不变就再也不碰）。
+- 连续 5 个文件栽在 MTW 故障上就中止本轮（熔断），不再往下白打请求；中止时不 prune 账本。
+- JWT 过期按令牌自身的 exp 声明（或 MTW 返回的 expired_at）计算，不再硬编 6 天；请求被判
+  鉴权失败时强制重登一次再重试。
+- 停止信号：stop_service() 不再 set() 完立刻 clear()（等于从没停过），扫描开始时才 clear；
+  信号量由类属性改为每实例独立。
+- 扫描每处理 25 个文件落一次账，长时间运行中途容器重启不再丢掉整轮进度。
+- /retry 只接受落在 scraper_paths 内、且不在 exclude_paths 内的路径，客户端传什么都改不了库外文件。
+- add_plugin_once_job 返回 False（调度器没在跑）时回落后台线程，不再假装"已提交"。
+- 数据页翻页：v-data-table 的 pageCount 由内存里的 items 长度算出，而 items 只是服务端返回的
+  当页（≤ limit 条），pageCount 恒为 1 → 下一页按钮永久禁用，这才是 "1 of 1" 的真因
+  （v0.3.1 只把文案翻成中文，功能仍是坏的）。改用 v-data-table-server，总条数交给 items-length。
 """
 from __future__ import annotations
 
+import base64
+import json
 import re
 import threading
 import time
@@ -94,6 +116,17 @@ _MAX_SCORE = 3
 # MTW 实测能返回候选的识别源（顺序即查询顺序）：qq / spotify / acoustid / all 恒返回空，
 # 不要列进来。migu 单源给 20 条，musicbrainz 给繁体字形，其余各 10 条。
 _DEFAULT_RESOURCES = ("netease", "qmusic", "kuwo", "kugou", "migu", "musicbrainz", "smart_tag")
+
+# MTW 侧故障的原因前缀（不可达 / 接口或鉴权失败）。这类失败说明插件没学到任何关于该文件的信息，
+# 因此不计入 MAX_RETRY、也不写 failed 账：否则 MTW 重启一次就给整库每个文件记一笔失败，
+# 连错满 MAX_RETRY 轮后全体永久跳过，mtime+size 不变就再也刷不动。
+_UNREACHABLE_REASON = "MTW 不可达"
+_AUTH_REASON = "MTW 接口或鉴权失败"
+_TRANSPORT_REASONS = (_UNREACHABLE_REASON, _AUTH_REASON)
+# 熔断：连续多少个文件栽在 MTW 故障上就中止本轮，别在 MTW 挂着的时段空打上千次请求。
+_ABORT_AFTER_TRANSPORT = 5
+# 扫描过程中每处理多少个文件落一次账：整轮动辄数小时，中途容器重启不该把进度全丢掉。
+_SAVE_EVERY = 25
 
 # 配置页底部的一段集中说明：来源、查询与选取规则、两档写入模式、宿主策略叠加。
 # 不跟在单个配置项下面，选项本身只留最短的标签，细节全部收在这里。
@@ -179,6 +212,68 @@ def _normalize_resources(value: Any) -> List[str]:
         if name and name not in out:
             out.append(name)
     return out or list(_DEFAULT_RESOURCES)
+
+
+def _epoch_of(value: Any) -> Optional[float]:
+    """把秒/毫秒时间戳或 ISO 日期串换算成 epoch 秒，认不出来返回 None。"""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        # 秒级与毫秒级都可能：1e11 秒是公元 5138 年，超过就按毫秒处理
+        return float(value / 1000) if value > 1e11 else float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    if re.fullmatch(r"\d{10,13}", text):
+        return _epoch_of(int(text))
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _jwt_exp(token: str) -> Optional[float]:
+    """只解 JWT 载荷里的 exp，不验签：令牌是本机从 MTW 拿的，验签要服务端密钥、没必要。"""
+    try:
+        segment = str(token).split(".")[1]
+        segment += "=" * (-len(segment) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(segment.encode()))
+    except Exception:
+        return None
+    return _epoch_of(claims.get("exp") if isinstance(claims, dict) else None)
+
+
+def _token_expiry_at(token: str, payload: Dict[str, Any]) -> float:
+    """令牌什么时候过期按它自己的声明算，不再硬编 6 天。
+
+    MTW 的 JWT 生命周期是服务端配置：换密钥、改过期设置、管理员踢人都可能让它提前失效。
+    猜长了就会长期带着一个废 token 跑完整轮，每个文件都"无候选"，还一路记成刮削失败；
+    取不到声明时宁可只缓存 1 小时，多登一次比整轮白跑便宜。
+    """
+    for key in ("expired_at", "expires_at", "expiry", "expire", "exp"):
+        epoch = _epoch_of(payload.get(key)) if isinstance(payload, dict) else None
+        if epoch:
+            return epoch
+    return _jwt_exp(token) or (time.time() + 3600)
+
+
+def _mtw_failure_reason(resp: Any) -> Optional[str]:
+    """判断这次 MTW 响应是不是"没给出结论"，返回故障原因；None 表示响应可用（含空候选）。
+
+    RequestUtils.post_json 对超时、连不上、非 2xx、非 JSON 一律返回 None，拿不到状态码，
+    所以只能按响应形状分类：DRF 的错误体带 detail/code（JWT 失效就是
+    {"detail": "Given token not valid for any token type", "code": "token_not_valid"}），
+    正常检索结果一定带 data 数组。空候选是 {"data": []}，属于可用响应。
+    """
+    if resp is None:
+        return _UNREACHABLE_REASON
+    if not isinstance(resp, dict):
+        return _UNREACHABLE_REASON
+    if isinstance(resp.get("data"), list):
+        return None
+    if any(key in resp for key in ("detail", "error", "exception", "code")):
+        return _AUTH_REASON
+    return _UNREACHABLE_REASON
 
 
 def _first_tag_value(tags, keys) -> str:
@@ -308,7 +403,7 @@ class MusicLibraryScraper(_PluginBase):
         "再沿用 MP 原生音乐刮削链路写入标签与封面。"
     )
     plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/avator.webp"
-    plugin_version = "0.3.1"
+    plugin_version = "0.3.2"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "musiclibraryscraper_"
@@ -334,13 +429,14 @@ class MusicLibraryScraper(_PluginBase):
 
     # 失败自动重试上限：retries 达到该值后，定时扫描不再自动重试（仅手动重试）。
     MAX_RETRY: int = 5
-    # 扫描停止信号。
-    _event = threading.Event()
 
     def init_plugin(self, config: Dict[str, Any] = None):
-        # 每实例独立的扫描锁与运行标志（放在 __dict__，避免类属性被多实例共享）。
+        # 每实例独立的扫描锁、运行标志与停止信号（都放 __dict__，避免类属性被多实例共享）。
+        # 运行标志用 setdefault 而不是直接置 False：保存配置会重跑 init_plugin，
+        # 那时把在跑的扫描标记成"没在跑"，就等于又开了一条并发写账本的口子。
         self.__dict__.setdefault("_scan_lock", threading.Lock())
-        self.__dict__["_scan_running"] = False
+        self.__dict__.setdefault("_scan_running", False)
+        self.__dict__.setdefault("_stop_flag", threading.Event())
 
         if config:
             self._enabled = bool(config.get("enabled"))
@@ -361,6 +457,10 @@ class MusicLibraryScraper(_PluginBase):
         # 勾选“立即运行一次”：回写配置关闭该开关，并投递一次性扫描。
         if self._onlyonce:
             self._onlyonce = False
+            # update_config 是整体替换而不是合并（宿主 PluginInstanceOper.save_config_data
+            # 直接 record.config_data = deepcopy(config_data)），所以必须把全量配置写回去，
+            # 只写 {"onlyonce": False} 会把其余配置一起清掉。密码本来就在这份配置里，
+            # 明文落 systemconfig 是 MP 存储插件配置的方式，插件侧无法在不丢配置的前提下回避。
             self.update_config({
                 "enabled": self._enabled,
                 "onlyonce": False,
@@ -423,7 +523,8 @@ class MusicLibraryScraper(_PluginBase):
                 f"{stats['runs'].get('from_cache', 0)}｜已有tag跳过 "
                 f"{stats['runs'].get('skipped_tagged', 0)}\n"
                 f"成功 {stats['runs'].get('ok', 0)}｜失败 "
-                f"{stats['runs'].get('failed', 0)}\n"
+                f"{stats['runs'].get('failed', 0)}｜MTW 故障 "
+                f"{stats['runs'].get('transport', 0)}\n"
                 f"已处理 {stats['counts']['done']}｜待重试 "
                 f"{stats['counts']['retryable']}｜超限 "
                 f"{stats['counts']['exhausted']}｜待处理 "
@@ -521,11 +622,19 @@ class MusicLibraryScraper(_PluginBase):
             paths = list(self._load_failed().keys())
         if not paths:
             return {"accepted": False, "reason": "no_paths", "count": 0}
-        paths = [str(p) for p in paths]
-        started = self._kick_scan(force=True, paths=paths)
+        # 只接受库内的音频文件：调用方传什么就刮什么是把插件当成了任意文件写接口，
+        # 换个 token 就能改到音乐库之外的文件。
+        accepted = [str(p) for p in paths if self._is_library_path(str(p))]
+        rejected = len(paths) - len(accepted)
+        if rejected:
+            logger.warning(f"[music-scraper] /retry 拒绝 {rejected} 个库外或非音频路径")
+        if not accepted:
+            return {"accepted": False, "reason": "out_of_library", "count": 0}
+        started = self._kick_scan(force=True, paths=accepted)
         return {
             "accepted": started,
-            "count": len(paths),
+            "count": len(accepted),
+            "rejected": rejected,
             "running": self._is_running(),
             "reason": None if started else "busy",
         }
@@ -561,22 +670,24 @@ class MusicLibraryScraper(_PluginBase):
                 "id": "MusicLibraryScraper.Scan",
                 "name": "MTW 音乐库刮削",
                 "trigger": self._build_cron_trigger(self._cron),
-                "func": self.__scan,
+                # 必须走带互斥的入口：直接给 __scan 会绕开运行标志，cron 与手动触发
+                # 就能并发跑，两本账各自读到结尾再写回，后写的把先写的整本盖掉。
+                "func": self._run_scan_guarded,
                 "kwargs": {},
             }
         ]
 
     def stop_service(self):
         """插件停用：投递停止信号并取消宿主一次性任务（可重复调用）。"""
-        self._event.set()
+        # 只置位、不在这里 clear：clear 会把刚投递的停止信号吞掉，正在跑的扫描
+        # 永远观察不到，等于停不下来。标志改由下一轮扫描开始时复位。
+        self._stop_event().set()
         try:
             remove = getattr(scheduler_sdk, "remove_plugin_once_job", None) if scheduler_sdk else None
             if remove:
                 remove(self.__class__.__name__, "scan_once")
         except Exception as err:  # pragma: no cover
             logger.debug(f"[music-scraper] 取消一次性任务异常: {err}")
-        finally:
-            self._event.clear()
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         return [
@@ -687,7 +798,9 @@ class MusicLibraryScraper(_PluginBase):
             "mtw_base_url": "",
             "mtw_username": "",
             "mtw_password": "",
-            "mtw_resource": list(_DEFAULT_RESOURCES),
+            # 留空 = 全部源（读侧 _normalize_resources 保证），不要把 7 个源预填进去：
+            # 预填会让两个配置页长得不一样，也和说明文案对不上。
+            "mtw_resource": [],
             "min_score": 3,
         }
 
@@ -724,43 +837,98 @@ class MusicLibraryScraper(_PluginBase):
     def _is_running(self) -> bool:
         return bool(self.__dict__.get("_scan_running"))
 
+    def _stop_event(self) -> threading.Event:
+        """每实例独立的扫描停止信号（init_plugin 之前也可用）。"""
+        return self.__dict__.setdefault("_stop_flag", threading.Event())
+
+    def _begin_scan(self) -> bool:
+        """占用扫描槽位；已有扫描在跑时返回 False。顺带复位上一轮的停止信号。"""
+        lock = self.__dict__.setdefault("_scan_lock", threading.Lock())
+        with lock:
+            if self.__dict__.get("_scan_running"):
+                return False
+            self.__dict__["_scan_running"] = True
+        self._stop_event().clear()
+        return True
+
+    def _end_scan(self):
+        lock = self.__dict__.setdefault("_scan_lock", threading.Lock())
+        with lock:
+            self.__dict__["_scan_running"] = False
+
+    def _execute_scan(self, force: bool = False,
+                      target_paths: Optional[List[str]] = None) -> None:
+        """执行一轮扫描并释放槽位；调用方必须已经 _begin_scan() 占到槽。"""
+        try:
+            self.__scan(force=force, target_paths=target_paths)
+        except Exception as err:  # pragma: no cover
+            logger.error(f"[music-scraper] 扫描异常: {err}")
+        finally:
+            self._end_scan()
+
+    def _run_scan_guarded(self, force: bool = False,
+                          target_paths: Optional[List[str]] = None) -> bool:
+        """宿主调度器用的同步入口：抢不到槽位就跳过本轮，不与已 in-flight 的扫描并发。"""
+        if not self._begin_scan():
+            logger.info("[music-scraper] 已有扫描在运行，本次触发跳过")
+            return False
+        self._execute_scan(force=force, target_paths=target_paths)
+        return True
+
     def _kick_scan(self, force: bool = False, paths: Optional[List[str]] = None) -> bool:
         """投递一次扫描：无参优先交宿主一次性任务，带参/强制走后台线程。"""
         if not force and not paths:
             add = getattr(scheduler_sdk, "add_plugin_once_job", None) if scheduler_sdk else None
             if add:
                 try:
-                    add(
+                    # 宿主只在调度器运行且注册成功时返回 True；返回 False 时任务其实没排上，
+                    # 不回落后台线程就会对着界面报"已提交"、实际什么都没跑。
+                    if add(
                         self.__class__.__name__,
                         "scan_once",
-                        self.__scan,
+                        self._run_scan_guarded,
                         "MTW 音乐库刮削（一次性）",
                         delay_seconds=3,
-                    )
-                    return True
+                    ):
+                        return True
+                    logger.debug("[music-scraper] 一次性任务未注册（调度器没在跑），回落后台线程")
                 except Exception as err:  # pragma: no cover
                     logger.debug(f"[music-scraper] 一次性任务投递失败，回落后台线程: {err}")
         return self._start_scan_async(force=force, paths=paths)
 
     def _start_scan_async(self, force: bool = False, paths: Optional[List[str]] = None) -> bool:
         """在后台线程执行扫描；若已有扫描在跑则拒绝，避免并发重复处理。"""
-        lock = self.__dict__.setdefault("_scan_lock", threading.Lock())
-        with lock:
-            if self.__dict__.get("_scan_running"):
-                return False
-            self.__dict__["_scan_running"] = True
-
-        def _worker():
-            try:
-                self.__scan(force=force, target_paths=paths)
-            except Exception as err:  # pragma: no cover
-                logger.error(f"[music-scraper] 后台扫描异常: {err}")
-            finally:
-                with lock:
-                    self.__dict__["_scan_running"] = False
-
-        threading.Thread(target=_worker, name="music-scraper-scan", daemon=True).start()
+        if not self._begin_scan():
+            return False
+        threading.Thread(
+            target=self._execute_scan,
+            kwargs={"force": force, "target_paths": paths},
+            name="music-scraper-scan",
+            daemon=True,
+        ).start()
         return True
+
+    def _is_library_path(self, path: str) -> bool:
+        """外部传入的重试路径是否真的是库内的音频文件。
+
+        两侧都做 realpath：scraper_paths 可能是软链，客户端传的路径也可能带 ../，
+        只做字符串前缀比较两种都能绕过。
+        """
+        try:
+            target = Path(path).resolve()
+            roots = [Path(r).resolve() for r in (self._scraper_paths or "").split("\n") if r.strip()]
+        except (OSError, RuntimeError):
+            return False
+        if not roots or not any(target == r or target.is_relative_to(r) for r in roots):
+            return False
+        for ex in (p for p in (self._exclude_paths or "").split("\n") if p.strip()):
+            try:
+                ex_path = Path(ex).resolve()
+            except (OSError, RuntimeError):
+                continue
+            if target == ex_path or target.is_relative_to(ex_path):
+                return False
+        return target.suffix.lower() in _MUSIC_EXT and target.is_file()
 
     def _enumerate_files(self) -> List[Path]:
         """按配置枚举音频文件（保留扩展名、trickplay、排除路径过滤）。"""
@@ -772,7 +940,7 @@ class MusicLibraryScraper(_PluginBase):
                 logger.warning(f"[music-scraper] 路径不存在: {root}")
                 continue
             for fp in root_path.rglob("*"):
-                if self._event.is_set():
+                if self._stop_event().is_set():
                     logger.info("[music-scraper] 收到停止信号")
                     return files
                 if not fp.is_file():
@@ -813,12 +981,15 @@ class MusicLibraryScraper(_PluginBase):
         )
 
         scanned = from_cache = skipped_tagged = ok = failed_n = exhausted = 0
+        transport = aborted = 0
         now_iso = self._now_iso()
         effective_force = force or (self._force_all and not targeted)
         live_keys = set()  # 整盘扫描时实际存在（stat 成功）的文件，供 prune 用
+        dirty = 0  # 自上次落账以来变更过的条目数
+        transport_streak = 0  # 连续 MTW 故障的文件数（命中缓存不计入，也不算中断）
 
         for fp in files:
-            if self._event.is_set():
+            if self._stop_event().is_set():
                 logger.info("[music-scraper] 收到停止信号，提前结束")
                 break
             scanned += 1
@@ -854,26 +1025,50 @@ class MusicLibraryScraper(_PluginBase):
                 done[key] = {"mtime": mtime, "size": size, "ts": now_iso, "source": source}
                 failed.pop(key, None)
                 skipped_tagged += 1
+                dirty += 1
                 continue
 
             okf, reason, score, source = self.__scrape_file(fp)
-            if okf:
-                done[key] = {"mtime": mtime, "size": size, "ts": now_iso, "source": source}
-                failed.pop(key, None)
-                ok += 1
+            if reason.startswith(_TRANSPORT_REASONS):
+                # MTW 侧故障：插件没学到任何关于这个文件的信息，所以既不写 failed 账、
+                # 也不涨 retries，原样留着下一轮再处理。连续踩满就熔断中止本轮。
+                transport += 1
+                transport_streak += 1
+                if not targeted and transport_streak >= _ABORT_AFTER_TRANSPORT:
+                    logger.warning(
+                        f"[music-scraper] 连续 {transport_streak} 个文件是 MTW 故障，"
+                        f"判为 MTW 整体不可用，本轮中止"
+                    )
+                    aborted = True
+                    break
             else:
-                prev = failed.get(key)
-                prev_retries = int(prev.get("retries", 0)) if isinstance(prev, dict) else 0
-                failed[key] = {
-                    "mtime": mtime, "size": size,
-                    "retries": prev_retries + 1,
-                    "last_ts": now_iso, "reason": reason, "score": score,
-                }
-                done.pop(key, None)
-                failed_n += 1
+                transport_streak = 0
+                if okf:
+                    done[key] = {"mtime": mtime, "size": size, "ts": now_iso, "source": source}
+                    failed.pop(key, None)
+                    ok += 1
+                    dirty += 1
+                else:
+                    prev = failed.get(key)
+                    prev_retries = int(prev.get("retries", 0)) if isinstance(prev, dict) else 0
+                    failed[key] = {
+                        "mtime": mtime, "size": size,
+                        "retries": prev_retries + 1,
+                        "last_ts": now_iso, "reason": reason, "score": score,
+                    }
+                    done.pop(key, None)
+                    failed_n += 1
+                    dirty += 1
 
-        # 清理：仅整盘扫描（未中断）时剔除磁盘上已消失的记账项，避免状态无限膨胀。
-        if not targeted and not self._event.is_set():
+            # 定期落账：整轮动辄几小时，中途容器重启不该把已刮好的部分全丢掉。
+            if dirty >= _SAVE_EVERY:
+                self.save_data(_KEY_DONE, done)
+                self.save_data(_KEY_FAILED, failed)
+                dirty = 0
+
+        # 清理：仅整盘扫描且未中断/未熔断时剔除磁盘上已消失的记账项，避免状态无限膨胀。
+        # 熔断或提前退出时 live_keys 只覆盖了一部分目录，这时候 prune 会误删未走到的条目。
+        if not targeted and not aborted and not self._stop_event().is_set():
             for k in list(done.keys()):
                 if k not in live_keys:
                     done.pop(k, None)
@@ -881,7 +1076,11 @@ class MusicLibraryScraper(_PluginBase):
                 if k not in live_keys:
                     failed.pop(k, None)
 
-        pending = scanned - from_cache - skipped_tagged - ok - failed_n - exhausted
+        # 未处理到的文件（熔断/停止后剩下的）也算待处理：不并进来会让"待处理"在
+        # 熔断那一轮直接报 0，看起来像库已经扫完了。
+        not_attempted = max(0, len(files) - scanned)
+        pending = (scanned - from_cache - skipped_tagged - ok
+                   - failed_n - exhausted - transport) + not_attempted
         summary = {
             "ts": now_iso,
             "scanned": scanned,
@@ -890,6 +1089,8 @@ class MusicLibraryScraper(_PluginBase):
             "ok": ok,
             "failed": failed_n,
             "exhausted": exhausted,
+            "transport": transport,
+            "aborted": aborted,
             "pending": max(0, pending),
             "force": effective_force,
             "targeted": targeted,
@@ -901,7 +1102,9 @@ class MusicLibraryScraper(_PluginBase):
         self.save_data(_KEY_RUNS, summary)
         logger.info(
             f"[music-scraper] 完成：命中缓存 {from_cache}，已有tag {skipped_tagged}，"
-            f"成功 {ok}，失败 {failed_n}，超限跳过 {exhausted}（{summary['duration_s']}s）"
+            f"成功 {ok}，失败 {failed_n}，超限跳过 {exhausted}，MTW 故障 {transport}"
+            f"{'（本轮熔断中止，未处理的下轮再来）' if aborted else ''}"
+            f"（{summary['duration_s']}s）"
         )
 
     def __is_complete(self, path: Path) -> bool:
@@ -917,7 +1120,10 @@ class MusicLibraryScraper(_PluginBase):
 
     def __scrape_file(self, path: Path) -> Tuple[bool, str, Optional[int], str]:
         """处理单个文件，返回 (是否成功, 失败原因, 命中分数, 命中来源)。"""
-        candidates = self._mtw_fetch_candidates(path)
+        candidates, failure = self._mtw_fetch_candidates(path)
+        if failure:
+            # MTW 侧故障：不能算这个文件的锅，调用方按原因前缀区分后不记 retries。
+            return False, failure, None, ""
         if not candidates:
             return False, "MTW 无候选", None, ""
         picked, score = self._mtw_pick_best(path, candidates)
@@ -1054,21 +1260,47 @@ class MusicLibraryScraper(_PluginBase):
             json={"username": self._mtw_username, "password": self._mtw_password},
         )
         if not resp or not resp.get("token"):
-            logger.error(f"[music-scraper] MTW JWT 获取失败: {resp}")
+            # 不回显响应体，避免 MTW 的错误信息里夹带的敏感内容进日志。
+            logger.error("[music-scraper] MTW JWT 获取失败，检查地址与账密")
             return None
         self._token = resp["token"]
-        self._token_expiry = time.time() + 6 * 24 * 3600
+        self._token_expiry = _token_expiry_at(resp["token"], resp)
         return self._token
 
-    def _mtw_fetch_candidates(self, path: Path) -> List[dict]:
-        """按配置的源依次向 MTW 拉候选并合并，每个候选标记命中的源。
+    def _mtw_drop_token(self):
+        """丢掉缓存的令牌，下次请求重新登录。"""
+        self._token = None
+        self._token_expiry = 0.0
+
+    def _mtw_request(self, endpoint: str, body: Dict[str, Any],
+                     auth_retry: bool = True) -> Tuple[Any, Optional[str]]:
+        """POST MTW 的 /apimt/<endpoint>/，返回 (响应体, 故障原因)。
+
+        故障原因非空表示这次请求没能给出结论（不可达 / 鉴权 / 接口报错），调用方不能把它
+        当成"这个文件查不到"。鉴权失败会强制重登一次再重试，覆盖 MTW 换密钥、轮换 JWT
+        这些让缓存令牌提前失效的情况。
+        """
+        resp = RequestUtils(
+            headers={"Content-Type": "application/json", **self._mtw_headers()},
+        ).post_json(url=f"{self._mtw_base_url}/apimt/{endpoint}/", json=body)
+        reason = _mtw_failure_reason(resp)
+        if reason == _AUTH_REASON and auth_retry:
+            self._mtw_drop_token()
+            if self._mtw_token():
+                return self._mtw_request(endpoint, body, auth_retry=False)
+        return resp, reason
+
+    def _mtw_fetch_candidates(self, path: Path) -> Tuple[List[dict], Optional[str]]:
+        """按配置的源依次向 MTW 拉候选并合并，返回 (候选, MTW 侧故障原因)。
 
         默认全源：单源 top10 经常整批是翻唱/钢琴版（实测 min_score=3 只能过 57%），
         换源比放宽阈值安全。某源已经出过满分候选就不再往下问，控制请求量。
+        某个源挂了不影响其它源；只有全部候选为空且期间确有请求失败时才回报故障原因，
+        这时"查不到"其实说不准是曲库没有还是 MTW 不行，不能记在文件头上。
         """
         identity = _local_identity(path)
         if not identity["title"]:
-            return []
+            return [], None
         want = {
             "title": identity["title"],
             "artist": identity["artist"],
@@ -1076,6 +1308,7 @@ class MusicLibraryScraper(_PluginBase):
             "duration": identity["duration"],
         }
         merged: List[dict] = []
+        failure: Optional[str] = None
         best_score = 0
         for resource in _normalize_resources(self._mtw_resources):
             # MTW 前端契约：title/artist/album 取自本地 tag，full_path 仅作参考
@@ -1086,12 +1319,10 @@ class MusicLibraryScraper(_PluginBase):
                 "album": identity["album"],
                 "full_path": str(path),
             }
-            resp = RequestUtils(
-                headers={"Content-Type": "application/json", **self._mtw_headers()},
-            ).post_json(
-                url=f"{self._mtw_base_url}/apimt/fetch_id3_by_title/",
-                json=body,
-            )
+            resp, reason = self._mtw_request("fetch_id3_by_title", body)
+            if reason:
+                failure = reason
+                continue
             data = resp.get("data") if isinstance(resp, dict) else None
             if isinstance(data, dict) and "data" in data:
                 data = data["data"]
@@ -1107,7 +1338,9 @@ class MusicLibraryScraper(_PluginBase):
                     best_score = max(best_score, self._score_candidate(c, want))
             if best_score >= _MAX_SCORE:
                 break
-        return merged
+        if not merged and failure:
+            return [], failure
+        return merged, None
 
     # ---------------- 候选匹配 & 字段映射 ----------------
 

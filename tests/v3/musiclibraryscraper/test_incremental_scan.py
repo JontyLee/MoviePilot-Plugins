@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -176,6 +177,74 @@ class IncrementalScanTest(unittest.TestCase):
         self.assertNotIn(str(tmp / "gone.mp3"), p.get_data("done"))
         self.assertEqual(len(p.get_data("done")), 1)
 
+    def _transport_outage(self, names, existing_failed=None):
+        """造一个"每次抓取都是 MTW 侧故障"的插件实例。"""
+        files = {n: "ok" for n in names}
+        p, tmp, counters = self._plugin(files)
+
+        def outage(fp):
+            counters["scrape"] += 1
+            return (False, mls._UNREACHABLE_REASON, None, "")
+
+        setattr(p, _SCRAPE, outage)
+        if existing_failed:
+            p.save_data("failed", existing_failed)
+        return p, tmp, counters
+
+    def test_mtw_outage_does_not_burn_retry_budget(self):
+        """MTW 整体故障不能记在文件头上：不写 failed 账、不涨 retries，否则连错
+        MAX_RETRY 轮整库就永久跳过（mtime+size 不变，再也不刷）。"""
+        p, tmp, c = self._transport_outage([f"{i}.mp3" for i in range(4)])
+        self._scan(p)
+        self.assertEqual(p.get_data("failed"), {})
+        self.assertEqual(p.get_data("runs")["failed"], 0)
+        self.assertEqual(p.get_data("runs")["transport"], 4)
+        self.assertEqual(c["scrape"], 4)
+
+    def test_mtw_outage_breaks_the_round_and_keeps_the_books(self):
+        """连续故障踩满阈值就熔断：剩下的文件不再空打请求，且不 prune（账本只走了一半）。"""
+        stale = {"/nonexistent/gone.mp3": {"mtime": 1, "size": 1, "retries": 1}}
+        p, tmp, c = self._transport_outage(
+            [f"{i}.mp3" for i in range(12)], existing_failed=stale
+        )
+        self._scan(p)
+        self.assertEqual(c["scrape"], mls._ABORT_AFTER_TRANSPORT)
+        runs = p.get_data("runs")
+        self.assertTrue(runs["aborted"])
+        self.assertEqual(runs["transport"], mls._ABORT_AFTER_TRANSPORT)
+        # 熔断后没走到的文件必须还算"待处理"，否则那一轮看起来像库已经扫完
+        self.assertEqual(runs["pending"], 12 - mls._ABORT_AFTER_TRANSPORT)
+        # 中止时账本只覆盖了部分目录，此时 prune 会误删没走到的条目
+        self.assertIn("/nonexistent/gone.mp3", p.get_data("failed"))
+
+    def test_targeted_retry_is_not_aborted_by_outage_breaker(self):
+        """手动重试是定向批次：就算 MTW 一直故障也要把这批都跑完，不然永远只剩 5 个在试。"""
+        p, tmp, c = self._transport_outage([f"{i}.mp3" for i in range(12)])
+        self._scan(p, force=True, target_paths=[str(tmp / f"{i}.mp3") for i in range(12)])
+        self.assertEqual(c["scrape"], 12)
+        self.assertFalse(p.get_data("runs")["aborted"])
+
+    def test_progress_flushed_mid_scan(self):
+        """整轮动辄几小时：中途就得落账，容器重启不能把已刮好的部分全丢掉。"""
+        p, tmp, c = self._plugin({f"{i}.mp3": "ok" for i in range(6)})
+        saves = []
+        real_save = p.save_data
+
+        def counting_save(key, value, plugin_id=None):
+            saves.append((key, len(value) if isinstance(value, dict) else value))
+            return real_save(key, value, plugin_id)
+
+        p.save_data = counting_save
+        orig = mls._SAVE_EVERY
+        mls._SAVE_EVERY = 2
+        try:
+            self._scan(p)
+        finally:
+            mls._SAVE_EVERY = orig
+        done_saves = [n for k, n in saves if k == "done"]
+        self.assertGreater(len(done_saves), 1)
+        self.assertTrue(any(n > 0 for n in done_saves[:-1]), done_saves)
+
     def test_status_hides_password(self):
         p, tmp, c = self._plugin({"a.mp3": "ok"})
         p._enabled = True
@@ -302,7 +371,9 @@ class ContractTest(unittest.TestCase):
         """MTW 的 Django 路由挂在 /apimt/ 下，写成 /api/ 会一律 404。"""
         src = Path(mls.__file__).read_text(encoding="utf-8")
         self.assertIn("/apimt/token/", src)
-        self.assertIn("/apimt/fetch_id3_by_title/", src)
+        self.assertIn("/apimt/{endpoint}/", src)
+        self.assertIn('self._mtw_request("fetch_id3_by_title"', src)
+        self.assertNotIn('"/api/', src)
         self.assertNotIn('/api/token/', src)
         self.assertNotIn('/api/fetch_id3_by_title/', src)
 
@@ -430,9 +501,12 @@ class MatchTest(unittest.TestCase):
         orig = mls.RequestUtils
         mls.RequestUtils = _Ru
         try:
-            self.assertEqual(p._mtw_fetch_candidates(fp), [])
+            cands, failure = p._mtw_fetch_candidates(fp)
         finally:
             mls.RequestUtils = orig
+        # 空候选是"可用响应 + 查无此曲"，不是 MTW 故障
+        self.assertEqual(cands, [])
+        self.assertIsNone(failure)
         self.assertIn("/apimt/fetch_id3_by_title/", captured["url"])
         self.assertEqual(captured["body"]["title"], "黑面")
         self.assertEqual(captured["body"]["artist"], "陈奕迅")
@@ -489,9 +563,10 @@ class MatchTest(unittest.TestCase):
         orig = mls.RequestUtils
         mls.RequestUtils = self._fake_mtw(by_resource, calls)
         try:
-            cands = p._mtw_fetch_candidates(fp)
+            cands, failure = p._mtw_fetch_candidates(fp)
         finally:
             mls.RequestUtils = orig
+        self.assertIsNone(failure)
         self.assertEqual(calls, list(mls._DEFAULT_RESOURCES))
         self.assertEqual([c["resource"] for c in cands], list(mls._DEFAULT_RESOURCES))
         # 专辑名各源不同 → 全部只有 2 分，落到阈值以下
@@ -511,12 +586,71 @@ class MatchTest(unittest.TestCase):
         orig = mls.RequestUtils
         mls.RequestUtils = self._fake_mtw(by_resource, calls)
         try:
-            cands = p._mtw_fetch_candidates(fp)
+            cands, failure = p._mtw_fetch_candidates(fp)
         finally:
             mls.RequestUtils = orig
+        self.assertIsNone(failure)
         self.assertEqual(calls, ["netease", "qmusic"])
         picked, score = p._mtw_pick_best(fp, cands)
         self.assertEqual((score, picked["resource"]), (3, "qmusic"))
+
+    def test_fetch_candidates_reports_mtw_failure_not_empty_result(self):
+        """MTW 挂了/令牌失效时不能报"无候选"：那会被记成文件失败并烧掉重试额度。"""
+        fp = self._track()
+
+        class _Ru:
+            def __init__(self, *a, **k):
+                pass
+
+            def post_json(self, url=None, json=None, **kw):
+                if "token" in url:
+                    return {"token": "t"}
+                # 请求发出去了但拿不到结论：连接失败返回 None
+                return None
+
+        p = self._plugin(resources=["netease"])
+        p._mtw_username, p._mtw_password = "u", "p"
+        orig = mls.RequestUtils
+        mls.RequestUtils = _Ru
+        try:
+            cands, failure = p._mtw_fetch_candidates(fp)
+        finally:
+            mls.RequestUtils = orig
+        self.assertEqual(cands, [])
+        self.assertEqual(failure, mls._UNREACHABLE_REASON)
+
+    def test_fetch_candidates_reauth_once_on_token_expired(self):
+        """JWT 提前失效：判成鉴权失败要强制重登一次再重试，而不是一路 401 到扫完。"""
+        fp = self._track()
+        state = {"logins": 0, "calls": 0}
+
+        class _Ru:
+            def __init__(self, *a, **k):
+                pass
+
+            def post_json(self, url=None, json=None, **kw):
+                if "token" in url:
+                    state["logins"] += 1
+                    return {"token": "tok%d" % state["logins"]}
+                state["calls"] += 1
+                if state["calls"] == 1:
+                    # DRF 的 JWT 过期响应
+                    return {"detail": "Given token not valid for any token type",
+                            "code": "token_not_valid"}
+                return {"result": True, "data": [
+                    {"name": "黑面", "artist": "陈奕迅", "album": "黑白灰"}]}
+
+        p = self._plugin(resources=["netease"])
+        p._mtw_username, p._mtw_password = "u", "p"
+        orig = mls.RequestUtils
+        mls.RequestUtils = _Ru
+        try:
+            cands, failure = p._mtw_fetch_candidates(fp)
+        finally:
+            mls.RequestUtils = orig
+        self.assertIsNone(failure)
+        self.assertEqual(len(cands), 1)
+        self.assertEqual(state["logins"], 2)
 
     def test_musicinfo_has_no_type_or_artist_init_arg(self):
         """宿主 MusicInfo 的 type 是 init=False，artist 也不是参数，传了会 TypeError。"""
@@ -529,6 +663,191 @@ class MatchTest(unittest.TestCase):
         self.assertNotIn("artist", names)
         self.assertIn("music_type", names)
         self.assertIn("artists", names)
+
+
+class RobustnessTest(unittest.TestCase):
+    """复盘后的并发/生命周期/入参边界回归。"""
+
+    def _plugin(self):
+        p = mls.MusicLibraryScraper()
+        p._mtw_base_url = "http://mtw:8002"
+        p._enabled = True
+        p._cron = "0 3 * * 0"
+        return p
+
+    def test_every_scan_entry_is_mutually_exclusive(self):
+        """周期任务、一次性任务、手动触发必须共用同一个槽位，否则两本账互相覆盖。"""
+        p = self._plugin()
+        p.init_plugin({"enabled": True, "cron": "0 3 * * 0"})
+        svc = p.get_service()
+        self.assertEqual(svc[0]["func"], p._run_scan_guarded)
+
+        captured = {}
+        orig_add = mls.scheduler_sdk.add_plugin_once_job
+
+        def fake_add(plugin_id, job_id, func, name, **kw):
+            captured["func"] = func
+            return True
+
+        mls.scheduler_sdk.add_plugin_once_job = fake_add
+        try:
+            self.assertTrue(p._kick_scan())
+        finally:
+            mls.scheduler_sdk.add_plugin_once_job = orig_add
+        self.assertEqual(captured["func"], p._run_scan_guarded)
+
+        # 槽位被占时：同步入口跳过、异步入口拒绝，都不许再起一轮
+        self.assertTrue(p._begin_scan())
+        self.assertFalse(p._run_scan_guarded())
+        self.assertFalse(p._start_scan_async())
+        p._end_scan()
+        self.assertFalse(p._is_running())
+
+    def test_once_job_refusal_falls_back_to_thread(self):
+        """宿主调度器没在跑时 add_plugin_once_job 返回 False：不能对着界面报"已提交"。"""
+        p = self._plugin()
+        kicked = []
+        orig_add = mls.scheduler_sdk.add_plugin_once_job
+        mls.scheduler_sdk.add_plugin_once_job = lambda *a, **k: False
+        p._start_scan_async = lambda **kw: kicked.append(kw) or True
+        try:
+            self.assertTrue(p._kick_scan())
+        finally:
+            mls.scheduler_sdk.add_plugin_once_job = orig_add
+        self.assertEqual(kicked, [{"force": False, "paths": None}])
+
+    def test_config_reload_does_not_clear_running_flag(self):
+        """保存配置会重跑 init_plugin：把在跑的扫描标成没在跑等于又开一条并发口子。"""
+        p = self._plugin()
+        p.init_plugin({"enabled": True})
+        self.assertTrue(p._begin_scan())
+        p.init_plugin({"enabled": True})
+        self.assertTrue(p._is_running())
+        p._end_scan()
+        self.assertFalse(p._is_running())
+
+    def test_stop_signal_survives_stop_service(self):
+        """stop_service 里 set 完立刻 clear 等于从没停过；信号还得是每实例独立的。"""
+        p = self._plugin()
+        other = mls.MusicLibraryScraper()
+        p.stop_service()
+        self.assertTrue(p._stop_event().is_set())
+        self.assertFalse(other._stop_event().is_set())
+        # 下一轮扫描开始时才复位
+        self.assertTrue(p._begin_scan())
+        self.assertFalse(p._stop_event().is_set())
+        p._end_scan()
+
+    def test_retry_rejects_paths_outside_library(self):
+        """/retry 不能调用方传什么就刮什么：越界路径与非音频文件一律拒绝。"""
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "in.mp3").write_bytes(b"x" * 10)
+        (tmp / "notes.txt").write_bytes(b"x")
+        excluded = tmp / "excluded"
+        excluded.mkdir()
+        (excluded / "hidden.flac").write_bytes(b"x")
+        outside = tmp.parent / (tmp.name + "_outside")
+        outside.mkdir()
+        (outside / "escape.mp3").write_bytes(b"x")
+
+        p = self._plugin()
+        p._scraper_paths = str(tmp)
+        p._exclude_paths = str(excluded)
+
+        self.assertTrue(p._is_library_path(str(tmp / "in.mp3")))
+        self.assertFalse(p._is_library_path("/etc/hosts"))
+        self.assertFalse(p._is_library_path(str(tmp / "notes.txt")))
+        self.assertFalse(p._is_library_path(str(excluded / "hidden.flac")))
+        # 拼 ../ 绕前缀，realpath 之后照样在库外
+        self.assertFalse(p._is_library_path(str(tmp / ".." / outside.name / "escape.mp3")))
+
+        class _Req:
+            def __init__(self, body):
+                self._body = body
+
+            async def json(self):
+                return self._body
+
+        kicked = []
+        p._start_scan_async = lambda **kw: kicked.append(kw) or True
+        import asyncio
+
+        mixed = asyncio.run(p.api_retry(_Req({
+            "paths": [str(tmp / "in.mp3"), "/etc/hosts"]
+        })))
+        self.assertTrue(mixed["accepted"])
+        self.assertEqual(mixed["count"], 1)
+        self.assertEqual(mixed["rejected"], 1)
+        self.assertEqual(kicked[-1]["paths"], [str(tmp / "in.mp3")])
+
+        only_outside = asyncio.run(p.api_retry(_Req({"paths": ["/etc/hosts"]})))
+        self.assertFalse(only_outside["accepted"])
+        self.assertEqual(only_outside["reason"], "out_of_library")
+
+    def test_token_expiry_follows_the_jwt(self):
+        """过期时间按令牌自己的 exp 算；拿不到就只缓存 1 小时，别再硬编 6 天。"""
+        import base64
+        import json as _json
+
+        exp = int(time.time()) + 7200
+        payload = base64.urlsafe_b64encode(
+            _json.dumps({"exp": exp}).encode()
+        ).decode().rstrip("=")
+        token = f"hdr.{payload}.sig"
+        self.assertEqual(mls._jwt_exp(token), float(exp))
+        self.assertEqual(mls._token_expiry_at(token, {"token": token}), float(exp))
+        # 响应体里给了过期时间就以它为准
+        self.assertEqual(
+            mls._token_expiry_at(token, {"token": token, "expired_at": exp + 60}),
+            float(exp + 60),
+        )
+        # 解不出声明：宁可短缓存，多登一次比整轮带着废 token 白跑便宜
+        self.assertLess(
+            mls._token_expiry_at("opaque", {"token": "opaque"}) - time.time(), 3700
+        )
+
+    def test_mtw_failure_classification(self):
+        """响应形状判故障类别：空候选可用，None 是不可达，DRF 错误体是接口/鉴权失败。"""
+        self.assertIsNone(mls._mtw_failure_reason({"result": True, "data": []}))
+        self.assertEqual(mls._mtw_failure_reason(None), mls._UNREACHABLE_REASON)
+        self.assertEqual(
+            mls._mtw_failure_reason({"detail": "Given token not valid",
+                                     "code": "token_not_valid"}),
+            mls._AUTH_REASON,
+        )
+        # 认不出形状的响应同样不能当成"查无此曲"
+        self.assertEqual(mls._mtw_failure_reason({"msg": "ok"}), mls._UNREACHABLE_REASON)
+
+    def test_transport_reasons_are_the_documented_ones(self):
+        """扫描侧靠前缀判断要不要记 retries，两边用同一组常量、不能各写各的。"""
+        self.assertIn(mls._UNREACHABLE_REASON, mls._TRANSPORT_REASONS)
+        self.assertIn(mls._AUTH_REASON, mls._TRANSPORT_REASONS)
+        for prefix in mls._TRANSPORT_REASONS:
+            self.assertTrue(prefix.startswith("MTW"))
+
+    def test_form_defaults_keep_resources_empty(self):
+        """原生表单不要把 7 个源预填上：留空=全部源才是配置页的口径。"""
+        _content, defaults = self._plugin().get_form()
+        self.assertEqual(defaults["mtw_resource"], [])
+        self.assertIn("留空即全部源", mls._FORM_NOTES)
+
+    def test_onlyonce_writeback_carries_every_config_key(self):
+        """宿主 update_config 是整体替换不是合并：只回写 onlyonce 会清掉其余配置。"""
+        p = mls.MusicLibraryScraper()
+        _content, defaults = p.get_form()
+        config = {
+            **defaults,
+            "scraper_paths": "/music",
+            "mtw_base_url": "http://mtw:8002",
+            "mtw_username": "u",
+            "mtw_password": "p",
+        }
+        p.init_plugin(config)
+        self.assertEqual(p._configs, [])  # 没勾选"立即运行一次"就不该回写
+        p.init_plugin({**config, "onlyonce": True})
+        written = p._configs[-1]
+        self.assertEqual(set(written), set(defaults))
+        self.assertIs(written["onlyonce"], False)
 
 
 if __name__ == "__main__":

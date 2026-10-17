@@ -71,7 +71,7 @@ V3 新插件使用 `plugins.v3/<plugin_id_lower>/`、`tests/v3/<plugin_id_lower>
 | --- | --- |
 | 类名 / 目录 | `MusicLibraryScraper` / `plugins.v3/musiclibraryscraper/` |
 | 配置前缀 | `musiclibraryscraper_` |
-| 版本 | 0.3.1 |
+| 版本 | 0.3.2 |
 | 元数据来源 | Music Tag Web（MTW），插件不直连任何音乐平台 API |
 | 图标 | `icons/avator.webp`（MTW 界面自带的头像图，已下载到仓库，市场走 raw 地址，不热链 MTW 实例） |
 
@@ -100,10 +100,24 @@ V3 新插件使用 `plugins.v3/<plugin_id_lower>/`、`tests/v3/<plugin_id_lower>
 - 配置页不在单个选项下面挂长提示：来源、查询与选取规则、两档写入模式的后果、宿主策略叠加
   统一收在页面底部一个说明块里。v0.3.1 移除了 `mtw_select_mode`（只被解析回显、从不进请求，
   也不是 MTW 的入参，候选取舍一直由插件打分决定），已存过的这个键下次保存配置时自然消失。
-- 数据页页脚文案要直传 `items-per-page-text` / `items-per-page-options` / `page-text`：
-  Vuetify 3 的 `VDataTable` 没有 `footerProps`（那是 Vuetify 2 的 API），写成 `:footer-props`
-  会被当成未知属性丢掉，页脚一直是英文默认值。
-- 状态账（done/failed/runs）写入 plugindata，按 mtime+size 增量跳过；
+- 数据页表格用 `v-data-table-server`：`items` 是服务端分页好的一页，`VDataTable` 的
+  `pageCount` 按内存里的 items 长度算，一页 50 条时恒等于 1、下一页永久禁用（总条数要交给
+  `items-length`）。页脚文案同样要直传 `items-per-page-text` / `items-per-page-options` /
+  `page-text`：Vuetify 3 的 `VDataTable` 没有 `footerProps`（那是 Vuetify 2 的 API），写成
+  `:footer-props` 会被当成未知属性丢掉，页脚一直是英文默认值。
+- 扫描全程串行：周期任务、一次性任务、`/scan`、`/retry` 都走同一个带互斥入口，抢不到槽位就跳过
+  而不是并发跑 —— 状态账是整读整写，两轮并行时后写完的会把先写的整本盖掉。
+- MTW 侧故障（连不上、超时、401、接口报错）与「这个文件查不到」分开记：前者不写 failed 账、
+  不涨 `retries`，连续 5 个文件栽在它上面就熔断中止本轮（且不 prune 账本）。否则 MTW 重启一次
+  就给整库每个文件记一笔失败，连满 `MAX_RETRY=5` 轮后全体永久跳过。JWT 过期时间按令牌自身的
+  `exp` 算，请求被判鉴权失败会强制重登一次再重试。
+- `/retry` 只接受 realpath 后落在 `scraper_paths` 内、且不在 `exclude_paths` 内的音频文件，
+  调用方传什么都改不到库外文件。
+- 勾选「立即运行一次」后的回写必须带齐全量配置键：宿主 `update_config` 是整体替换
+  （`PluginInstanceOper.save_config_data` 直接 `record.config_data = deepcopy(config_data)`），
+  只回写 `{"onlyonce": false}` 会把其余配置一起清掉。
+- 状态账（done/failed/runs）写入 plugindata，按 mtime+size 增量跳过，扫描中每处理 25 个文件
+  落一次账（整轮动辄数小时，中途容器重启不该丢掉已刮好的部分）；
   数据页、`/status` `/files` `/retry` `/scan` API 与 `/music_scraper_status`
   `/music_scraper_retry` 命令都读同一份账。
 - 前置条件：MTW 与 MP 挂载同一份音乐库路径，且配置 MTW 地址与账密。
