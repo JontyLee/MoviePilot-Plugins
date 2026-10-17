@@ -17,8 +17,9 @@ v0.2.1（修好 MTW 调用契约，之前一次都没真的刮成功过）：
 - RequestUtils.post_dict(jsondata=) → post_json(json=)（宿主没有 post_dict 这个方法）。
 - 本地 tag 改由 mutagen 读取：MP 的 MetaInfoPath 对音频返回 MetaVideo，根本没有
   artist/album，导致“已有 tag 跳过”永远判 False、匹配也无从下手。
-- 比对前做 NFKC + 去空白/标点归一化（“你的陈奕迅 国语精选” vs “你的陈奕迅国语精选”
-  这类假失配实测占失败的一部分，归一化后命中率 47% → 60%）。
+- 比对归一化改为直接复用宿主 app.domain.music.music_text_key（NFKD + casefold +
+  rust zhconv 繁转简），本地 NFKC 实现仅作宿主缺该函数时的兜底。注：MTW 的搜索侧
+  本身已做繁简归一（綿綿/绵绵 召回同一批），需要归一的只有插件的比对侧。
 - 补空模式的完成判据从 title+artist 收紧为 title+artist+album+内嵌封面：实测整库
   1039 个文件的文字标签早已刮齐，只剩约 36% 缺封套图，旧判据会让插件永远空转。
 """
@@ -74,20 +75,33 @@ _COVER_KEYS = ("APIC", "covr", "picture", "metadata_block_picture", "METADATA_BL
 _TRACK_PREFIX_RE = re.compile(r"^\s*\d{1,3}\s*[-._)]\s*")
 # 目录名尾部的 “ (2017)” / “ [2017]” 年份。
 _YEAR_SUFFIX_RE = re.compile(r"\s*[\[(]\s*(?:19|20)\d{2}\s*[\])]\s*$")
-# 比较用归一化：去掉所有空白与非字母数字符号。
+# 比较用归一化：去掉所有空白与非字母数字符号（宿主归一化不可用时的兜底）。
 _NORM_STRIP_RE = re.compile(r"[^0-9a-z\u4e00-\u9fff]+")
+
+try:  # 宿主自带的音乐文本归一化：NFKD + casefold + 繁转简（rust zhconv）
+    from app.domain.music import music_text_key as _music_text_key
+except Exception:  # pragma: no cover - 视宿主版本而定
+    _music_text_key = None
 
 
 def _norm_text(value: Any) -> str:
     """归一化标题/艺人/专辑，供候选比对。
 
-    同一张专辑在本地与在线源里常见 “你的陈奕迅 国语精选” vs “你的陈奕迅国语精选”
-    这类纯空格/标点差异，NFKC + 去符号能把这类假失配消掉。
+    优先复用宿主 app.domain.music.music_text_key —— 它已经统一了繁简、全半角、
+    变音符并忽略排版符号，本插件的失败样本（綿綿/陳奕迅/這所有的一切）全部命中。
+    宿主没这个函数时退回 NFKC + 去符号的本地实现。
     """
     if value is None:
         return ""
-    text = unicodedata.normalize("NFKC", str(value)).casefold()
-    return _NORM_STRIP_RE.sub("", text)
+    text = str(value)
+    if _music_text_key is not None:
+        try:
+            key = _music_text_key(text)
+            if key:
+                return str(key)
+        except Exception:
+            pass
+    return _NORM_STRIP_RE.sub("", unicodedata.normalize("NFKC", text).casefold())
 
 
 def _first_tag_value(tags, keys) -> str:

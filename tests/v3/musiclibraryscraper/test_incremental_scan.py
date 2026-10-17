@@ -261,6 +261,34 @@ class MatchTest(unittest.TestCase):
         self.assertEqual(mls._norm_text("Ｔｈｅ Ｌｉｎｅ-Ｕｐ"), "thelineup")
         self.assertEqual(mls._norm_text(None), "")
 
+    def test_norm_text_prefers_host_music_text_key(self):
+        """宿主有 music_text_key（含 rust zhconv 繁转简）时必须优先用它。"""
+        calls = []
+
+        def fake_key(value):
+            calls.append(value)
+            return "绵绵"
+
+        orig = mls._music_text_key
+        mls._music_text_key = staticmethod(fake_key)
+        try:
+            self.assertEqual(mls._norm_text("綿綿"), "绵绵")
+        finally:
+            mls._music_text_key = orig
+        self.assertEqual(calls, ["綿綿"])
+
+    def test_norm_text_survives_host_key_failure(self):
+        """宿主函数抛异常也不能带崩整轮扫描，要退回本地实现。"""
+        def boom(value):
+            raise RuntimeError("rust zhconv unavailable")
+
+        orig = mls._music_text_key
+        mls._music_text_key = staticmethod(boom)
+        try:
+            self.assertEqual(mls._norm_text("你的陈奕迅 国语精选"), "你的陈奕迅国语精选")
+        finally:
+            mls._music_text_key = orig
+
     def test_read_music_tags_never_raises(self):
         out = mls._read_music_tags(Path("/nonexistent/dir/01 - x.flac"))
         self.assertEqual(
