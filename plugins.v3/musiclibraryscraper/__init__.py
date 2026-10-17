@@ -30,10 +30,25 @@ v0.3.0：
   acoustid、all 恒返回空候选，没列进默认。
 - 逐源按配置顺序查询并合并候选，候选上标记命中的源，写入与状态账都记真实来源；
   某源已出满分（3/3）候选即停止后续查询，避免每个文件都打满 7 次请求。
-- 配置页把两个最容易误解的选项讲清楚：识别源留空 = 全部源；只补缺 / 强制覆盖
+- 配置页把最容易误解的几件事讲清楚：元数据来源、识别源留空 = 全部源、只补缺 / 强制覆盖
   分别会动到哪些字段，以及最终是否覆盖还要叠加宿主「媒体刮削」的音乐三项策略。
 - 更名 MusicTagWeb音乐库刮削、换 MTW 官方图标、说明里点明元数据来源。
   目录名/类名/配置前缀保持不变，否则 config_data 与 plugindata 会整体失效。
+
+v0.3.1：
+- 配置说明改为集中式：全部收进页面底部一个说明块，选项本身只留标签，不再用 persistent-hint
+  跟在控件下面（排版被长提示撑坏）。
+- 补上「查询与选取」规则说明，回答"排序默认是什么规则"：按源顺序逐源查询，某源出 3/3 满分候选
+  即停；都没满分则合并全部候选取最高分；曲名/艺人/专辑 各 1 分（繁简与大小写归一后互相包含
+  即命中）；同分时按源顺序、同源内按 MTW 返回顺序取第一个；最高分低于 min_score 判失败。
+  匹配的本地身份优先读 tag，缺字段按 艺人/专辑 (年)/NN - 曲名 目录结构兜底。
+- 移除 mtw_select_mode：它只被解析和回显、从不进任何请求体，也不是 MTW 的入参（MTW 前端源码里
+  查不到这个概念），候选取舍一直由上面的打分规则决定，属于死配置。
+- 数据页页脚仍是英文的真因：Vuetify 3 的 VDataTable 没有 footerProps（那是 v2 的 API），
+  :footer-props 会被当成未知属性丢掉，页脚一直读 locale 默认值。v3 把 makeVDataTableFooterProps
+  平铺进 VDataTable 自身，所以 items-per-page-text / items-per-page-options / page-text
+  必须直接写在 <v-data-table> 上。
+- 图标改用 MTW 实例自带的 avator.webp 在线地址。
 """
 from __future__ import annotations
 
@@ -79,6 +94,28 @@ _MAX_SCORE = 3
 # MTW 实测能返回候选的识别源（顺序即查询顺序）：qq / spotify / acoustid / all 恒返回空，
 # 不要列进来。migu 单源给 20 条，musicbrainz 给繁体字形，其余各 10 条。
 _DEFAULT_RESOURCES = ("netease", "qmusic", "kuwo", "kugou", "migu", "musicbrainz", "smart_tag")
+
+# 配置页底部的一段集中说明：来源、查询与选取规则、两档写入模式、宿主策略叠加。
+# 不跟在单个配置项下面，选项本身只留最短的标签，细节全部收在这里。
+_FORM_NOTES = (
+    "【元数据来源】全部取自 Music Tag Web（MTW）的识别结果，插件不直连任何音乐平台。"
+    "识别源可多选，留空即全部源（网易云 / QQ音乐 / 酷我 / 酷狗 / 咪咕 / MusicBrainz / 智能）；"
+    "qq、spotify、acoustid、all 实测恒返回空候选，没有列进来。\n"
+    "【查询与选取】每个文件按这里的源顺序逐源查询，某源出现 3/3 满分候选就立刻停止，不再问后面的源；"
+    "都没满分则合并所有候选取最高分。分数为曲名 / 艺人 / 专辑 各 1 分（先做繁简与大小写归一，"
+    "互相包含即算命中）；同分时按源顺序、同源内按 MTW 返回顺序取第一个。"
+    "最高分仍低于「最低匹配分数」（默认 3，即要求三项全中）就记为失败、不写入。"
+    "用于匹配的本地身份优先读文件已有的 tag，缺哪项就按 艺人/专辑 (年)/NN - 曲名 的目录结构兜底。\n"
+    "【写入模式】只补缺：曲名+艺人+专辑+内嵌封面 四项齐全的文件按 mtime+size 记账直接跳过"
+    "（不再请求 MTW），缺哪项补哪项，已有非空标签保持不动，手工修改不会被覆盖。"
+    "强制覆盖：每轮忽略增量账、全库重扫重问，候选与现有标签不同就重写，封面重新下载内嵌、"
+    "歌词强制重写，手工改过的曲名/艺人/专辑/年份/轨道号会被替换；候选里没有的字段不会清空，"
+    "插件不认识的自定义注释字段也不会删。\n"
+    "【叠加宿主策略】最终是否覆盖还取宿主「设置 → 媒体刮削」音乐三项策略与这里的较强者："
+    "宿主标签策略=覆盖时，即使这里选只补缺也会重写；=跳过时，两种模式都不写该项。"
+    "宿主默认 标签仅缺失、封面仅缺失、歌词更优才换。\n"
+    "【同一份库】MTW 与 MP 需挂载同一份音乐库路径，否则写标签会落到不同文件。"
+)
 
 # 各容器格式的 tag key：ID3 帧名 / MP4 atom / Vorbis 注释 / APEv2。
 _TAG_KEYS = {
@@ -270,8 +307,8 @@ class MusicLibraryScraper(_PluginBase):
         "（网易云 / QQ / 酷我 / 酷狗 / 咪咕 / MusicBrainz / smart_tag），"
         "再沿用 MP 原生音乐刮削链路写入标签与封面。"
     )
-    plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/music-tag.png"
-    plugin_version = "0.3.0"
+    plugin_icon = "https://music.speedtest.jontylee.com:8443/static/dist/img/avator.webp"
+    plugin_version = "0.3.1"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "musiclibraryscraper_"
@@ -289,7 +326,6 @@ class MusicLibraryScraper(_PluginBase):
     _mtw_username: str = ""
     _mtw_password: str = ""
     _mtw_resources: List[str] = list(_DEFAULT_RESOURCES)
-    _mtw_select_mode: int = 0
     _min_score: int = 3
 
     # MTW 令牌缓存
@@ -318,10 +354,6 @@ class MusicLibraryScraper(_PluginBase):
             self._mtw_password = config.get("mtw_password") or ""
             self._mtw_resources = _normalize_resources(config.get("mtw_resource"))
             try:
-                self._mtw_select_mode = int(config.get("mtw_select_mode") or 0)
-            except (TypeError, ValueError):
-                self._mtw_select_mode = 0
-            try:
                 self._min_score = int(config.get("min_score") or 3)
             except (TypeError, ValueError):
                 self._min_score = 3
@@ -341,7 +373,6 @@ class MusicLibraryScraper(_PluginBase):
                 "mtw_password": self._mtw_password,
                 # 配置键保持单数，值自 v0.3.0 起是数组（读侧兼容旧的单字符串）
                 "mtw_resource": self._mtw_resources,
-                "mtw_select_mode": self._mtw_select_mode,
                 "min_score": self._min_score,
             })
             self._kick_scan()
@@ -570,16 +601,30 @@ class MusicLibraryScraper(_PluginBase):
                         ]},
                     ]},
                     {"component": "VRow", "content": [
-                        {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                             {"component": "VCronField", "props": {
                                 "model": "cron", "label": "执行周期", "placeholder": "5 位 cron，留空默认 0 3 * * 0"
                             }}
                         ]},
-                        {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                            {"component": "VTextField", "props": {
+                                "model": "mtw_base_url",
+                                "label": "Music Tag Web 地址",
+                                "placeholder": "http://192.168.x.x:8001"
+                            }}
+                        ]},
+                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                            {"component": "VTextField", "props": {
+                                "model": "min_score", "label": "最低匹配分数（0-3）", "type": "number",
+                                "placeholder": "默认 3"
+                            }}
+                        ]},
+                    ]},
+                    {"component": "VRow", "content": [
+                        {"component": "VCol", "props": {"cols": 12}, "content": [
                             {"component": "VSelect", "props": {
                                 "model": "mtw_resource", "label": "MTW 识别源（可多选，留空=全部）",
                                 "multiple": True, "chips": True, "closable": True,
-                                "hint": "按顺序逐源查询，出现满分候选即停",
                                 "items": [
                                     {"title": "网易云 netease", "value": "netease"},
                                     {"title": "QQ 音乐 qmusic", "value": "qmusic"},
@@ -588,31 +633,6 @@ class MusicLibraryScraper(_PluginBase):
                                     {"title": "咪咕 migu", "value": "migu"},
                                     {"title": "MusicBrainz", "value": "musicbrainz"},
                                     {"title": "智能 smart_tag", "value": "smart_tag"},
-                                ]
-                            }}
-                        ]},
-                        {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                            {"component": "VTextField", "props": {
-                                "model": "min_score", "label": "最低匹配分数（0-3）", "type": "number",
-                                "placeholder": "默认 3",
-                                "hint": "曲名/艺人/专辑 各 1 分；保持 3，召不回交给多源轮询",
-                            }}
-                        ]},
-                    ]},
-                    {"component": "VRow", "content": [
-                        {"component": "VCol", "props": {"cols": 12, "md": 8}, "content": [
-                            {"component": "VTextField", "props": {
-                                "model": "mtw_base_url",
-                                "label": "Music Tag Web 地址",
-                                "placeholder": "http://192.168.x.x:8001"
-                            }}
-                        ]},
-                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                            {"component": "VSelect", "props": {
-                                "model": "mtw_select_mode", "label": "MTW 候选排序",
-                                "items": [
-                                    {"title": "0 默认", "value": 0},
-                                    {"title": "1 精准匹配（时长）", "value": 1},
                                 ]
                             }}
                         ]},
@@ -651,16 +671,7 @@ class MusicLibraryScraper(_PluginBase):
                         {"component": "VCol", "props": {"cols": 12}, "content": [
                             {"component": "VAlert", "props": {
                                 "type": "info", "variant": "tonal",
-                                "text": "【写入模式】只补缺：曲名+艺人+专辑+内嵌封面 四项齐全的文件按 "
-                                        "mtime+size 记账直接跳过（不再请求 MTW），缺哪项补哪项，已有非空标签保持不动。"
-                                        "强制覆盖：每轮忽略增量账、全库重扫重问，候选与现有标签不同就重写，"
-                                        "封面重新下载内嵌、歌词强制重写，手工改过的曲名/艺人/专辑/年份/轨道号会被替换；"
-                                        "候选里没有的字段不会清空，插件不认识的自定义注释字段也不会删。\n"
-                                        "【叠加宿主策略】最终是否覆盖还取宿主「设置→媒体刮削」音乐三项策略与这里的较强者："
-                                        "宿主标签策略=覆盖时，即使这里选只补缺也会重写；=跳过时，两种模式都不写该项。"
-                                        "宿主默认 标签仅缺失、封面仅缺失、歌词更优才换。\n"
-                                        "【来源】元数据全部来自 Music Tag Web（MTW），插件不直连音乐平台；"
-                                        "识别源留空即全部源。MTW 与 MP 需挂载同一份音乐库路径，否则写标签会落到不同文件。"
+                                "text": _FORM_NOTES
                             }}
                         ]},
                     ]},
@@ -677,7 +688,6 @@ class MusicLibraryScraper(_PluginBase):
             "mtw_username": "",
             "mtw_password": "",
             "mtw_resource": list(_DEFAULT_RESOURCES),
-            "mtw_select_mode": 0,
             "min_score": 3,
         }
 
@@ -974,7 +984,6 @@ class MusicLibraryScraper(_PluginBase):
                 "exclude_paths": self._exclude_paths,
                 "mtw_base_url": self._mtw_base_url,
                 "mtw_resource": self._mtw_resources,
-                "mtw_select_mode": self._mtw_select_mode,
                 "min_score": self._min_score,
                 "has_username": bool(self._mtw_username),
                 # 绝不回传密码。

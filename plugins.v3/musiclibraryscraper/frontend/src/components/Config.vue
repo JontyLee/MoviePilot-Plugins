@@ -30,7 +30,6 @@ const DEFAULTS = {
   mtw_username: '',
   mtw_password: '',
   mtw_resource: [] as string[],
-  mtw_select_mode: 0,
   min_score: 3
 }
 
@@ -70,23 +69,16 @@ const resourceItems = [
 
 const ALL_SOURCES_TEXT = resourceItems.map(i => i.title.split(' ')[0]).join(' / ')
 
-const resourceHint = computed(() =>
+// 说明统一收在页面底部一个块里，配置项本身只留标签。
+const sourceNote = computed(() =>
   config.value.mtw_resource?.length
-    ? `已选 ${config.value.mtw_resource.length} 个源，按顺序逐源查询，出现满分候选即停`
-    : `留空 = 全部源（${ALL_SOURCES_TEXT}）；按顺序逐源查询，出现满分候选即停`
+    ? `已选 ${config.value.mtw_resource.length} 个源，就按这个顺序问`
+    : `留空 = 全部源（${ALL_SOURCES_TEXT}）`
 )
 
-// 两种模式的实际差别，避免"补空/覆盖"被理解成只是重跑一次
-const modeHint = computed(() =>
-  config.value.mode === 'force_all'
-    ? '强制覆盖：每轮忽略增量账、全库重扫重问 MTW；凡候选与现有标签不同就重写，封面重新下载并内嵌，歌词强制重写。手工改过的曲名、艺人、专辑、年份、轨道号会被替换（候选里没有的字段不会清空，插件不认识的自定义注释字段也不会删）。'
-    : '只补缺（推荐）：曲名+艺人+专辑+内嵌封面 四项齐全的文件直接跳过（按 mtime+size 记账，之后不再请求）；缺哪项补哪项，已有的非空标签保持不动，手工修改不会被覆盖。'
+const modeNote = computed(() =>
+  config.value.mode === 'force_all' ? '强制覆盖（当前）' : '只补缺（当前，推荐）'
 )
-
-const selectModeItems = [
-  { title: '0 默认', value: 0 },
-  { title: '1 精准匹配（时长）', value: 1 }
-]
 
 function saveConfig() {
   emit('save', config.value)
@@ -106,23 +98,9 @@ function saveConfig() {
         <v-switch v-model="config.onlyonce" label="立即运行一次" hide-details color="primary" inset />
       </v-col>
       <v-col cols="12" md="4">
-        <v-select
-          v-model="config.mode"
-          :items="modeItems"
-          label="写入模式"
-          hint="决定已有标签是保留还是重写，下方有逐项差别说明"
-          persistent-hint
-        />
+        <v-select v-model="config.mode" :items="modeItems" label="写入模式" hide-details />
       </v-col>
     </v-row>
-
-    <v-alert
-      :type="config.mode === 'force_all' ? 'warning' : 'success'"
-      variant="tonal"
-      density="compact"
-      class="mb-2"
-      :text="modeHint"
-    />
 
     <v-row dense>
       <v-col cols="12" md="6">
@@ -137,13 +115,11 @@ function saveConfig() {
         <v-select
           v-model="config.mtw_resource"
           :items="resourceItems"
-          label="MTW 识别源（可多选）"
+          label="MTW 识别源（可多选，留空=全部）"
           multiple
           chips
           closable-chips
           density="compact"
-          :hint="resourceHint"
-          persistent-hint
         />
       </v-col>
     </v-row>
@@ -158,37 +134,28 @@ function saveConfig() {
         />
       </v-col>
       <v-col cols="12" md="4">
-        <v-select
-          v-model="config.mtw_select_mode"
-          :items="selectModeItems"
-          label="MTW 候选排序"
+        <v-text-field
+          v-model.number="config.min_score"
+          label="最低匹配分数（0-3）"
+          type="number"
+          min="0"
+          max="3"
           hide-details
         />
       </v-col>
     </v-row>
 
     <v-row dense>
-      <v-col cols="12" md="4">
+      <v-col cols="12" md="6">
         <v-text-field v-model="config.mtw_username" label="MTW 用户名" hide-details />
       </v-col>
-      <v-col cols="12" md="4">
+      <v-col cols="12" md="6">
         <v-text-field
           v-model="config.mtw_password"
           label="MTW 密码"
           type="password"
           placeholder="仅本机保存，不入 git"
           hide-details
-        />
-      </v-col>
-      <v-col cols="12" md="4">
-        <v-text-field
-          v-model.number="config.min_score"
-          label="最低匹配分数"
-          type="number"
-          min="0"
-          max="3"
-          hint="曲名/艺人/专辑 各 1 分，满分 3。保持 3 即可：单源召不回的歌由多源轮询补上；降到 2 会接受同名 Live 版/翻唱，写错标签的代价比漏刮高。"
-          persistent-hint
         />
       </v-col>
     </v-row>
@@ -211,17 +178,35 @@ function saveConfig() {
       </v-col>
     </v-row>
 
-    <v-alert type="info" variant="tonal" class="mt-2" density="compact">
-      <div class="mb-1">
-        元数据全部来自 Music Tag Web（MTW），插件不直连音乐平台。单源 top10 常整批是翻唱/钢琴版，
-        所以默认逐源查询，而不是放宽匹配分数。
+    <v-alert type="info" variant="tonal" class="mt-2">
+      <div class="mb-2">
+        <div class="font-weight-medium">元数据来源</div>
+        全部取自 Music Tag Web（MTW）的识别结果，插件不直连任何音乐平台。{{ sourceNote }}。
+        qq / spotify / acoustid / all 实测恒返回空候选，没有列进来。
       </div>
-      <div class="mb-1">
-        最终是否覆盖还叠加宿主「设置 → 媒体刮削」里的音乐三项策略（标签 / 封面 / 歌词），取两者中更强的一个：
-        宿主设为「覆盖」时，即使这里选只补缺也会重写已有标签；宿主设为「跳过」时，两种模式都不写该项。
-        默认策略是 标签仅缺失、封面仅缺失、歌词更优才换。
+      <div class="mb-2">
+        <div class="font-weight-medium">查询与选取</div>
+        每个文件按源顺序逐源查询，某源出现 3/3 满分候选就立刻停止，不再问后面的源；都没满分则合并所有候选取最高分。
+        分数为曲名 / 艺人 / 专辑 各 1 分（先做繁简与大小写归一，互相包含即算命中）；同分时按源顺序、同源内按 MTW
+        返回顺序取第一个。最高分仍低于「最低匹配分数」（默认 3，即要求三项全中）就记为失败、不写入。
+        用于匹配的本地身份优先读文件已有的 tag，缺哪项就按 艺人/专辑 (年)/NN - 曲名 的目录结构兜底。
       </div>
-      <div>MTW 与 MP 需挂载同一份音乐库路径，否则写标签会落到不同文件。</div>
+      <div class="mb-2">
+        <div class="font-weight-medium">写入模式 · {{ modeNote }}</div>
+        <div>只补缺：曲名+艺人+专辑+内嵌封面 四项齐全的文件按 mtime+size 记账直接跳过（不再请求 MTW），
+          缺哪项补哪项，已有非空标签保持不动，手工修改不会被覆盖。</div>
+        <div>强制覆盖：每轮忽略增量账、全库重扫重问，候选与现有标签不同就重写，封面重新下载内嵌、歌词强制重写，
+          手工改过的曲名/艺人/专辑/年份/轨道号会被替换；候选里没有的字段不会清空，插件不认识的自定义注释字段也不会删。</div>
+      </div>
+      <div class="mb-2">
+        <div class="font-weight-medium">叠加宿主策略</div>
+        最终是否覆盖还取宿主「设置 → 媒体刮削」音乐三项策略与这里的较强者：宿主标签策略=覆盖时，即使这里选只补缺也会重写；
+        =跳过时，两种模式都不写该项。宿主默认 标签仅缺失、封面仅缺失、歌词更优才换。
+      </div>
+      <div>
+        <div class="font-weight-medium">同一份库</div>
+        MTW 与 MP 需挂载同一份音乐库路径，否则写标签会落到不同文件。
+      </div>
     </v-alert>
 
     <div class="d-flex align-center gap-2 mt-4">

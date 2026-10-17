@@ -453,11 +453,9 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
           ],
           items: rows.value,
           loading: loading.value,
-          "footer-props": {
-            "items-per-page-text": "每页条数",
-            "items-per-page-options": [20, 50, 100],
-            "page-text": pageText.value
-          },
+          "items-per-page-text": "每页条数",
+          "items-per-page-options": [20, 50, 100],
+          "page-text": pageText.value,
           "items-per-page": limit.value,
           density: "compact",
           class: "elevation-1",
@@ -509,7 +507,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
             _createElementVNode("div", { class: "text-center pa-6 text-grey" }, "该桶暂无数据", -1)
           ])]),
           _: 1
-        }, 8, ["items", "loading", "footer-props", "items-per-page"]),
+        }, 8, ["items", "loading", "page-text", "items-per-page"]),
         _createVNode(_component_v_snackbar, {
           modelValue: snackbar.value.show,
           "onUpdate:modelValue": _cache[6] || (_cache[6] = ($event) => snackbar.value.show = $event),
@@ -527,6 +525,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const Page = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-219afc38"]]);
+const Page = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-ce13bf03"]]);
 
 export { Page as default };

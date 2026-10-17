@@ -71,9 +71,9 @@ V3 新插件使用 `plugins.v3/<plugin_id_lower>/`、`tests/v3/<plugin_id_lower>
 | --- | --- |
 | 类名 / 目录 | `MusicLibraryScraper` / `plugins.v3/musiclibraryscraper/` |
 | 配置前缀 | `musiclibraryscraper_` |
-| 版本 | 0.3.0 |
+| 版本 | 0.3.1 |
 | 元数据来源 | Music Tag Web（MTW），插件不直连任何音乐平台 API |
-| 图标 | `icons/music-tag.png`（取自 MTW 应用自带图标） |
+| 图标 | <https://music.speedtest.jontylee.com:8443/static/dist/img/avator.webp>（MTW 实例自带；仓库保留 `icons/music-tag.png` 作离线备份） |
 
 定时扫描音乐目录，把每个文件按配置顺序交给 MTW 的 `/apimt/fetch_id3_by_title/`
 识别，再沿用 MP 原生音乐刮削链路写入标签与封面。
@@ -81,6 +81,11 @@ V3 新插件使用 `plugins.v3/<plugin_id_lower>/`、`tests/v3/<plugin_id_lower>
 - 识别源为多选，**留空 = 全部源**：`netease`、`qmusic`、`kuwo`、`kugou`、`migu`、
   `musicbrainz`、`smart_tag`。实测 `qq`、`spotify`、`acoustid`、`all` 恒返回空候选，
   因此不列入默认。某源已出满分（曲名+艺人+专辑 3/3）候选即停止后续查询。
+- 候选选取规则（无排序配置项，插件自己判定）：按源顺序逐源查询，出现满分候选即停；都没满分
+  则合并全部候选取最高分。分数为曲名 / 艺人 / 专辑 各 1 分（先做繁简与大小写归一，互相包含
+  即算命中）；**同分时按源顺序、同源内按 MTW 返回顺序取第一个**。最高分低于
+  `min_score`（默认 3）就记为失败、不写入。用于匹配的本地身份优先读文件已有 tag，缺哪项
+  按 `艺人/专辑 (年)/NN - 曲名` 目录结构兜底。
 - 写入模式两档，都只作用于 MP 认识的字段（曲名、艺人、专辑、专辑艺人、年份、轨道号、
   碟号、封面、歌词）：
   - 只补缺（默认）：曲名+艺人+专辑+内嵌封面 四项齐全的文件按 mtime+size 记账直接跳过，
@@ -92,6 +97,12 @@ V3 新插件使用 `plugins.v3/<plugin_id_lower>/`、`tests/v3/<plugin_id_lower>
   `tag_overwrite = 插件覆盖模式 or 宿主标签策略==覆盖`，`write_tags = 宿主标签策略!=跳过`。
   宿主默认是 标签仅缺失、封面仅缺失、歌词更优才换；把宿主标签策略设成「跳过」时，
   本插件两种模式都只写封面与歌词。
+- 配置页不在单个选项下面挂长提示：来源、查询与选取规则、两档写入模式的后果、宿主策略叠加
+  统一收在页面底部一个说明块里。v0.3.1 移除了 `mtw_select_mode`（只被解析回显、从不进请求，
+  也不是 MTW 的入参，候选取舍一直由插件打分决定），已存过的这个键下次保存配置时自然消失。
+- 数据页页脚文案要直传 `items-per-page-text` / `items-per-page-options` / `page-text`：
+  Vuetify 3 的 `VDataTable` 没有 `footerProps`（那是 Vuetify 2 的 API），写成 `:footer-props`
+  会被当成未知属性丢掉，页脚一直是英文默认值。
 - 状态账（done/failed/runs）写入 plugindata，按 mtime+size 增量跳过；
   数据页、`/status` `/files` `/retry` `/scan` API 与 `/music_scraper_status`
   `/music_scraper_retry` 命令都读同一份账。

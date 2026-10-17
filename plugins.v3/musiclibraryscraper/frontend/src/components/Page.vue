@@ -294,11 +294,9 @@ onMounted(refresh)
       ]"
       :items="rows"
       :loading="loading"
-      :footer-props="{
-        'items-per-page-text': '每页条数',
-        'items-per-page-options': [20, 50, 100],
-        'page-text': pageText
-      }"
+      items-per-page-text="每页条数"
+      :items-per-page-options="[20, 50, 100]"
+      :page-text="pageText"
       :items-per-page="limit"
       density="compact"
       class="elevation-1"

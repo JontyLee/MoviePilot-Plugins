@@ -238,8 +238,21 @@ class ContractTest(unittest.TestCase):
         self.assertEqual({a["path"] for a in apis}, {"/status", "/files", "/retry", "/scan"})
         self.assertTrue(all(a["auth"] == "bear" for a in apis))
 
+    def test_data_page_translates_footer_and_status(self):
+        """数据页不能漏 Vuetify 默认英文文案，且页脚文案必须走 Vuetify 3 的直传 props。
+
+        footerProps 是 Vuetify 2 的 API：v3 把 makeVDataTableFooterProps 平铺进 VDataTable
+        自己（VDataTableFooter.filterProps(props) 再挑出来），写成 :footer-props 会被当成
+        未知属性丢掉，页脚一直是英文。
+        """
+        page = (Path(mls.__file__).parent / "frontend" / "src" / "components" / "Page.vue"
+                ).read_text(encoding="utf-8")
+        self.assertNotIn("footer-props", page)
+        for phrase in ("items-per-page-text", "每页条数", "page-text", "items-per-page-options"):
+            self.assertIn(phrase, page)
+
     def test_config_page_explains_choices(self):
-        """两个最容易误解的选项必须在配置页讲清楚：留空=全部源、两档写入模式的后果。"""
+        """易误解的选项必须在配置页讲清楚：留空=全部源、选取排序规则、两档写入模式的后果。"""
         plugin_dir = Path(mls.__file__).parent
         src = Path(mls.__file__).read_text(encoding="utf-8")
         cfg = (plugin_dir / "frontend" / "src" / "components" / "Config.vue").read_text(
@@ -248,12 +261,34 @@ class ContractTest(unittest.TestCase):
         # 原生表单与 Vue 配置页都要有
         self.assertIn("留空=全部", src)
         self.assertIn("留空 = 全部源", cfg)
-        for phrase in ("只补缺", "强制覆盖", "宿主"):
+        for phrase in ("只补缺", "强制覆盖", "宿主", "同分时", "目录结构兜底"):
             self.assertIn(phrase, src)
             self.assertIn(phrase, cfg)
         # 覆盖后果不能只写"会覆盖"，要说清哪些字段会被替换、哪些不会
         self.assertIn("手工改过", cfg)
         self.assertIn("不会清空", cfg)
+
+    def test_config_notes_are_consolidated(self):
+        """说明集中在页面底部一个块里，不跟在单个配置项下面（persistent-hint 会撑坏排版）。"""
+        cfg = (Path(mls.__file__).parent / "frontend" / "src" / "components" / "Config.vue"
+               ).read_text(encoding="utf-8")
+        self.assertNotIn("persistent-hint", cfg)
+        self.assertNotIn('hint="', cfg)
+        # 原生表单同理：说明只在 VAlert 里
+        form = Path(mls.__file__).read_text(encoding="utf-8").split("def get_form", 1)[1]
+        self.assertNotIn('"hint"', form)
+
+    def test_dead_select_mode_option_removed(self):
+        """mtw_select_mode 从不进请求体、也不是 MTW 入参，属于死配置，不能复活。"""
+        src = Path(mls.__file__).read_text(encoding="utf-8")
+        cfg = (Path(mls.__file__).parent / "frontend" / "src" / "components" / "Config.vue"
+               ).read_text(encoding="utf-8")
+        # 文档里可以提这段历史，但属性、表单项和默认值都不能再有它
+        self.assertNotIn("_mtw_select_mode", src)
+        self.assertNotIn("select_mode", cfg)
+        _, defaults = mls.MusicLibraryScraper().get_form()
+        self.assertNotIn("mtw_select_mode", defaults)
+        self.assertNotIn("候选排序", src)
 
     def test_mtw_endpoints_use_apimt_prefix(self):
         """MTW 的 Django 路由挂在 /apimt/ 下，写成 /api/ 会一律 404。"""
