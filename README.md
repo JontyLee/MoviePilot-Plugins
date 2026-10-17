@@ -78,10 +78,20 @@ V3 新插件使用 `plugins.v3/<plugin_id_lower>/`、`tests/v3/<plugin_id_lower>
 定时扫描音乐目录，把每个文件按配置顺序交给 MTW 的 `/apimt/fetch_id3_by_title/`
 识别，再沿用 MP 原生音乐刮削链路写入标签与封面。
 
-- 识别源为多选，默认全源：`netease`、`qmusic`、`kuwo`、`kugou`、`migu`、
+- 识别源为多选，**留空 = 全部源**：`netease`、`qmusic`、`kuwo`、`kugou`、`migu`、
   `musicbrainz`、`smart_tag`。实测 `qq`、`spotify`、`acoustid`、`all` 恒返回空候选，
   因此不列入默认。某源已出满分（曲名+艺人+专辑 3/3）候选即停止后续查询。
-- 补空判定为 曲名+艺人+专辑+内嵌封面 齐全，缺一即重刮；覆盖模式会重写所有非空 tag。
+- 写入模式两档，都只作用于 MP 认识的字段（曲名、艺人、专辑、专辑艺人、年份、轨道号、
+  碟号、封面、歌词）：
+  - 只补缺（默认）：曲名+艺人+专辑+内嵌封面 四项齐全的文件按 mtime+size 记账直接跳过，
+    不再请求 MTW；缺哪项补哪项，已有非空标签保持不动。
+  - 强制覆盖：忽略增量账、全库重扫，候选与现有标签不同就重写，封面重新下载内嵌，
+    歌词强制重写。手工改过的字段会被替换；候选里没有的字段不会清空，
+    插件不认识的自定义注释字段也不会删。
+- 最终是否覆盖还要叠加宿主「设置 → 媒体刮削」的音乐三项策略，取两者中更强的一个：
+  `tag_overwrite = 插件覆盖模式 or 宿主标签策略==覆盖`，`write_tags = 宿主标签策略!=跳过`。
+  宿主默认是 标签仅缺失、封面仅缺失、歌词更优才换；把宿主标签策略设成「跳过」时，
+  本插件两种模式都只写封面与歌词。
 - 状态账（done/failed/runs）写入 plugindata，按 mtime+size 增量跳过；
   数据页、`/status` `/files` `/retry` `/scan` API 与 `/music_scraper_status`
   `/music_scraper_retry` 命令都读同一份账。

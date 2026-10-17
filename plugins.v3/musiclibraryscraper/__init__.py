@@ -25,11 +25,13 @@ v0.2.1（修好 MTW 调用契约，之前一次都没真的刮成功过）：
   1039 个文件的文字标签早已刮齐，只剩约 36% 缺封套图，旧判据会让插件永远空转。
 
 v0.3.0：
-- 识别源改为多选（mtw_resource 存数组，仍兼容旧的单字符串），默认全源：
+- 识别源改为多选（mtw_resource 存数组，仍兼容旧的单字符串），留空 = 全部源：
   netease / qmusic / kuwo / kugou / migu / musicbrainz / smart_tag。实测 qq、spotify、
   acoustid、all 恒返回空候选，没列进默认。
 - 逐源按配置顺序查询并合并候选，候选上标记命中的源，写入与状态账都记真实来源；
   某源已出满分（3/3）候选即停止后续查询，避免每个文件都打满 7 次请求。
+- 配置页把两个最容易误解的选项讲清楚：识别源留空 = 全部源；只补缺 / 强制覆盖
+  分别会动到哪些字段，以及最终是否覆盖还要叠加宿主「媒体刮削」的音乐三项策略。
 - 更名 MusicTagWeb音乐库刮削、换 MTW 官方图标、说明里点明元数据来源。
   目录名/类名/配置前缀保持不变，否则 config_data 与 plugindata 会整体失效。
 """
@@ -559,10 +561,10 @@ class MusicLibraryScraper(_PluginBase):
                         ]},
                         {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                             {"component": "VSelect", "props": {
-                                "model": "mode", "label": "覆盖模式",
+                                "model": "mode", "label": "写入模式",
                                 "items": [
-                                    {"title": "只补空 tag", "value": ""},
-                                    {"title": "覆盖已有 tag", "value": "force_all"},
+                                    {"title": "只补缺（推荐）", "value": ""},
+                                    {"title": "强制覆盖已有标签", "value": "force_all"},
                                 ]
                             }}
                         ]},
@@ -575,7 +577,7 @@ class MusicLibraryScraper(_PluginBase):
                         ]},
                         {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                             {"component": "VSelect", "props": {
-                                "model": "mtw_resource", "label": "MTW 识别源（可多选）",
+                                "model": "mtw_resource", "label": "MTW 识别源（可多选，留空=全部）",
                                 "multiple": True, "chips": True, "closable": True,
                                 "hint": "按顺序逐源查询，出现满分候选即停",
                                 "items": [
@@ -587,6 +589,13 @@ class MusicLibraryScraper(_PluginBase):
                                     {"title": "MusicBrainz", "value": "musicbrainz"},
                                     {"title": "智能 smart_tag", "value": "smart_tag"},
                                 ]
+                            }}
+                        ]},
+                        {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                            {"component": "VTextField", "props": {
+                                "model": "min_score", "label": "最低匹配分数（0-3）", "type": "number",
+                                "placeholder": "默认 3",
+                                "hint": "曲名/艺人/专辑 各 1 分；保持 3，召不回交给多源轮询",
                             }}
                         ]},
                     ]},
@@ -642,10 +651,16 @@ class MusicLibraryScraper(_PluginBase):
                         {"component": "VCol", "props": {"cols": 12}, "content": [
                             {"component": "VAlert", "props": {
                                 "type": "info", "variant": "tonal",
-                                "text": "元数据全部来自 Music Tag Web（MTW），插件不直连音乐平台。"
-                                        "多选源按顺序逐源查询，出现满分候选即停。"
-                                        "MTW 与 MP 需挂载同一份音乐库路径，否则写标签会落到不同文件。"
-                                        "覆盖模式=覆盖已有 tag 时，任何非空 tag 都会被重写。"
+                                "text": "【写入模式】只补缺：曲名+艺人+专辑+内嵌封面 四项齐全的文件按 "
+                                        "mtime+size 记账直接跳过（不再请求 MTW），缺哪项补哪项，已有非空标签保持不动。"
+                                        "强制覆盖：每轮忽略增量账、全库重扫重问，候选与现有标签不同就重写，"
+                                        "封面重新下载内嵌、歌词强制重写，手工改过的曲名/艺人/专辑/年份/轨道号会被替换；"
+                                        "候选里没有的字段不会清空，插件不认识的自定义注释字段也不会删。\n"
+                                        "【叠加宿主策略】最终是否覆盖还取宿主「设置→媒体刮削」音乐三项策略与这里的较强者："
+                                        "宿主标签策略=覆盖时，即使这里选只补缺也会重写；=跳过时，两种模式都不写该项。"
+                                        "宿主默认 标签仅缺失、封面仅缺失、歌词更优才换。\n"
+                                        "【来源】元数据全部来自 Music Tag Web（MTW），插件不直连音乐平台；"
+                                        "识别源留空即全部源。MTW 与 MP 需挂载同一份音乐库路径，否则写标签会落到不同文件。"
                             }}
                         ]},
                     ]},

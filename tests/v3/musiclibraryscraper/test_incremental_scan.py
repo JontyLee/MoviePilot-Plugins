@@ -238,6 +238,23 @@ class ContractTest(unittest.TestCase):
         self.assertEqual({a["path"] for a in apis}, {"/status", "/files", "/retry", "/scan"})
         self.assertTrue(all(a["auth"] == "bear" for a in apis))
 
+    def test_config_page_explains_choices(self):
+        """两个最容易误解的选项必须在配置页讲清楚：留空=全部源、两档写入模式的后果。"""
+        plugin_dir = Path(mls.__file__).parent
+        src = Path(mls.__file__).read_text(encoding="utf-8")
+        cfg = (plugin_dir / "frontend" / "src" / "components" / "Config.vue").read_text(
+            encoding="utf-8"
+        )
+        # 原生表单与 Vue 配置页都要有
+        self.assertIn("留空=全部", src)
+        self.assertIn("留空 = 全部源", cfg)
+        for phrase in ("只补缺", "强制覆盖", "宿主"):
+            self.assertIn(phrase, src)
+            self.assertIn(phrase, cfg)
+        # 覆盖后果不能只写"会覆盖"，要说清哪些字段会被替换、哪些不会
+        self.assertIn("手工改过", cfg)
+        self.assertIn("不会清空", cfg)
+
     def test_mtw_endpoints_use_apimt_prefix(self):
         """MTW 的 Django 路由挂在 /apimt/ 下，写成 /api/ 会一律 404。"""
         src = Path(mls.__file__).read_text(encoding="utf-8")
@@ -392,6 +409,11 @@ class MatchTest(unittest.TestCase):
         # 实测这些 resource 恒返回空候选，不该进默认
         for dead in ("qq", "spotify", "acoustid", "all"):
             self.assertNotIn(dead, default)
+
+    def test_empty_resources_mean_all(self):
+        """留空 = 全部源：配置页的提示文案依赖这条契约。"""
+        for empty in ([], "", None, [" "], ["  ", ""]):
+            self.assertEqual(mls._normalize_resources(empty), list(mls._DEFAULT_RESOURCES))
 
     def _fake_mtw(self, by_resource, calls):
         class _Ru:

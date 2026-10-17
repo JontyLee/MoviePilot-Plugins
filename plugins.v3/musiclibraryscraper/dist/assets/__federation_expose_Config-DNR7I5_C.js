@@ -7,7 +7,7 @@ const {createElementVNode:_createElementVNode,resolveComponent:_resolveComponent
 
 const _hoisted_1 = { class: "plugin-config pa-4" };
 const _hoisted_2 = { class: "d-flex align-center gap-2 mt-4" };
-const {ref,inject} = await importShared('vue');
+const {ref,computed,inject} = await importShared('vue');
 
 const _sfc_main = /* @__PURE__ */ _defineComponent({
   __name: "Config",
@@ -23,7 +23,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
     const props = __props;
     const emit = __emit;
     const toast = inject("moviepilot:toast", null);
-    const DEFAULT_RESOURCES = ["netease", "qmusic", "kuwo", "kugou", "migu", "musicbrainz", "smart_tag"];
     const DEFAULTS = {
       enabled: false,
       onlyonce: false,
@@ -34,7 +33,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       mtw_base_url: "",
       mtw_username: "",
       mtw_password: "",
-      mtw_resource: DEFAULT_RESOURCES.slice(),
+      mtw_resource: [],
       mtw_select_mode: 0,
       min_score: 3
     };
@@ -45,7 +44,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
         const name = String(item ?? "").trim();
         if (name && !out.includes(name)) out.push(name);
       }
-      return out.length ? out : DEFAULT_RESOURCES.slice();
+      return out;
     }
     const config = ref({
       ...DEFAULTS,
@@ -53,7 +52,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       mtw_resource: toResourceList((props.initialConfig || {}).mtw_resource)
     });
     const modeItems = [
-      { title: "只补缺（标签/封面）", value: "" },
+      { title: "只补缺（推荐）", value: "" },
       { title: "强制覆盖已有标签", value: "force_all" }
     ];
     const resourceItems = [
@@ -65,6 +64,13 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       { title: "MusicBrainz", value: "musicbrainz" },
       { title: "智能 smart_tag", value: "smart_tag" }
     ];
+    const ALL_SOURCES_TEXT = resourceItems.map((i) => i.title.split(" ")[0]).join(" / ");
+    const resourceHint = computed(
+      () => config.value.mtw_resource?.length ? `已选 ${config.value.mtw_resource.length} 个源，按顺序逐源查询，出现满分候选即停` : `留空 = 全部源（${ALL_SOURCES_TEXT}）；按顺序逐源查询，出现满分候选即停`
+    );
+    const modeHint = computed(
+      () => config.value.mode === "force_all" ? "强制覆盖：每轮忽略增量账、全库重扫重问 MTW；凡候选与现有标签不同就重写，封面重新下载并内嵌，歌词强制重写。手工改过的曲名、艺人、专辑、年份、轨道号会被替换（候选里没有的字段不会清空，插件不认识的自定义注释字段也不会删）。" : "只补缺（推荐）：曲名+艺人+专辑+内嵌封面 四项齐全的文件直接跳过（按 mtime+size 记账，之后不再请求）；缺哪项补哪项，已有的非空标签保持不动，手工修改不会被覆盖。"
+    );
     const selectModeItems = [
       { title: "0 默认", value: 0 },
       { title: "1 精准匹配（时长）", value: 1 }
@@ -78,9 +84,9 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       const _component_v_col = _resolveComponent("v-col");
       const _component_v_select = _resolveComponent("v-select");
       const _component_v_row = _resolveComponent("v-row");
+      const _component_v_alert = _resolveComponent("v-alert");
       const _component_v_text_field = _resolveComponent("v-text-field");
       const _component_v_textarea = _resolveComponent("v-textarea");
-      const _component_v_alert = _resolveComponent("v-alert");
       const _component_v_spacer = _resolveComponent("v-spacer");
       const _component_v_btn = _resolveComponent("v-btn");
       return _openBlock(), _createElementBlock("div", _hoisted_1, [
@@ -128,8 +134,9 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   modelValue: config.value.mode,
                   "onUpdate:modelValue": _cache[2] || (_cache[2] = ($event) => config.value.mode = $event),
                   items: modeItems,
-                  label: "覆盖模式",
-                  "hide-details": ""
+                  label: "写入模式",
+                  hint: "决定已有标签是保留还是重写，下方有逐项差别说明",
+                  "persistent-hint": ""
                 }, null, 8, ["modelValue"])
               ]),
               _: 1
@@ -137,6 +144,13 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
           ]),
           _: 1
         }),
+        _createVNode(_component_v_alert, {
+          type: config.value.mode === "force_all" ? "warning" : "success",
+          variant: "tonal",
+          density: "compact",
+          class: "mb-2",
+          text: modeHint.value
+        }, null, 8, ["type", "text"]),
         _createVNode(_component_v_row, { dense: "" }, {
           default: _withCtx(() => [
             _createVNode(_component_v_col, {
@@ -168,9 +182,9 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   chips: "",
                   "closable-chips": "",
                   density: "compact",
-                  hint: "按顺序逐源查询，出现满分候选即停",
+                  hint: resourceHint.value,
                   "persistent-hint": ""
-                }, null, 8, ["modelValue"])
+                }, null, 8, ["modelValue", "hint"])
               ]),
               _: 1
             })
@@ -257,7 +271,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   type: "number",
                   min: "0",
                   max: "3",
-                  hint: "曲名/艺人/专辑 各 1 分，满分 3。3 最稳但会漏掉繁简字形与合辑专辑名差异；2 会接受“同名 Live 版”",
+                  hint: "曲名/艺人/专辑 各 1 分，满分 3。保持 3 即可：单源召不回的歌由多源轮询补上；降到 2 会接受同名 Live 版/翻唱，写错标签的代价比漏刮高。",
                   "persistent-hint": ""
                 }, null, 8, ["modelValue"])
               ]),
@@ -308,7 +322,9 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
           density: "compact"
         }, {
           default: _withCtx(() => [..._cache[13] || (_cache[13] = [
-            _createTextVNode(" 元数据全部来自 Music Tag Web（MTW），插件不直连音乐平台。多选源按顺序逐源查询，某源已出满分候选即停止， 单源 top10 常整批是翻唱/钢琴版，换源比放宽分数安全。 「补空」判定为 曲名+艺人+专辑+内嵌封面 齐全，缺一即会重新刮削；封面由 MP 下载后内嵌写入。覆盖模式会重写所有非空 tag。MTW 与 MP 需挂载同一份音乐库路径，否则写标签会落到不同文件。 ", -1)
+            _createElementVNode("div", { class: "mb-1" }, " 元数据全部来自 Music Tag Web（MTW），插件不直连音乐平台。单源 top10 常整批是翻唱/钢琴版， 所以默认逐源查询，而不是放宽匹配分数。 ", -1),
+            _createElementVNode("div", { class: "mb-1" }, " 最终是否覆盖还叠加宿主「设置 → 媒体刮削」里的音乐三项策略（标签 / 封面 / 歌词），取两者中更强的一个： 宿主设为「覆盖」时，即使这里选只补缺也会重写已有标签；宿主设为「跳过」时，两种模式都不写该项。 默认策略是 标签仅缺失、封面仅缺失、歌词更优才换。 ", -1),
+            _createElementVNode("div", null, "MTW 与 MP 需挂载同一份音乐库路径，否则写标签会落到不同文件。", -1)
           ])]),
           _: 1
         }),
@@ -339,6 +355,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const Config = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-7634116d"]]);
+const Config = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-923ccd89"]]);
 
 export { Config as default };
