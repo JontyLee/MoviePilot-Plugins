@@ -62,6 +62,32 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       { key: "failed", label: "失败待重试" },
       { key: "pending", label: "待处理" }
     ];
+    const pageText = computed(() => {
+      if (!total.value) return "共 0 条";
+      const from = offset.value + 1;
+      const to = Math.min(offset.value + limit.value, total.value);
+      return `第 ${from}–${to} 条 / 共 ${total.value} 条`;
+    });
+    const STATUS_TEXT = {
+      done: "已处理",
+      failed: "失败",
+      pending: "待处理"
+    };
+    const SOURCE_TEXT = {
+      netease: "网易云",
+      qmusic: "QQ 音乐",
+      kuwo: "酷我",
+      kugou: "酷狗",
+      migu: "咪咕",
+      musicbrainz: "MusicBrainz",
+      smart_tag: "智能"
+    };
+    function statusText(value) {
+      return STATUS_TEXT[value] || value;
+    }
+    function sourceText(value) {
+      return SOURCE_TEXT[value] || value;
+    }
     function notify(msg, color = "info") {
       if (toast) {
         const fn = toast[color] || toast.info;
@@ -195,7 +221,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       const _component_v_snackbar = _resolveComponent("v-snackbar");
       return _openBlock(), _createElementBlock("div", _hoisted_1, [
         _createElementVNode("div", _hoisted_2, [
-          _cache[10] || (_cache[10] = _createElementVNode("div", { class: "text-h6" }, "音乐库刮削 · 数据页", -1)),
+          _cache[10] || (_cache[10] = _createElementVNode("div", { class: "text-h6" }, "MusicTagWeb音乐库刮削 · 数据页", -1)),
           _createVNode(_component_v_spacer),
           running.value ? (_openBlock(), _createBlock(_component_v_chip, {
             key: 0,
@@ -427,7 +453,11 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
           ],
           items: rows.value,
           loading: loading.value,
-          "footer-props": { "items-per-page-options": [20, 50, 100] },
+          "footer-props": {
+            "items-per-page-text": "每页条数",
+            "items-per-page-options": [20, 50, 100],
+            "page-text": pageText.value
+          },
           "items-per-page": limit.value,
           density: "compact",
           class: "elevation-1",
@@ -446,14 +476,14 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               color: item.status === "done" ? "success" : item.status === "failed" ? "error" : "grey"
             }, {
               default: _withCtx(() => [
-                _createTextVNode(_toDisplayString(item.status), 1)
+                _createTextVNode(_toDisplayString(statusText(item.status)), 1)
               ]),
               _: 2
             }, 1032, ["color"])
           ]),
           "item.reason": _withCtx(({ item }) => [
             item.reason ? (_openBlock(), _createElementBlock("span", _hoisted_11, _toDisplayString(item.reason), 1)) : _createCommentVNode("", true),
-            item.score != null ? (_openBlock(), _createElementBlock("span", _hoisted_12, " · score " + _toDisplayString(item.score), 1)) : item.source ? (_openBlock(), _createElementBlock("span", _hoisted_13, _toDisplayString(item.source), 1)) : !item.reason ? (_openBlock(), _createElementBlock("span", _hoisted_14, "-")) : _createCommentVNode("", true)
+            item.score != null ? (_openBlock(), _createElementBlock("span", _hoisted_12, " · 分数 " + _toDisplayString(item.score), 1)) : item.source ? (_openBlock(), _createElementBlock("span", _hoisted_13, " · " + _toDisplayString(sourceText(item.source)), 1)) : !item.reason ? (_openBlock(), _createElementBlock("span", _hoisted_14, "-")) : _createCommentVNode("", true)
           ]),
           "item.mtime": _withCtx(({ item }) => [
             _createTextVNode(_toDisplayString(fmtTime(item.mtime)), 1)
@@ -479,7 +509,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
             _createElementVNode("div", { class: "text-center pa-6 text-grey" }, "该桶暂无数据", -1)
           ])]),
           _: 1
-        }, 8, ["items", "loading", "items-per-page"]),
+        }, 8, ["items", "loading", "footer-props", "items-per-page"]),
         _createVNode(_component_v_snackbar, {
           modelValue: snackbar.value.show,
           "onUpdate:modelValue": _cache[6] || (_cache[6] = ($event) => snackbar.value.show = $event),
@@ -497,6 +527,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const Page = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-42db8f93"]]);
+const Page = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-219afc38"]]);
 
 export { Page as default };

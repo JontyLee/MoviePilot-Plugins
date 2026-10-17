@@ -63,6 +63,32 @@ V3 新插件使用 `plugins.v3/<plugin_id_lower>/`、`tests/v3/<plugin_id_lower>
 `package.v3.json`。V3 对旧插件的回退加载只用于兼容存量实现，不是新插件继续写入
 旧目录的理由。
 
+## 本仓库插件
+
+### MusicTagWeb音乐库刮削
+
+| 项 | 值 |
+| --- | --- |
+| 类名 / 目录 | `MusicLibraryScraper` / `plugins.v3/musiclibraryscraper/` |
+| 配置前缀 | `musiclibraryscraper_` |
+| 版本 | 0.3.0 |
+| 元数据来源 | Music Tag Web（MTW），插件不直连任何音乐平台 API |
+| 图标 | `icons/music-tag.png`（取自 MTW 应用自带图标） |
+
+定时扫描音乐目录，把每个文件按配置顺序交给 MTW 的 `/apimt/fetch_id3_by_title/`
+识别，再沿用 MP 原生音乐刮削链路写入标签与封面。
+
+- 识别源为多选，默认全源：`netease`、`qmusic`、`kuwo`、`kugou`、`migu`、
+  `musicbrainz`、`smart_tag`。实测 `qq`、`spotify`、`acoustid`、`all` 恒返回空候选，
+  因此不列入默认。某源已出满分（曲名+艺人+专辑 3/3）候选即停止后续查询。
+- 补空判定为 曲名+艺人+专辑+内嵌封面 齐全，缺一即重刮；覆盖模式会重写所有非空 tag。
+- 状态账（done/failed/runs）写入 plugindata，按 mtime+size 增量跳过；
+  数据页、`/status` `/files` `/retry` `/scan` API 与 `/music_scraper_status`
+  `/music_scraper_retry` 命令都读同一份账。
+- 前置条件：MTW 与 MP 挂载同一份音乐库路径，且配置 MTW 地址与账密。
+- 目录名、类名与配置前缀自 v0.2.x 起保持不变：MP 的 `config_data` 以配置前缀为键、
+  `plugindata` 以类名为键，改名会让已配置的 MTW 地址账密和已积累的刮削状态账一起失效。
+
 ## 最重要的提交规则
 
 - 插件目录名必须是插件主类名的小写形式，主类定义在目录的 `__init__.py`。

@@ -76,14 +76,16 @@ class IncrementalScanTest(unittest.TestCase):
         p._scraper_paths = str(tmp)
         p._exclude_paths = ""
         p._mtw_base_url = "http://mtw:8002"
-        p._mtw_resource = "netease"
+        p._mtw_resources = ["netease"]
         p._force_all = False
         p._min_score = 3
         counters = {"scrape": 0, "tag": 0}
 
         def fake_scrape(fp):
             counters["scrape"] += 1
-            return (True, "", 5) if files[Path(fp).name] == "ok" else (False, "无候选", 1)
+            if files[Path(fp).name] == "ok":
+                return (True, "", 3, "qmusic")
+            return (False, "无候选", None, "")
 
         def fake_tag(fp):
             counters["tag"] += 1
@@ -108,6 +110,9 @@ class IncrementalScanTest(unittest.TestCase):
         self.assertEqual(runs["failed"], 1)
         self.assertEqual(runs["from_cache"], 0)
         self.assertEqual(c["scrape"], 3)
+        # 命中的源要落到账上，供数据页显示“这个文件是哪个源刮的”
+        any_done = next(iter(done.values()))
+        self.assertEqual(any_done["source"], "qmusic")
 
     def test_second_run_uses_cache(self):
         p, tmp, c = self._plugin({"a.mp3": "ok", "b.mp3": "ok", "c.flac": "fail"})
@@ -153,7 +158,7 @@ class IncrementalScanTest(unittest.TestCase):
 
         def always_ok(fp):
             c["scrape"] += 1
-            return (True, "", 5)
+            return (True, "", 3, "netease")
 
         setattr(p, _SCRAPE, always_ok)
         c["scrape"] = 0
@@ -245,10 +250,11 @@ class ContractTest(unittest.TestCase):
 class MatchTest(unittest.TestCase):
     """候选比对这些坑：繁简之外的空格/标点差异、文件名当搜索词、tag 读不到时的目录兜底。"""
 
-    def _plugin(self, min_score=3):
+    def _plugin(self, min_score=3, resources="netease"):
         p = mls.MusicLibraryScraper()
         p._min_score = min_score
-        p._mtw_resource = "netease"
+        # 故意传字符串：验证旧配置（单选）也能跑
+        p._mtw_resources = resources
         p._mtw_base_url = "http://mtw:8002"
         p._mtw_username = ""
         p._mtw_password = ""
@@ -344,13 +350,14 @@ class MatchTest(unittest.TestCase):
 
     def test_fetch_candidates_queries_clean_title_not_filename(self):
         """搜索词必须是清洗后的曲名；传 "07 - 黑面.flac" 只会召回噪音。"""
-        captured = {}
+        captured = {"n": 0}
 
         class _Ru:
             def __init__(self, *a, **k):
                 pass
 
             def post_json(self, url=None, json=None, **kw):
+                captured["n"] += 1
                 captured["url"] = url
                 captured["body"] = json
                 return {"result": True, "data": []}
@@ -371,6 +378,80 @@ class MatchTest(unittest.TestCase):
         self.assertEqual(captured["body"]["artist"], "陈奕迅")
         self.assertEqual(captured["body"]["album"], "黑白灰")
         self.assertEqual(captured["body"]["resource"], "netease")
+        # 旧的单字符串配置不能被当字符逐个遍历
+        self.assertEqual(captured["n"], 1)
+
+    def test_normalize_resources(self):
+        """多选值要能吃下字符串、分隔串、数组三种历史形状，空值回落全源。"""
+        self.assertEqual(mls._normalize_resources("netease"), ["netease"])
+        self.assertEqual(mls._normalize_resources("netease;qmusic;netease"), ["netease", "qmusic"])
+        self.assertEqual(mls._normalize_resources("netease, qmusic"), ["netease", "qmusic"])
+        self.assertEqual(mls._normalize_resources(["migu", " ", None]), ["migu"])
+        default = mls._normalize_resources(None)
+        self.assertEqual(default, list(mls._DEFAULT_RESOURCES))
+        # 实测这些 resource 恒返回空候选，不该进默认
+        for dead in ("qq", "spotify", "acoustid", "all"):
+            self.assertNotIn(dead, default)
+
+    def _fake_mtw(self, by_resource, calls):
+        class _Ru:
+            def __init__(self, *a, **k):
+                pass
+
+            def post_json(self, url=None, json=None, **kw):
+                resource = json["resource"]
+                calls.append(resource)
+                return {"result": True, "data": by_resource.get(resource, [])}
+
+        return _Ru
+
+    def _track(self):
+        tmp = Path(tempfile.mkdtemp())
+        fp = tmp / "陈奕迅" / "黑白灰" / "07 - 黑面.flac"
+        fp.parent.mkdir(parents=True)
+        fp.write_bytes(b"x")
+        return fp
+
+    def test_fetch_candidates_merges_all_sources(self):
+        """没有满分候选时逐源问完，并给每个候选标上命中的源。"""
+        fp = self._track()
+        by_resource = {
+            r: [{"name": "黑面", "artist": "陈奕迅", "album": f"{r} 精选"}]
+            for r in mls._DEFAULT_RESOURCES
+        }
+        calls = []
+        p = self._plugin(min_score=3, resources=list(mls._DEFAULT_RESOURCES))
+        orig = mls.RequestUtils
+        mls.RequestUtils = self._fake_mtw(by_resource, calls)
+        try:
+            cands = p._mtw_fetch_candidates(fp)
+        finally:
+            mls.RequestUtils = orig
+        self.assertEqual(calls, list(mls._DEFAULT_RESOURCES))
+        self.assertEqual([c["resource"] for c in cands], list(mls._DEFAULT_RESOURCES))
+        # 专辑名各源不同 → 全部只有 2 分，落到阈值以下
+        picked, score = p._mtw_pick_best(fp, cands)
+        self.assertIsNone(picked)
+        self.assertEqual(score, 2)
+
+    def test_fetch_candidates_stops_at_perfect_score(self):
+        """某源已出 3/3 候选就停，避免每个文件都打满全部源。"""
+        fp = self._track()
+        by_resource = {
+            "netease": [{"name": "无关曲", "artist": "无关人", "album": "无关碟"}],
+            "qmusic": [{"name": "黑面", "artist": "陈奕迅", "album": "黑白灰"}],
+        }
+        calls = []
+        p = self._plugin(min_score=3, resources=list(mls._DEFAULT_RESOURCES))
+        orig = mls.RequestUtils
+        mls.RequestUtils = self._fake_mtw(by_resource, calls)
+        try:
+            cands = p._mtw_fetch_candidates(fp)
+        finally:
+            mls.RequestUtils = orig
+        self.assertEqual(calls, ["netease", "qmusic"])
+        picked, score = p._mtw_pick_best(fp, cands)
+        self.assertEqual((score, picked["resource"]), (3, "qmusic"))
 
     def test_musicinfo_has_no_type_or_artist_init_arg(self):
         """宿主 MusicInfo 的 type 是 init=False，artist 也不是参数，传了会 TypeError。"""

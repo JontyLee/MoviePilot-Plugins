@@ -19,6 +19,9 @@ const props = defineProps({
 const emit = defineEmits(['save', 'close', 'switch'])
 const toast = inject<HostToast | null>('moviepilot:toast', null)
 
+// 实测能返回候选的 MTW 源；qq / spotify / acoustid / all 恒返回空，不要列进来。
+const DEFAULT_RESOURCES = ['netease', 'qmusic', 'kuwo', 'kugou', 'migu', 'musicbrainz', 'smart_tag']
+
 const DEFAULTS = {
   enabled: false,
   onlyonce: false,
@@ -29,12 +32,27 @@ const DEFAULTS = {
   mtw_base_url: '',
   mtw_username: '',
   mtw_password: '',
-  mtw_resource: 'netease',
+  mtw_resource: DEFAULT_RESOURCES.slice(),
   mtw_select_mode: 0,
   min_score: 3
 }
 
-const config = ref<Record<string, any>>({ ...DEFAULTS, ...(props.initialConfig || {}) })
+// v0.2.x 的库里存的是单字符串，多选控件需要数组
+function toResourceList(value: any): string[] {
+  const raw = Array.isArray(value) ? value : String(value ?? '').split(/[;,]/)
+  const out: string[] = []
+  for (const item of raw) {
+    const name = String(item ?? '').trim()
+    if (name && !out.includes(name)) out.push(name)
+  }
+  return out.length ? out : DEFAULT_RESOURCES.slice()
+}
+
+const config = ref<Record<string, any>>({
+  ...DEFAULTS,
+  ...(props.initialConfig || {}),
+  mtw_resource: toResourceList((props.initialConfig || {}).mtw_resource)
+})
 
 const modeItems = [
   { title: '只补缺（标签/封面）', value: '' },
@@ -47,7 +65,7 @@ const resourceItems = [
   { title: '酷我 kuwo', value: 'kuwo' },
   { title: '酷狗 kugou', value: 'kugou' },
   { title: '咪咕 migu', value: 'migu' },
-  { title: '指纹 acoustid', value: 'acoustid' },
+  { title: 'MusicBrainz', value: 'musicbrainz' },
   { title: '智能 smart_tag', value: 'smart_tag' }
 ]
 
@@ -64,7 +82,7 @@ function saveConfig() {
 
 <template>
   <div class="plugin-config pa-4">
-    <div class="text-h6 mb-3">音乐库刮削 · 配置</div>
+    <div class="text-h6 mb-3">MusicTagWeb音乐库刮削 · 配置</div>
 
     <v-row dense>
       <v-col cols="12" md="4">
@@ -88,7 +106,17 @@ function saveConfig() {
         />
       </v-col>
       <v-col cols="12" md="6">
-        <v-select v-model="config.mtw_resource" :items="resourceItems" label="MTW 识别源" hide-details />
+        <v-select
+          v-model="config.mtw_resource"
+          :items="resourceItems"
+          label="MTW 识别源（可多选）"
+          multiple
+          chips
+          closable-chips
+          density="compact"
+          hint="按顺序逐源查询，出现满分候选即停"
+          persistent-hint
+        />
       </v-col>
     </v-row>
 
@@ -156,6 +184,8 @@ function saveConfig() {
     </v-row>
 
     <v-alert type="info" variant="tonal" class="mt-2" density="compact">
+      元数据全部来自 Music Tag Web（MTW），插件不直连音乐平台。多选源按顺序逐源查询，某源已出满分候选即停止，
+      单源 top10 常整批是翻唱/钢琴版，换源比放宽分数安全。
       「补空」判定为 曲名+艺人+专辑+内嵌封面 齐全，缺一即会重新刮削；封面由 MP
       下载后内嵌写入。覆盖模式会重写所有非空 tag。MTW 与 MP 需挂载同一份音乐库路径，否则写标签会落到不同文件。
     </v-alert>

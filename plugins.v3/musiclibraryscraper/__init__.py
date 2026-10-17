@@ -1,7 +1,8 @@
 """
-musiclibraryscraper — MoviePilot v3 插件
+musiclibraryscraper — MoviePilot v3 插件（插件名：MusicTagWeb音乐库刮削）
 
-用 Music Tag Web 作为音乐元数据来源，MP 侧走 ScrapingChain 原生 MUSIC 写入。
+用 Music Tag Web（MTW）作为唯一音乐元数据来源，MP 侧走 ScrapingChain 原生 MUSIC 写入。
+识别源、字段、封面都来自 MTW 的 /apimt/fetch_id3_by_title/，插件不直连任何音乐平台 API。
 
 v0.2.0：
 - 增量扫描：done/failed 状态账（存 plugindata），mtime+size 命中即跳过，不再重复解析 tag。
@@ -22,6 +23,15 @@ v0.2.1（修好 MTW 调用契约，之前一次都没真的刮成功过）：
   本身已做繁简归一（綿綿/绵绵 召回同一批），需要归一的只有插件的比对侧。
 - 补空模式的完成判据从 title+artist 收紧为 title+artist+album+内嵌封面：实测整库
   1039 个文件的文字标签早已刮齐，只剩约 36% 缺封套图，旧判据会让插件永远空转。
+
+v0.3.0：
+- 识别源改为多选（mtw_resource 存数组，仍兼容旧的单字符串），默认全源：
+  netease / qmusic / kuwo / kugou / migu / musicbrainz / smart_tag。实测 qq、spotify、
+  acoustid、all 恒返回空候选，没列进默认。
+- 逐源按配置顺序查询并合并候选，候选上标记命中的源，写入与状态账都记真实来源；
+  某源已出满分（3/3）候选即停止后续查询，避免每个文件都打满 7 次请求。
+- 更名 MusicTagWeb音乐库刮削、换 MTW 官方图标、说明里点明元数据来源。
+  目录名/类名/配置前缀保持不变，否则 config_data 与 plugindata 会整体失效。
 """
 from __future__ import annotations
 
@@ -62,6 +72,11 @@ _KEY_FAILED = "failed"
 _KEY_RUNS = "runs"
 # 默认 cron：每周日 03:00（POSIX DoW 0=周日）。
 _DEFAULT_CRON = "0 3 * * 0"
+# _score_candidate 的满分：曲名 / 艺人 / 专辑 各 1 分。
+_MAX_SCORE = 3
+# MTW 实测能返回候选的识别源（顺序即查询顺序）：qq / spotify / acoustid / all 恒返回空，
+# 不要列进来。migu 单源给 20 条，musicbrainz 给繁体字形，其余各 10 条。
+_DEFAULT_RESOURCES = ("netease", "qmusic", "kuwo", "kugou", "migu", "musicbrainz", "smart_tag")
 
 # 各容器格式的 tag key：ID3 帧名 / MP4 atom / Vorbis 注释 / APEv2。
 _TAG_KEYS = {
@@ -102,6 +117,29 @@ def _norm_text(value: Any) -> str:
         except Exception:
             pass
     return _NORM_STRIP_RE.sub("", unicodedata.normalize("NFKC", text).casefold())
+
+
+def _normalize_resources(value: Any) -> List[str]:
+    """把 mtw_resource 归一成去重保序的源列表。
+
+    配置项从单选改成了多选，但库里可能还存着旧的单字符串（"netease"），
+    也可能被前端写成逗号/分号分隔的串。直接对字符串迭代拿到的是字符，
+    所以任何入口都必须先过这里。空值回落到"全部源"。
+    """
+    if isinstance(value, str):
+        raw: List[Any] = value.replace(",", ";").split(";")
+    elif isinstance(value, (list, tuple, set)):
+        raw = list(value)
+    else:
+        raw = []
+    out: List[str] = []
+    for item in raw:
+        if item is None:
+            continue
+        name = str(item).strip()
+        if name and name not in out:
+            out.append(name)
+    return out or list(_DEFAULT_RESOURCES)
 
 
 def _first_tag_value(tags, keys) -> str:
@@ -218,14 +256,22 @@ class _MusicScrapeChain(ScrapingChain):
 
 
 class MusicLibraryScraper(_PluginBase):
-    """扫描音乐库，向 Music Tag Web 拉候选，交由 MP ScrapingChain 完成写入。"""
+    """扫描音乐库，向 Music Tag Web 拉候选，交由 MP ScrapingChain 完成写入。
 
-    plugin_name = "音乐库刮削 (MTW)"
-    plugin_desc = "定时扫描音乐目录，用 Music Tag Web 的网易云 / QQ / 酷我等源做识别，写入沿用 MP 原生刮削链路。"
-    plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/163music_A.png"
-    plugin_version = "0.2.1"
-    plugin_author = "local"
-    author_url = ""
+    目录名 / 类名 / 配置前缀沿用 v0.2.x：MP 的 config_data 以 plugin_config_prefix 为键、
+    plugindata 以类名为键，改名会让已配置的 MTW 地址账密和已积累的刮削状态账一起失效。
+    """
+
+    plugin_name = "MusicTagWeb音乐库刮削"
+    plugin_desc = (
+        "定时扫描音乐目录，元数据统一取自 Music Tag Web（MTW）的多源识别"
+        "（网易云 / QQ / 酷我 / 酷狗 / 咪咕 / MusicBrainz / smart_tag），"
+        "再沿用 MP 原生音乐刮削链路写入标签与封面。"
+    )
+    plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/music-tag.png"
+    plugin_version = "0.3.0"
+    plugin_author = "JontyLee"
+    author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "musiclibraryscraper_"
     plugin_order = 8
     user_level = 1
@@ -240,7 +286,7 @@ class MusicLibraryScraper(_PluginBase):
     _mtw_base_url: str = ""
     _mtw_username: str = ""
     _mtw_password: str = ""
-    _mtw_resource: str = "netease"
+    _mtw_resources: List[str] = list(_DEFAULT_RESOURCES)
     _mtw_select_mode: int = 0
     _min_score: int = 3
 
@@ -268,7 +314,7 @@ class MusicLibraryScraper(_PluginBase):
             self._mtw_base_url = (config.get("mtw_base_url") or "").rstrip("/")
             self._mtw_username = config.get("mtw_username") or ""
             self._mtw_password = config.get("mtw_password") or ""
-            self._mtw_resource = config.get("mtw_resource") or "netease"
+            self._mtw_resources = _normalize_resources(config.get("mtw_resource"))
             try:
                 self._mtw_select_mode = int(config.get("mtw_select_mode") or 0)
             except (TypeError, ValueError):
@@ -291,7 +337,8 @@ class MusicLibraryScraper(_PluginBase):
                 "mtw_base_url": self._mtw_base_url,
                 "mtw_username": self._mtw_username,
                 "mtw_password": self._mtw_password,
-                "mtw_resource": self._mtw_resource,
+                # 配置键保持单数，值自 v0.3.0 起是数组（读侧兼容旧的单字符串）
+                "mtw_resource": self._mtw_resources,
                 "mtw_select_mode": self._mtw_select_mode,
                 "min_score": self._min_score,
             })
@@ -309,14 +356,14 @@ class MusicLibraryScraper(_PluginBase):
             {
                 "cmd": "/music_scraper_status",
                 "event": EventType.PluginAction,
-                "desc": "音乐库刮削：查看运行状态与统计",
+                "desc": "MTW 音乐库刮削：查看运行状态与统计",
                 "category": "音乐刮削",
                 "data": {"action": "music_scraper_status"},
             },
             {
                 "cmd": "/music_scraper_retry",
                 "event": EventType.PluginAction,
-                "desc": "音乐库刮削：重试全部失败项",
+                "desc": "MTW 音乐库刮削：重试全部失败项",
                 "category": "音乐刮削",
                 "data": {"action": "music_scraper_retry"},
             },
@@ -479,7 +526,7 @@ class MusicLibraryScraper(_PluginBase):
         return [
             {
                 "id": "MusicLibraryScraper.Scan",
-                "name": "音乐库刮削",
+                "name": "MTW 音乐库刮削",
                 "trigger": self._build_cron_trigger(self._cron),
                 "func": self.__scan,
                 "kwargs": {},
@@ -528,14 +575,16 @@ class MusicLibraryScraper(_PluginBase):
                         ]},
                         {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                             {"component": "VSelect", "props": {
-                                "model": "mtw_resource", "label": "MTW 识别源",
+                                "model": "mtw_resource", "label": "MTW 识别源（可多选）",
+                                "multiple": True, "chips": True, "closable": True,
+                                "hint": "按顺序逐源查询，出现满分候选即停",
                                 "items": [
                                     {"title": "网易云 netease", "value": "netease"},
                                     {"title": "QQ 音乐 qmusic", "value": "qmusic"},
                                     {"title": "酷我 kuwo", "value": "kuwo"},
                                     {"title": "酷狗 kugou", "value": "kugou"},
                                     {"title": "咪咕 migu", "value": "migu"},
-                                    {"title": "指纹 acoustid", "value": "acoustid"},
+                                    {"title": "MusicBrainz", "value": "musicbrainz"},
                                     {"title": "智能 smart_tag", "value": "smart_tag"},
                                 ]
                             }}
@@ -593,7 +642,9 @@ class MusicLibraryScraper(_PluginBase):
                         {"component": "VCol", "props": {"cols": 12}, "content": [
                             {"component": "VAlert", "props": {
                                 "type": "info", "variant": "tonal",
-                                "text": "MTW 与 MP 需挂载同一份音乐库路径，否则写标签会落到不同文件。"
+                                "text": "元数据全部来自 Music Tag Web（MTW），插件不直连音乐平台。"
+                                        "多选源按顺序逐源查询，出现满分候选即停。"
+                                        "MTW 与 MP 需挂载同一份音乐库路径，否则写标签会落到不同文件。"
                                         "覆盖模式=覆盖已有 tag 时，任何非空 tag 都会被重写。"
                             }}
                         ]},
@@ -610,7 +661,7 @@ class MusicLibraryScraper(_PluginBase):
             "mtw_base_url": "",
             "mtw_username": "",
             "mtw_password": "",
-            "mtw_resource": "netease",
+            "mtw_resource": list(_DEFAULT_RESOURCES),
             "mtw_select_mode": 0,
             "min_score": 3,
         }
@@ -658,7 +709,7 @@ class MusicLibraryScraper(_PluginBase):
                         self.__class__.__name__,
                         "scan_once",
                         self.__scan,
-                        "音乐库刮削（一次性）",
+                        "MTW 音乐库刮削（一次性）",
                         delay_seconds=3,
                     )
                     return True
@@ -780,9 +831,9 @@ class MusicLibraryScraper(_PluginBase):
                 skipped_tagged += 1
                 continue
 
-            okf, reason, score = self.__scrape_file(fp)
+            okf, reason, score, source = self.__scrape_file(fp)
             if okf:
-                done[key] = {"mtime": mtime, "size": size, "ts": now_iso, "source": self._mtw_resource}
+                done[key] = {"mtime": mtime, "size": size, "ts": now_iso, "source": source}
                 failed.pop(key, None)
                 ok += 1
             else:
@@ -839,17 +890,18 @@ class MusicLibraryScraper(_PluginBase):
             tags["title"] and tags["artist"] and tags["album"] and tags["has_cover"]
         )
 
-    def __scrape_file(self, path: Path) -> Tuple[bool, str, Optional[int]]:
-        """处理单个文件，返回 (是否成功, 失败原因, 命中分数)。"""
+    def __scrape_file(self, path: Path) -> Tuple[bool, str, Optional[int], str]:
+        """处理单个文件，返回 (是否成功, 失败原因, 命中分数, 命中来源)。"""
         candidates = self._mtw_fetch_candidates(path)
         if not candidates:
-            return False, "MTW 无候选", None
+            return False, "MTW 无候选", None, ""
         picked, score = self._mtw_pick_best(path, candidates)
         if not picked:
-            return False, f"未达阈值 min_score={self._min_score}", score
+            return False, f"未达阈值（最低匹配分数 {self._min_score}）", score, ""
+        source = str(picked.get("resource") or "").strip()
         info = self._candidate_to_musicinfo(picked, path)
         if not info:
-            return False, "候选转 MusicInfo 失败", score
+            return False, "候选信息不完整，无法转换", score, source
         try:
             fileitem = schemas.FileItem(
                 type="file",
@@ -869,10 +921,10 @@ class MusicLibraryScraper(_PluginBase):
             overwrite=self._force_all,
         )
         if ok:
-            logger.info(f"[music-scraper] 刮削成功: {path.name} → {info.title}")
-            return True, "", score
+            logger.info(f"[music-scraper] 刮削成功: {path.name} → {info.title}（{source or 'MTW'}）")
+            return True, "", score, source
         logger.warning(f"[music-scraper] 刮削失败: {path.name} — {msg}")
-        return False, f"写入失败：{msg}", score
+        return False, f"写入失败：{msg}", score, source
 
     # ---------------- 查询辅助（供 status/files） ----------------
 
@@ -906,7 +958,7 @@ class MusicLibraryScraper(_PluginBase):
                 "scraper_paths": self._scraper_paths,
                 "exclude_paths": self._exclude_paths,
                 "mtw_base_url": self._mtw_base_url,
-                "mtw_resource": self._mtw_resource,
+                "mtw_resource": self._mtw_resources,
                 "mtw_select_mode": self._mtw_select_mode,
                 "min_score": self._min_score,
                 "has_username": bool(self._mtw_username),
@@ -985,29 +1037,53 @@ class MusicLibraryScraper(_PluginBase):
         return self._token
 
     def _mtw_fetch_candidates(self, path: Path) -> List[dict]:
+        """按配置的源依次向 MTW 拉候选并合并，每个候选标记命中的源。
+
+        默认全源：单源 top10 经常整批是翻唱/钢琴版（实测 min_score=3 只能过 57%），
+        换源比放宽阈值安全。某源已经出过满分候选就不再往下问，控制请求量。
+        """
         identity = _local_identity(path)
         if not identity["title"]:
             return []
-        # MTW 前端契约：title/artist/album 取自本地 tag，full_path 仅作参考
-        body = {
-            "resource": self._mtw_resource,
+        want = {
             "title": identity["title"],
             "artist": identity["artist"],
             "album": identity["album"],
-            "full_path": str(path),
+            "duration": identity["duration"],
         }
-        resp = RequestUtils(
-            headers={"Content-Type": "application/json", **self._mtw_headers()},
-        ).post_json(
-            url=f"{self._mtw_base_url}/apimt/fetch_id3_by_title/",
-            json=body,
-        )
-        if not resp:
-            return []
-        data = resp.get("data") if isinstance(resp, dict) else None
-        if isinstance(data, dict) and "data" in data:
-            data = data["data"]
-        return data if isinstance(data, list) else []
+        merged: List[dict] = []
+        best_score = 0
+        for resource in _normalize_resources(self._mtw_resources):
+            # MTW 前端契约：title/artist/album 取自本地 tag，full_path 仅作参考
+            body = {
+                "resource": resource,
+                "title": identity["title"],
+                "artist": identity["artist"],
+                "album": identity["album"],
+                "full_path": str(path),
+            }
+            resp = RequestUtils(
+                headers={"Content-Type": "application/json", **self._mtw_headers()},
+            ).post_json(
+                url=f"{self._mtw_base_url}/apimt/fetch_id3_by_title/",
+                json=body,
+            )
+            data = resp.get("data") if isinstance(resp, dict) else None
+            if isinstance(data, dict) and "data" in data:
+                data = data["data"]
+            if not isinstance(data, list):
+                continue
+            for c in data:
+                if not isinstance(c, dict):
+                    continue
+                # 以本插件的请求参数为准标记来源，MTW 回什么都不信
+                c["resource"] = resource
+                merged.append(c)
+                if best_score < _MAX_SCORE:
+                    best_score = max(best_score, self._score_candidate(c, want))
+            if best_score >= _MAX_SCORE:
+                break
+        return merged
 
     # ---------------- 候选匹配 & 字段映射 ----------------
 
@@ -1142,7 +1218,7 @@ class MusicLibraryScraper(_PluginBase):
                 genres.append(value.strip())
 
         song_id = str(c.get("id") or c.get("song_id") or c.get("mid") or "").strip() or None
-        source = str(c.get("resource") or self._mtw_resource).strip()
+        source = str(c.get("resource") or "").strip()
 
         # MusicInfo 的 type / artist 不是 init 参数（type 是 init=False 派生字段，
         # 艺人统一走 artists: list[str]）；media_source 枚举里没有 netease/qmusic，

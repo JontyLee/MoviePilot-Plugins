@@ -38,6 +38,39 @@ const tabs: { key: 'done' | 'failed' | 'pending'; label: string }[] = [
   { key: 'pending', label: '待处理' }
 ]
 
+// 表格是分页取回的（items 只有当前页），Vuetify 自己算的页码文案会按当前页条数错报，
+// 所以直接用 offset/limit/total 生成，顺带把默认的英文 "1 of 1" 换掉。
+const pageText = computed(() => {
+  if (!total.value) return '共 0 条'
+  const from = offset.value + 1
+  const to = Math.min(offset.value + limit.value, total.value)
+  return `第 ${from}–${to} 条 / 共 ${total.value} 条`
+})
+
+const STATUS_TEXT: Record<string, string> = {
+  done: '已处理',
+  failed: '失败',
+  pending: '待处理'
+}
+
+const SOURCE_TEXT: Record<string, string> = {
+  netease: '网易云',
+  qmusic: 'QQ 音乐',
+  kuwo: '酷我',
+  kugou: '酷狗',
+  migu: '咪咕',
+  musicbrainz: 'MusicBrainz',
+  smart_tag: '智能'
+}
+
+function statusText(value: string) {
+  return STATUS_TEXT[value] || value
+}
+
+function sourceText(value: string) {
+  return SOURCE_TEXT[value] || value
+}
+
 function notify(msg: string, color = 'info') {
   if (toast) {
     const fn = (toast as any)[color] || toast.info
@@ -174,7 +207,7 @@ onMounted(refresh)
 <template>
   <div class="plugin-root pa-4">
     <div class="d-flex align-center mb-3 flex-wrap gap-2">
-      <div class="text-h6">音乐库刮削 · 数据页</div>
+      <div class="text-h6">MusicTagWeb音乐库刮削 · 数据页</div>
       <v-spacer />
       <v-chip v-if="running" color="info" size="small" variant="tonal" prepend-icon="mdi-progress-clock">
         扫描进行中
@@ -261,7 +294,11 @@ onMounted(refresh)
       ]"
       :items="rows"
       :loading="loading"
-      :footer-props="{ 'items-per-page-options': [20, 50, 100] }"
+      :footer-props="{
+        'items-per-page-text': '每页条数',
+        'items-per-page-options': [20, 50, 100],
+        'page-text': pageText
+      }"
       :items-per-page="limit"
       density="compact"
       class="elevation-1"
@@ -276,12 +313,12 @@ onMounted(refresh)
           size="x-small"
           variant="tonal"
           :color="item.status === 'done' ? 'success' : item.status === 'failed' ? 'error' : 'grey'"
-        >{{ item.status }}</v-chip>
+        >{{ statusText(item.status) }}</v-chip>
       </template>
       <template #item.reason="{ item }">
         <span v-if="item.reason" class="text-caption">{{ item.reason }}</span>
-        <span v-if="item.score != null" class="text-caption text-grey"> · score {{ item.score }}</span>
-        <span v-else-if="item.source" class="text-caption text-grey"> {{ item.source }}</span>
+        <span v-if="item.score != null" class="text-caption text-grey"> · 分数 {{ item.score }}</span>
+        <span v-else-if="item.source" class="text-caption text-grey"> · {{ sourceText(item.source) }}</span>
         <span v-else-if="!item.reason">-</span>
       </template>
       <template #item.mtime="{ item }">{{ fmtTime(item.mtime) }}</template>

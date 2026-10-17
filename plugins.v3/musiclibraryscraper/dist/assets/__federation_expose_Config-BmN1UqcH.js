@@ -23,6 +23,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
     const props = __props;
     const emit = __emit;
     const toast = inject("moviepilot:toast", null);
+    const DEFAULT_RESOURCES = ["netease", "qmusic", "kuwo", "kugou", "migu", "musicbrainz", "smart_tag"];
     const DEFAULTS = {
       enabled: false,
       onlyonce: false,
@@ -33,11 +34,24 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       mtw_base_url: "",
       mtw_username: "",
       mtw_password: "",
-      mtw_resource: "netease",
+      mtw_resource: DEFAULT_RESOURCES.slice(),
       mtw_select_mode: 0,
       min_score: 3
     };
-    const config = ref({ ...DEFAULTS, ...props.initialConfig || {} });
+    function toResourceList(value) {
+      const raw = Array.isArray(value) ? value : String(value ?? "").split(/[;,]/);
+      const out = [];
+      for (const item of raw) {
+        const name = String(item ?? "").trim();
+        if (name && !out.includes(name)) out.push(name);
+      }
+      return out.length ? out : DEFAULT_RESOURCES.slice();
+    }
+    const config = ref({
+      ...DEFAULTS,
+      ...props.initialConfig || {},
+      mtw_resource: toResourceList((props.initialConfig || {}).mtw_resource)
+    });
     const modeItems = [
       { title: "只补缺（标签/封面）", value: "" },
       { title: "强制覆盖已有标签", value: "force_all" }
@@ -48,7 +62,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       { title: "酷我 kuwo", value: "kuwo" },
       { title: "酷狗 kugou", value: "kugou" },
       { title: "咪咕 migu", value: "migu" },
-      { title: "指纹 acoustid", value: "acoustid" },
+      { title: "MusicBrainz", value: "musicbrainz" },
       { title: "智能 smart_tag", value: "smart_tag" }
     ];
     const selectModeItems = [
@@ -70,7 +84,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       const _component_v_spacer = _resolveComponent("v-spacer");
       const _component_v_btn = _resolveComponent("v-btn");
       return _openBlock(), _createElementBlock("div", _hoisted_1, [
-        _cache[16] || (_cache[16] = _createElementVNode("div", { class: "text-h6 mb-3" }, "音乐库刮削 · 配置", -1)),
+        _cache[16] || (_cache[16] = _createElementVNode("div", { class: "text-h6 mb-3" }, "MusicTagWeb音乐库刮削 · 配置", -1)),
         _createVNode(_component_v_row, { dense: "" }, {
           default: _withCtx(() => [
             _createVNode(_component_v_col, {
@@ -149,8 +163,13 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   modelValue: config.value.mtw_resource,
                   "onUpdate:modelValue": _cache[4] || (_cache[4] = ($event) => config.value.mtw_resource = $event),
                   items: resourceItems,
-                  label: "MTW 识别源",
-                  "hide-details": ""
+                  label: "MTW 识别源（可多选）",
+                  multiple: "",
+                  chips: "",
+                  "closable-chips": "",
+                  density: "compact",
+                  hint: "按顺序逐源查询，出现满分候选即停",
+                  "persistent-hint": ""
                 }, null, 8, ["modelValue"])
               ]),
               _: 1
@@ -289,7 +308,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
           density: "compact"
         }, {
           default: _withCtx(() => [..._cache[13] || (_cache[13] = [
-            _createTextVNode(" 「补空」判定为 曲名+艺人+专辑+内嵌封面 齐全，缺一即会重新刮削；封面由 MP 下载后内嵌写入。覆盖模式会重写所有非空 tag。MTW 与 MP 需挂载同一份音乐库路径，否则写标签会落到不同文件。 ", -1)
+            _createTextVNode(" 元数据全部来自 Music Tag Web（MTW），插件不直连音乐平台。多选源按顺序逐源查询，某源已出满分候选即停止， 单源 top10 常整批是翻唱/钢琴版，换源比放宽分数安全。 「补空」判定为 曲名+艺人+专辑+内嵌封面 齐全，缺一即会重新刮削；封面由 MP 下载后内嵌写入。覆盖模式会重写所有非空 tag。MTW 与 MP 需挂载同一份音乐库路径，否则写标签会落到不同文件。 ", -1)
           ])]),
           _: 1
         }),
@@ -320,6 +339,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const Config = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-3d28c508"]]);
+const Config = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-7634116d"]]);
 
 export { Config as default };
