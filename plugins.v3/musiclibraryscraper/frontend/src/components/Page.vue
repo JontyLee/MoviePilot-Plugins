@@ -252,6 +252,21 @@ const runs = computed(() => status.value?.runs || {})
 // last_targeted；卡片补一行，界面才不会停在"上次扫描是三天前"。
 const lastTargeted = computed(() => status.value?.last_targeted || {})
 const running = computed(() => !!status.value?.running)
+// 失败原因分布：调「最低匹配分数」、加识别源都是按原因做的决定，逐行翻表估不出来。
+const failureReasons = computed<any[]>(() => status.value?.failure_reasons || [])
+const minScore = computed(() => status.value?.config?.min_score ?? 3)
+
+function reasonLabel(group: any): string {
+  const parts: string[] = [`${group.count} 个`]
+  const best = group.best_score
+  if (typeof best === 'number') {
+    parts.push(`最高 ${best} 分`)
+    const gap = minScore.value - best
+    if (gap > 0) parts.push(`阈值降 ${gap} 分可命中`)
+  }
+  if (!group.retryable) parts.push('均已超限')
+  return parts.join(' · ')
+}
 
 onMounted(refresh)
 </script>
@@ -315,6 +330,21 @@ onMounted(refresh)
         </v-card>
       </v-col>
     </v-row>
+
+    <!-- 失败原因分布：先按原因给出"降档阈值能救回多少个"，再让人去翻页核对具体文件 -->
+    <div v-if="failureReasons.length" class="d-flex align-center flex-wrap gap-1 mb-2">
+      <span class="text-caption text-no-wrap font-weight-bold">失败原因</span>
+      <v-chip
+        v-for="group in failureReasons"
+        :key="group.reason"
+        size="x-small"
+        variant="tonal"
+        color="error"
+      >{{ group.reason }} — {{ reasonLabel(group) }}</v-chip>
+      <span class="text-caption text-grey">
+        未达阈值的按上面的分数调「最低匹配分数」；超限的可用「重试全部失败」再试
+      </span>
+    </div>
 
     <!-- 操作条 -->
     <div class="d-flex align-center flex-wrap gap-2 mb-2">

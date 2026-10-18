@@ -10,7 +10,7 @@ const _hoisted_2 = { class: "mb-2" };
 const _hoisted_3 = { class: "mb-2" };
 const _hoisted_4 = { class: "font-weight-medium" };
 const _hoisted_5 = { class: "d-flex align-center gap-2 mt-4" };
-const {ref,computed,inject} = await importShared('vue');
+const {ref,computed} = await importShared('vue');
 
 const _sfc_main = /* @__PURE__ */ _defineComponent({
   __name: "Config",
@@ -25,12 +25,11 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   setup(__props, { emit: __emit }) {
     const props = __props;
     const emit = __emit;
-    const toast = inject("moviepilot:toast", null);
     const DEFAULTS = {
       enabled: false,
       onlyonce: false,
       mode: "",
-      cron: "0 3 * * 0",
+      cron: "0 3 * * sun",
       scraper_paths: "",
       exclude_paths: "",
       mtw_base_url: "",
@@ -75,7 +74,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
     );
     function saveConfig() {
       emit("save", config.value);
-      toast?.success("配置已保存");
     }
     return (_ctx, _cache) => {
       const _component_v_switch = _resolveComponent("v-switch");
@@ -152,7 +150,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   modelValue: config.value.cron,
                   "onUpdate:modelValue": _cache[3] || (_cache[3] = ($event) => config.value.cron = $event),
                   label: "执行周期",
-                  placeholder: "5 位 cron，留空默认 0 3 * * 0",
+                  placeholder: "5 位 cron；星期 0=周一…6=周日、7=周日，留空默认 0 3 * * sun",
                   "hide-details": ""
                 }, null, 8, ["modelValue"])
               ]),
@@ -348,6 +346,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const Config = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-c54eaf87"]]);
+const Config = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-21eb3566"]]);
 
 export { Config as default };

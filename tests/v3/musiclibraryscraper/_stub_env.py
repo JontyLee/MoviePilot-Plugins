@@ -49,6 +49,10 @@ class _CronTrigger:
         parts = (expr or "").split()
         if len(parts) != 5:
             raise ValueError(f"bad cron: {expr!r}")
+        # 照 APScheduler 的样子拒掉星期 7（它的上限是 6，0=周一），否则插件里
+        # "7 换成 sun" 这一步在本机测试里永远不会被触发。
+        if "7" in parts[4]:
+            raise ValueError(f"the last value (7) is higher than the maximum value (6)")
         return ("crontab", expr)
 
 

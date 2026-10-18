@@ -108,6 +108,26 @@ v0.3.3（第二轮复盘）：
   会递归进软链目录，库内一个回环软链能让枚举永不返回、互斥槽被永久占住。
   /files?bucket=pending 的 30s TTL 缓存同时覆盖数据页搜索框每停顿一次的重算。
 
+v0.3.6（真机跑过一轮之后）：
+- 星期编号按宿主的调度器算，不是按 crontab：宿主把这段 cron 交给 APScheduler
+  （CronTrigger.from_crontab），它的星期是 0=周一…6=周日、上限 6；crontab 的 0/7=周日 在这里
+  一个是周一、一个直接校验失败。默认值 "0 3 * * 0" 因此实际跑在周一，而它写的是"每周日"；
+  用户按习惯写 "… * 7" 又被整条回落成默认，等于同时丢了日子和时刻。现在默认用名字
+  "0 3 * * sun"，单独的星期 7 就地换成 sun（保留其余字段），0-6 原样交给调度器不做猜测。
+- 生效的 cron 要连着"下次触发在周几"一起回显：光看表达式猜不出调度器读出来的日子，
+  注册时打一行、/status 与状态命令各带一条。数据页与命令的输出同时补 runs 的 error 档。
+- 失败原因要按原因聚合，逐行看 reason 做不出决定：调「最低匹配分数」、加识别源靠的是
+  "这一类有几个、这类里最高几分"，而账本一行一个文件、翻页翻不出这个数。/status 新增
+  failure_reasons（原因、个数、最高分、还有没有可重试的），数据页与状态命令直接给出
+  "阈值降 N 分可命中"这类结论。
+- 保存配置不再弹两条通知：配置页走插件自己的 Vue 组件而不是宿主内置表单，页面 emit('save')
+  后宿主收到配置、自己 PUT /plugin/{id}，成功再弹一条"已保存"。配置页此前也弹一条
+  "配置已保存"，一次保存就是两条；更糟的是这条发生在请求发出之前，保存失败时照样说"已保存"。
+  现在配置页只把配置交出去，成败与插件名由宿主一起报。
+- 真机验证：1039 个文件里 21 个的内嵌封面是 v0.3.5 判得出、此前判不出的（ID3 的 APIC 实际
+  键名带描述，如 "APIC:0"，而 DSF 这类容器连通用 pictures 接口都没有），反向没有一个是
+  新判据丢掉封面的。
+
 v0.3.5（第四轮复盘）：
 - 内嵌封面终于判得出来：补空判据是 title+artist+album+内嵌封面，而封面只按帧名
   tags.get("APIC") 直取 —— APIC 是可重复帧，mutagen 的取法是 getall("APIC")（键还带描述），
@@ -215,8 +235,10 @@ _KEY_RUNS = "runs"
 # 定向重试（手动点某一行/批量重试）的汇总单独存这里：它只覆盖几个文件，混进 runs
 # 会把整盘汇总刷成 scanned=1、pending=0，看起来像库已经扫完了。
 _KEY_TARGETED_RUNS = "last_targeted"
-# 默认 cron：每周日 03:00（POSIX DoW 0=周日）。
-_DEFAULT_CRON = "0 3 * * 0"
+# 默认 cron：每周日 03:00。星期用名字而不是数字：宿主把这段字符串交给 APScheduler
+# （CronTrigger.from_crontab），它的编号是 0=周一…6=周日，和 crontab 的 0/7=周日 差一位，
+# 而且不认 7。"0 3 * * 0" 在这个调度器上是周一，写名字才没有歧义。
+_DEFAULT_CRON = "0 3 * * sun"
 # _score_candidate 的满分：曲名 / 艺人 / 专辑 各 1 分。
 _MAX_SCORE = 3
 # MTW 实测能返回候选的识别源（顺序即查询顺序）：qq / spotify / acoustid / all 恒返回空，
@@ -706,7 +728,7 @@ class MusicLibraryScraper(_PluginBase):
         "再沿用 MP 原生音乐刮削链路写入标签与封面。"
     )
     plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/avator.webp"
-    plugin_version = "0.3.5"
+    plugin_version = "0.3.6"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "musiclibraryscraper_"
@@ -847,6 +869,31 @@ class MusicLibraryScraper(_PluginBase):
         elif action == "music_scraper_retry":
             self._cmd_retry()
 
+    def _reason_lines(self, stats: Dict[str, Any]) -> str:
+        """失败原因分布的文本行（命令输出用）：最多列 3 类，其余并成一条计数。
+
+        没有这段聚合的话，"阈值降一档能救回多少"只能靠一页页翻表格估。
+        """
+        groups = stats.get("failure_reasons") or []
+        if not groups:
+            return ""
+        lines = [f"失败原因（最低匹配分数 {stats['config']['min_score']}）："]
+        min_score = stats['config']['min_score']
+        for item in groups[:3]:
+            score = item.get("best_score")
+            line = f"· {item['reason']} {item['count']} 个"
+            if isinstance(score, int):
+                line += f"，最高 {score} 分"
+                if min_score - score > 0:
+                    line += f"，阈值降 {min_score - score} 分可命中"
+            if not item["retryable"]:
+                line += "，均已超限不再自动重试"
+            lines.append(line)
+        rest = groups[3:]
+        if rest:
+            lines.append(f"· 其他 {len(rest)} 类共 {sum(g['count'] for g in rest)} 个")
+        return "\n".join(lines) + "\n"
+
     def _cmd_status(self):
         """命令：打印最近一次运行汇总与分桶计数。"""
         stats = self._build_status()
@@ -859,11 +906,14 @@ class MusicLibraryScraper(_PluginBase):
                 f"{stats['runs'].get('skipped_tagged', 0)}\n"
                 f"成功 {stats['runs'].get('ok', 0)}｜失败 "
                 f"{stats['runs'].get('failed', 0)}｜MTW 故障 "
-                f"{stats['runs'].get('transport', 0)}\n"
+                f"{stats['runs'].get('transport', 0)}｜处理异常 "
+                f"{stats['runs'].get('error', 0)}\n"
                 f"已处理 {stats['counts']['done']}｜待重试 "
                 f"{stats['counts']['retryable']}｜超限 "
                 f"{stats['counts']['exhausted']}｜待处理 "
-                f"{stats['counts']['pending_unknown']}"
+                f"{stats['counts']['pending_unknown']}\n"
+                + self._reason_lines(stats)
+                + f"定时 {stats['config']['cron']}｜下次 {stats['config']['cron_next']}"
                 + (
                     f"\n最近定向重试：{stats['last_targeted'].get('ts')}"
                     f"，成功 {stats['last_targeted'].get('ok', 0)}"
@@ -1081,7 +1131,8 @@ class MusicLibraryScraper(_PluginBase):
                     {"component": "VRow", "content": [
                         {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                             {"component": "VCronField", "props": {
-                                "model": "cron", "label": "执行周期", "placeholder": "5 位 cron，留空默认 0 3 * * 0"
+                                "model": "cron", "label": "执行周期", "placeholder":
+                                "5 位 cron；星期 0=周一…6=周日、7=周日，留空默认 0 3 * * sun"
                             }}
                         ]},
                         {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
@@ -1218,14 +1269,50 @@ class MusicLibraryScraper(_PluginBase):
 
     # ---------------- 主体流程 ----------------
 
+    @staticmethod
+    def _normalize_dow(raw_cron: str) -> str:
+        """把 crontab 习惯里表示周日的星期 7 换成 sun。
+
+        APScheduler 的星期上限是 6，直接写 7 会让整条表达式校验失败；用户写 7 想说的
+        就是周日，所以只换这一个值、保留其余字段，而不是把整条表达式扔掉回落默认。
+        0-6 原样交给调度器（它按 0=周一 解析），不做任何"猜意图"的位移。
+        """
+        parts = raw_cron.split()
+        if len(parts) == 5 and parts[4] == "7":
+            parts[4] = "sun"
+            return " ".join(parts)
+        return raw_cron
+
+    @staticmethod
+    def _next_fire_text(trigger: Any) -> str:
+        """触发器的下次触发时间文本；拿不到就说"未知"，不拿它当校验用。"""
+        try:
+            nxt = trigger.get_next_fire_time(None, datetime.now())
+        except Exception:
+            return "未知"
+        return nxt.strftime("%Y-%m-%d %H:%M (%a)") if nxt else "未知"
+
+    def _cron_text(self) -> Tuple[str, str]:
+        """(生效的 cron, 下次触发时间)。界面要看得见日子实际落在周几。"""
+        raw = self._normalize_dow((self._cron or "").strip() or _DEFAULT_CRON)
+        try:
+            trigger = CronTrigger.from_crontab(raw)
+        except (ValueError, KeyError) as err:
+            return _DEFAULT_CRON, f"未生效（{err}，已回落默认）"
+        return raw, self._next_fire_text(trigger)
+
     def _build_cron_trigger(self, raw_cron: Optional[str]) -> CronTrigger:
         """非法/空 cron 回落默认，避免插件整体 load_failed。"""
-        raw = (raw_cron or "").strip() or _DEFAULT_CRON
+        raw = self._normalize_dow((raw_cron or "").strip() or _DEFAULT_CRON)
         try:
             trigger = CronTrigger.from_crontab(raw)
         except (ValueError, KeyError) as err:
             logger.warning(f"[music-scraper] cron 表达式非法：{raw!r} → {err}，回落默认 {_DEFAULT_CRON}")
-            trigger = CronTrigger.from_crontab(_DEFAULT_CRON)
+            raw = _DEFAULT_CRON
+            trigger = CronTrigger.from_crontab(raw)
+        # 把解析结果写进日志：星期编号按调度器语义（0=周一…6=周日）而不是 crontab
+        # （0/7=周日），只回显表达式的话，"每周日"实际跑在周一这种事在日志里看不出来。
+        logger.info(f"[music-scraper] 定时扫描 cron={raw} → 下次 {self._next_fire_text(trigger)}")
         return trigger
 
     def _is_running(self) -> bool:
@@ -1629,7 +1716,7 @@ class MusicLibraryScraper(_PluginBase):
             "pending": pending,
             "force": effective_force,
             "targeted": targeted,
-            "cron": self._cron or _DEFAULT_CRON,
+            "cron": self._normalize_dow((self._cron or "").strip()) or _DEFAULT_CRON,
             "duration_s": round(time.time() - started, 1),
         }
         self.save_data(_KEY_DONE, done)
@@ -1702,8 +1789,27 @@ class MusicLibraryScraper(_PluginBase):
 
     # ---------------- 查询辅助（供 status/files） ----------------
 
+    @staticmethod
+    def __aggregate_reasons(failed: Dict[str, dict]) -> List[Dict[str, Any]]:
+        """把失败账本按原因聚合成 [{reason, count, best_score, retryable}]，按数量降序。"""
+        grouped: Dict[str, Dict[str, Any]] = {}
+        for entry in failed.values():
+            reason = str(entry.get("reason") or "").strip() or "未记录原因"
+            item = grouped.setdefault(reason, {
+                "reason": reason, "count": 0, "best_score": None, "retryable": 0,
+            })
+            item["count"] += 1
+            score = entry.get("score")
+            if isinstance(score, int) and not isinstance(score, bool):
+                if item["best_score"] is None or score > item["best_score"]:
+                    item["best_score"] = score
+            if int(entry.get("retries") or 0) < MusicLibraryScraper.MAX_RETRY:
+                item["retryable"] += 1
+        return sorted(grouped.values(), key=lambda r: -r["count"])
+
     def _build_status(self) -> Dict[str, Any]:
         """组装状态汇总：runs + 分桶计数 + 配置回显（不含密码）+ 最近失败。"""
+        cron_now = self._cron_text()
         done = self._load_done()
         failed = self._load_failed()
         runs = self._load_runs()
@@ -1714,6 +1820,10 @@ class MusicLibraryScraper(_PluginBase):
             key=lambda r: r.get("last_ts") or "",
             reverse=True,
         )[:10]
+        # 失败原因分布：逐行看 reason 要一页页翻，而"阈值要不要降一档、要不要多开一个源"
+        # 是按原因聚合出来的一个决定。best_score 是这一类里最高的分数，它和 min_score 只差
+        # 1 时，降一档阈值就能救回这一整类 —— 没有这个数，用户只能瞎猜。
+        failure_reasons = self.__aggregate_reasons(failed)
         return {
             "enabled": self._enabled,
             "running": self._is_running(),
@@ -1728,8 +1838,10 @@ class MusicLibraryScraper(_PluginBase):
                 "exhausted": exhausted,
                 "pending_unknown": runs.get("pending", 0),
             },
+            "failure_reasons": failure_reasons,
             "config": {
-                "cron": self._cron or _DEFAULT_CRON,
+                "cron": cron_now[0],
+                "cron_next": cron_now[1],
                 "mode": "force_all" if self._force_all else "fill_empty",
                 "scraper_paths": self._scraper_paths,
                 "exclude_paths": self._exclude_paths,

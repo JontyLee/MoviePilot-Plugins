@@ -1,12 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, inject } from 'vue'
-
-interface HostToast {
-  error(msg: string): unknown
-  info(msg: string): unknown
-  success(msg: string): unknown
-  warning(msg: string): unknown
-}
+import { ref, computed } from 'vue'
 
 const props = defineProps({
   initialConfig: { type: Object as any, default: () => ({}) },
@@ -17,13 +10,12 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['save', 'close', 'switch'])
-const toast = inject<HostToast | null>('moviepilot:toast', null)
 
 const DEFAULTS = {
   enabled: false,
   onlyonce: false,
   mode: '',
-  cron: '0 3 * * 0',
+  cron: '0 3 * * sun',
   scraper_paths: '',
   exclude_paths: '',
   mtw_base_url: '',
@@ -81,8 +73,9 @@ const modeNote = computed(() =>
 )
 
 function saveConfig() {
+  // 只负责把配置交给宿主：宿主自己 PUT /plugin/{id} 并弹「已保存 / 保存失败」。
+  // 这里再弹一条会出现两条通知，而且它在请求发出前就报成功，失败了也照样说已保存。
   emit('save', config.value)
-  toast?.success('配置已保存')
 }
 </script>
 
@@ -107,7 +100,7 @@ function saveConfig() {
         <v-text-field
           v-model="config.cron"
           label="执行周期"
-          placeholder="5 位 cron，留空默认 0 3 * * 0"
+          placeholder="5 位 cron；星期 0=周一…6=周日、7=周日，留空默认 0 3 * * sun"
           hide-details
         />
       </v-col>

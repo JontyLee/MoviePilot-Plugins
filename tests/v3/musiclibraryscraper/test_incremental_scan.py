@@ -415,6 +415,39 @@ class IncrementalScanTest(unittest.TestCase):
         self.assertTrue(status["config"]["has_username"])
         self.assertEqual(status["counts"]["done"], 1)
 
+    def test_status_groups_failures_by_reason(self):
+        """失败按原因聚合：调阈值是"这一类有几个、这类里最高几分"的决定，逐行 reason
+        得一页页翻，翻完还得自己数 —— 账本里本来就有 reason/score，界面上却凑不出结论。"""
+        p, tmp, _c = self._plugin({"a.mp3": "ok"})
+        p.save_data("failed", {
+            str(tmp / "a.mp3"): {"retries": 1, "reason": "未达阈值（最低匹配分数 3）", "score": 2},
+            str(tmp / "b.mp3"): {"retries": 1, "reason": "未达阈值（最低匹配分数 3）", "score": 1},
+            str(tmp / "c.mp3"): {
+                "retries": mls.MusicLibraryScraper.MAX_RETRY, "reason": "MTW 无候选",
+            },
+        })
+        groups = p._build_status()["failure_reasons"]
+        self.assertEqual([g["count"] for g in groups], [2, 1])
+        self.assertEqual(groups[0]["best_score"], 2)
+        self.assertEqual(groups[0]["retryable"], 2)
+        # 全是超限的那一类要看得出来：定时扫描已经不会再碰它，只有手动重试还它一个机会
+        self.assertEqual(groups[1]["retryable"], 0)
+        self.assertIsNone(groups[1]["best_score"])
+
+    def test_status_command_shows_the_reason_breakdown(self):
+        p, tmp, _c = self._plugin({"a.mp3": "ok"})
+        p._min_score = 3
+        p.save_data("failed", {
+            str(tmp / "a.mp3"): {"retries": 1, "reason": "未达阈值（最低匹配分数 3）", "score": 2},
+        })
+        p._cmd_status()
+        text = p.messages[-1]["text"]
+        self.assertIn("未达阈值（最低匹配分数 3） 1 个", text)
+        self.assertIn("阈值降 1 分可命中", text)
+        # runs 的 error 档与"下次触发在周几"也是同一类问题的两处出口
+        self.assertIn("处理异常", text)
+        self.assertIn("下次", text)
+
     def test_api_files_pagination_and_search(self):
         p, tmp, c = self._plugin({"a.mp3": "ok", "b.mp3": "ok", "z.mp3": "fail"})
         self._scan(p)
@@ -645,6 +678,62 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(trig, ("crontab", mls._DEFAULT_CRON))
         # 空值也回落默认
         self.assertEqual(p._build_cron_trigger(""), ("crontab", mls._DEFAULT_CRON))
+
+    def test_dow_seven_is_sunday_not_a_whole_expression_fallback(self):
+        """按 crontab 习惯写的星期日 7 就地换成 sun：调度器拒 7，但用户想说的就是周日。
+
+        整条回落默认会连人配的时刻一起换掉，那是"我明明设了 04:30"的第二种丢法。
+        """
+        p = self._plugin()
+        self.assertEqual(p._build_cron_trigger("0 3 * * 7"), ("crontab", "0 3 * * sun"))
+        self.assertEqual(p._build_cron_trigger("30 4 * * 7"), ("crontab", "30 4 * * sun"))
+
+    def test_numeric_dow_is_passed_through_untouched(self):
+        """0-6 不做"猜意图"的位移：调度器把它读成周几是调度器的事，插件不偷偷改表达式。"""
+        p = self._plugin()
+        self.assertEqual(p._build_cron_trigger("0 3 * * 6"), ("crontab", "0 3 * * 6"))
+
+    def test_default_cron_names_the_weekday(self):
+        """默认值用星期名而不是数字：APScheduler 的 0 是周一，"0 3 * * 0" 这个"每周日"
+        实际跑在周一 —— crontab 与调度器的星期编号差一位，名字没有歧义。"""
+        self.assertEqual(mls._DEFAULT_CRON.split()[4], "sun")
+
+    def test_cron_text_shows_which_weekday_the_scheduler_picked(self):
+        """回显带上周几：光看表达式猜不出调度器读出来的日子。"""
+        p = self._plugin()
+        real = mls.CronTrigger
+
+        class _Fire:
+            def strftime(self, fmt):
+                return "2026-10-18 03:03 (Sun)"
+
+        class _Trigger:
+            def get_next_fire_time(self, prev, now):
+                return _Fire()
+
+        class _Fake:
+            @staticmethod
+            def from_crontab(expr):
+                return _Trigger()
+
+        p._cron = "3 3 * * 6"
+        mls.CronTrigger = _Fake
+        try:
+            self.assertEqual(p._cron_text(), ("3 3 * * 6", "2026-10-18 03:03 (Sun)"))
+        finally:
+            mls.CronTrigger = real
+
+    def test_cron_text_does_not_collapse_without_the_next_fire_api(self):
+        """拿不到下次时间就说"未知"：回显是给人看的，不该把定时任务本身挡掉。"""
+        p = self._plugin()
+        self.assertEqual(p._cron_text(), (mls._DEFAULT_CRON, "未知"))
+
+    def test_cron_text_admits_the_fallback(self):
+        p = self._plugin()
+        p._cron = "not a cron"
+        raw, text = p._cron_text()
+        self.assertEqual(raw, mls._DEFAULT_CRON)
+        self.assertIn("未生效", text)
 
     def test_service_requires_enabled(self):
         p = self._plugin()

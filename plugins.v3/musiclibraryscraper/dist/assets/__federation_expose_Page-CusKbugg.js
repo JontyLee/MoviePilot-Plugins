@@ -20,25 +20,29 @@ const _hoisted_9 = {
   key: 1,
   class: "text-caption text-grey"
 };
-const _hoisted_10 = { class: "d-flex align-center flex-wrap gap-2 mb-2" };
-const _hoisted_11 = ["title"];
-const _hoisted_12 = {
+const _hoisted_10 = {
+  key: 0,
+  class: "d-flex align-center flex-wrap gap-1 mb-2"
+};
+const _hoisted_11 = { class: "d-flex align-center flex-wrap gap-2 mb-2" };
+const _hoisted_12 = ["title"];
+const _hoisted_13 = {
   class: "text-caption text-grey text-truncate",
   style: { "max-width": "480px" }
 };
-const _hoisted_13 = {
+const _hoisted_14 = {
   key: 0,
   class: "text-caption"
 };
-const _hoisted_14 = {
+const _hoisted_15 = {
   key: 1,
   class: "text-caption text-grey"
 };
-const _hoisted_15 = {
+const _hoisted_16 = {
   key: 2,
   class: "text-caption text-grey"
 };
-const _hoisted_16 = { key: 3 };
+const _hoisted_17 = { key: 3 };
 const {ref,onMounted,computed,inject} = await importShared('vue');
 
 const _sfc_main = /* @__PURE__ */ _defineComponent({
@@ -250,6 +254,19 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
     const runs = computed(() => status.value?.runs || {});
     const lastTargeted = computed(() => status.value?.last_targeted || {});
     const running = computed(() => !!status.value?.running);
+    const failureReasons = computed(() => status.value?.failure_reasons || []);
+    const minScore = computed(() => status.value?.config?.min_score ?? 3);
+    function reasonLabel(group) {
+      const parts = [`${group.count} 个`];
+      const best = group.best_score;
+      if (typeof best === "number") {
+        parts.push(`最高 ${best} 分`);
+        const gap = minScore.value - best;
+        if (gap > 0) parts.push(`阈值降 ${gap} 分可命中`);
+      }
+      if (!group.retryable) parts.push("均已超限");
+      return parts.join(" · ");
+    }
     onMounted(refresh);
     return (_ctx, _cache) => {
       const _component_v_spacer = _resolveComponent("v-spacer");
@@ -408,7 +425,24 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
           ]),
           _: 1
         }),
-        _createElementVNode("div", _hoisted_10, [
+        failureReasons.value.length ? (_openBlock(), _createElementBlock("div", _hoisted_10, [
+          _cache[14] || (_cache[14] = _createElementVNode("span", { class: "text-caption text-no-wrap font-weight-bold" }, "失败原因", -1)),
+          (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(failureReasons.value, (group) => {
+            return _openBlock(), _createBlock(_component_v_chip, {
+              key: group.reason,
+              size: "x-small",
+              variant: "tonal",
+              color: "error"
+            }, {
+              default: _withCtx(() => [
+                _createTextVNode(_toDisplayString(group.reason) + " — " + _toDisplayString(reasonLabel(group)), 1)
+              ]),
+              _: 2
+            }, 1024);
+          }), 128)),
+          _cache[15] || (_cache[15] = _createElementVNode("span", { class: "text-caption text-grey" }, " 未达阈值的按上面的分数调「最低匹配分数」；超限的可用「重试全部失败」再试 ", -1))
+        ])) : _createCommentVNode("", true),
+        _createElementVNode("div", _hoisted_11, [
           _createVNode(_component_v_tabs, {
             density: "compact",
             "model-value": bucket.value,
@@ -459,7 +493,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
             loading: busy.value,
             onClick: retryAllFailed
           }, {
-            default: _withCtx(() => [..._cache[14] || (_cache[14] = [
+            default: _withCtx(() => [..._cache[16] || (_cache[16] = [
               _createTextVNode("重试全部失败", -1)
             ])]),
             _: 1
@@ -471,7 +505,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
             loading: busy.value,
             onClick: _cache[3] || (_cache[3] = ($event) => scanNow(false))
           }, {
-            default: _withCtx(() => [..._cache[15] || (_cache[15] = [
+            default: _withCtx(() => [..._cache[17] || (_cache[17] = [
               _createTextVNode("增量扫描", -1)
             ])]),
             _: 1
@@ -483,7 +517,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
             loading: busy.value,
             onClick: _cache[4] || (_cache[4] = ($event) => scanNow(true))
           }, {
-            default: _withCtx(() => [..._cache[16] || (_cache[16] = [
+            default: _withCtx(() => [..._cache[18] || (_cache[18] = [
               _createTextVNode("全量覆盖", -1)
             ])]),
             _: 1
@@ -515,8 +549,8 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
           "item.name": _withCtx(({ item }) => [
             _createElementVNode("div", {
               title: item.path
-            }, _toDisplayString(item.name), 9, _hoisted_11),
-            _createElementVNode("div", _hoisted_12, _toDisplayString(item.path), 1)
+            }, _toDisplayString(item.name), 9, _hoisted_12),
+            _createElementVNode("div", _hoisted_13, _toDisplayString(item.path), 1)
           ]),
           "item.status": _withCtx(({ item }) => [
             _createVNode(_component_v_chip, {
@@ -531,8 +565,8 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
             }, 1032, ["color"])
           ]),
           "item.reason": _withCtx(({ item }) => [
-            item.reason ? (_openBlock(), _createElementBlock("span", _hoisted_13, _toDisplayString(item.reason), 1)) : _createCommentVNode("", true),
-            item.score != null ? (_openBlock(), _createElementBlock("span", _hoisted_14, " · 分数 " + _toDisplayString(item.score), 1)) : item.source ? (_openBlock(), _createElementBlock("span", _hoisted_15, " · " + _toDisplayString(sourceText(item.source)), 1)) : !item.reason ? (_openBlock(), _createElementBlock("span", _hoisted_16, "-")) : _createCommentVNode("", true)
+            item.reason ? (_openBlock(), _createElementBlock("span", _hoisted_14, _toDisplayString(item.reason), 1)) : _createCommentVNode("", true),
+            item.score != null ? (_openBlock(), _createElementBlock("span", _hoisted_15, " · 分数 " + _toDisplayString(item.score), 1)) : item.source ? (_openBlock(), _createElementBlock("span", _hoisted_16, " · " + _toDisplayString(sourceText(item.source)), 1)) : !item.reason ? (_openBlock(), _createElementBlock("span", _hoisted_17, "-")) : _createCommentVNode("", true)
           ]),
           "item.mtime": _withCtx(({ item }) => [
             _createTextVNode(_toDisplayString(fmtTime(item.mtime)), 1)
@@ -548,13 +582,13 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               loading: busy.value,
               onClick: ($event) => retryRow(item)
             }, {
-              default: _withCtx(() => [..._cache[17] || (_cache[17] = [
+              default: _withCtx(() => [..._cache[19] || (_cache[19] = [
                 _createTextVNode("重试", -1)
               ])]),
               _: 1
             }, 8, ["loading", "onClick"])
           ]),
-          "no-data": _withCtx(() => [..._cache[18] || (_cache[18] = [
+          "no-data": _withCtx(() => [..._cache[20] || (_cache[20] = [
             _createElementVNode("div", { class: "text-center pa-6 text-grey" }, "该桶暂无数据", -1)
           ])]),
           _: 1
@@ -576,6 +610,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const Page = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-69b3a8dd"]]);
+const Page = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-4e467fb1"]]);
 
 export { Page as default };
