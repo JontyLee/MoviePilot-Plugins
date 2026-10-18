@@ -769,26 +769,53 @@ class ContractTest(unittest.TestCase):
         for phrase in ("items-per-page-text", "每页条数", "page-text", "items-per-page-options"):
             self.assertIn(phrase, page)
 
-    def test_data_page_paging_and_tab_bindings(self):
-        """服务端分页的三处收口：越界页码、tab 选中态、重试提示。
+    def test_data_page_paging_and_bucket_bindings(self):
+        """服务端分页的四处收口：越界页码、桶选中态、桶名真的传出去、重试提示。
 
         1) 桶变小（重试成功后失败项少了几十条）会让 offset 越界，拿回空页却显示
            "该桶暂无数据"，看着像数据没了；
-        2) v-tabs 写死 model-value="failed" 时选中态存在组件内部，bucket 变了 tab 不动；
-        3) doRetryAll 自己拼提示会把 out_of_library / no_paths 都说成"稍后再试"。
+        2) 选中态不能写死在组件内部（v-tabs 写死 model-value 时 bucket 变了高亮不动），
+           侧栏同理要 :active="view === item.key" 由页面自己持有；
+        3) 宿主注入的 api.get 只认第一个参数，第二个对象不会变成查询串而是被丢掉 ——
+           写成 api.get(url, {bucket}) 时三个桶发出的都是裸 /files，后端按默认值回 done
+           的第一页，界面表现就是"切换分桶数据一模一样"；
+        4) doRetryAll 自己拼提示会把 out_of_library / no_paths 都说成"稍后再试"。
         """
         page = (Path(mls.__file__).parent / "frontend" / "src" / "components" / "Page.vue"
                 ).read_text(encoding="utf-8")
         self.assertIn("Math.ceil(total.value / limit.value)", page)
         self.assertIn("loadFiles(false)", page)
         self.assertNotIn('model-value="failed"', page)
-        self.assertIn(':model-value="bucket"', page)
-        self.assertIn('@update:model-value="switchTab', page)
+        self.assertIn(':active="view === item.key"', page)
+        self.assertIn('@click="selectView(item.key)"', page)
         self.assertNotIn('@click="switchTab', page)
         self.assertEqual(page.count("已提交重试"), 1)
         self.assertIn("retryResult(res, '失败项')", page)
         # 定向重试不再覆盖 runs，界面要另起一行显示，否则看着像三天没扫
         self.assertIn("last_targeted", page)
+
+        # 分桶条件必须拼进 URL：.get(url, params) 这种写法会被宿主静静丢掉
+        self.assertIn("encodeURIComponent(key)", page)
+        self.assertIn("bucket: bucket.value", page)
+        for call in re.findall(r"\)\.get\(([^)]*)\)", page):
+            self.assertNotIn(", {", call, f"api.get 不能带第二个参数: {call}")
+        self.assertIn("/files${query({", page)
+
+    def test_pages_share_one_flow_description(self):
+        """流水线只能有一份：改了判据却只改一个页面，两个页面就会互相打脸。"""
+        comp = Path(mls.__file__).parent / "frontend" / "src" / "components"
+        flow = (comp / "flow.ts").read_text(encoding="utf-8")
+        page = (comp / "Page.vue").read_text(encoding="utf-8")
+        cfg = (comp / "Config.vue").read_text(encoding="utf-8")
+        self.assertIn("FLOW_STEPS", flow)
+        self.assertIn("from './flow'", page)
+        self.assertIn("from './flow'", cfg)
+        # 配置页先讲流程再讲具体项：这插件每个开关最后都改写音乐文件且不可回滚
+        self.assertIn("pane === 'flow'", cfg)
+        self.assertLess(cfg.index("流程总览"), cfg.index("运行与写入"))
+        # 侧栏版式向宿主申请宽度（宿主对话框默认 60rem 装不下侧栏 + 分页表）
+        self.assertIn("emit('layout'", page)
+        self.assertIn("emit('layout'", cfg)
 
     def test_data_page_columns_are_not_sortable(self):
         """/files 恒按路径排序，表头留着箭头就是骗人：点一下只重排眼前这一页 50 条。

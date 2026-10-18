@@ -108,6 +108,20 @@ v0.3.3（第二轮复盘）：
   会递归进软链目录，库内一个回环软链能让枚举永不返回、互斥槽被永久占住。
   /files?bucket=pending 的 30s TTL 缓存同时覆盖数据页搜索框每停顿一次的重算。
 
+v0.3.7（切换分桶看到的是同一批数据）：
+- 切换"已处理/失败待重试/待处理"看到同样一批行，根因不在后端的分桶 —— _collect_rows
+  三分支各走各的账，而是请求根本没带上桶名：宿主注入给插件的 api.get 只认第一个参数
+  （豆瓣中心的插件都是把 ?page=… 直接写进 URL 的），第二个对象被静静丢掉。于是三次点击
+  发出的都是裸 GET /files，后端按默认值回答 done 的第一页。参数改由前端自己编码拼进
+  URL，宿主的访问日志里现在能看到 /files?bucket=pending&limit=50&offset=0。
+- 数据页与配置页改成侧栏版式（参考豆瓣中心/PT监控室）：数据页左侧是 概览 + 三个桶，
+  概览先给整轮结果（四个计数、最近一轮、本轮生效的配置、失败原因分布、流水线）再进某一桶；
+  配置页左侧是 流程总览 / 运行与写入 / 识别与匹配 / 音乐库范围，先把"一个文件从被扫到写标签
+  经过哪些判断、各由哪个开关决定"讲完，再摆具体配置项。两页的流水线读同一份 flow.ts，
+  改了判据不会只改一个页面。
+- 两页都按 layout 事件向宿主申请宽度（配置 74rem、数据 86rem）：宿主对话框默认 60rem，
+  侧栏 + 表格会被挤成一团。
+
 v0.3.6（真机跑过一轮之后）：
 - 星期编号按宿主的调度器算，不是按 crontab：宿主把这段 cron 交给 APScheduler
   （CronTrigger.from_crontab），它的星期是 0=周一…6=周日、上限 6；crontab 的 0/7=周日 在这里
@@ -728,7 +742,7 @@ class MusicLibraryScraper(_PluginBase):
         "再沿用 MP 原生音乐刮削链路写入标签与封面。"
     )
     plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/avator.webp"
-    plugin_version = "0.3.6"
+    plugin_version = "0.3.7"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "musiclibraryscraper_"

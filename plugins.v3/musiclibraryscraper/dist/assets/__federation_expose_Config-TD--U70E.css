@@ -1,0 +1,53 @@
+
+/* 仅插件内局部样式；不得写全局 v- 或 mdi- 类规则（构建有 postcss 门禁）。 */
+.mls-card[data-v-6e57b98b] { width: 100%; display: flex; flex-direction: column;
+}
+.mls-head[data-v-6e57b98b] { display: flex; align-items: center; gap: 8px; padding: 14px 18px;
+}
+.mls-head-text[data-v-6e57b98b] { min-width: 0;
+}
+.mls-body[data-v-6e57b98b] { display: flex; min-height: 400px;
+}
+.mls-nav[data-v-6e57b98b] {
+  flex: 0 0 176px;
+  border-right: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+  background: rgba(var(--v-theme-on-surface), .02);
+}
+.mls-nav-item[data-v-6e57b98b] { margin: 2px 8px;
+}
+.mls-content[data-v-6e57b98b] { flex: 1 1 auto; min-width: 0; overflow-y: auto;
+}
+.mls-pane[data-v-6e57b98b] { padding: 16px 18px;
+}
+.mls-block[data-v-6e57b98b] { margin-top: 16px;
+}
+.mls-block-title[data-v-6e57b98b] { font-size: 13px; font-weight: 600; margin-bottom: 4px; opacity: .8;
+}
+.mls-list[data-v-6e57b98b] { margin: 0; padding-left: 18px;
+}
+.mls-list li[data-v-6e57b98b] { margin: 2px 0; font-size: 13px;
+}
+.mls-flow[data-v-6e57b98b] { display: flex; flex-direction: column; gap: 10px;
+}
+.mls-flow-step[data-v-6e57b98b] { display: flex; gap: 10px; align-items: flex-start;
+}
+.mls-flow-index[data-v-6e57b98b] {
+  flex: 0 0 22px; height: 22px; border-radius: 50%; font-size: 12px;
+  display: flex; align-items: center; justify-content: center; margin-top: 3px;
+  background: rgba(var(--v-theme-primary), .14); color: rgb(var(--v-theme-primary)); font-weight: 700;
+}
+.mls-flow-body[data-v-6e57b98b] { min-width: 0;
+}
+.mls-flow-knob[data-v-6e57b98b] { font-size: 11px; color: rgb(var(--v-theme-primary)); margin-left: 8px; opacity: .85;
+}
+.mls-actions[data-v-6e57b98b] { display: flex; align-items: center; gap: 8px; padding: 10px 16px;
+}
+@media (max-width: 760px) {
+.mls-body[data-v-6e57b98b] { flex-direction: column;
+}
+.mls-nav[data-v-6e57b98b] {
+    flex: 0 0 auto;
+    border-right: none;
+    border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+}
+}
