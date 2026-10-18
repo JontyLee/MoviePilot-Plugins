@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { F as FLOW_STEPS, _ as _export_sfc } from './_plugin-vue_export-helper-BDo7-ek5.js';
+import { F as FLOW_STEPS, _ as _export_sfc } from './_plugin-vue_export-helper-iTF4IZwH.js';
 
 const {defineComponent:_defineComponent} = await importShared('vue');
 
@@ -636,7 +636,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     ]),
                     _: 1
                   }),
-                  _cache[18] || (_cache[18] = _createElementVNode("div", { class: "text-caption text-grey mt-1" }, " 未达阈值的按上面的分数调「最低匹配分数」；超限的可用下方「重试全部失败」再试。 ", -1))
+                  _cache[18] || (_cache[18] = _createElementVNode("div", { class: "text-caption text-grey mt-1" }, " 原因里写了差哪一项：「曲名/艺人/专辑未对上」可以调「最低匹配分数」或改文件名； 「本地无某项」是文件本身没给出这个信息（整张 CD 压成一个 wav），降阈值也救不回来， 应该把它排出扫描范围。超限的用「重试全部失败」再试。 ", -1))
                 ])) : _createCommentVNode("", true),
                 _createElementVNode("div", _hoisted_24, [
                   _cache[19] || (_cache[19] = _createElementVNode("div", { class: "mls-section-title" }, "流水线", -1)),
@@ -851,6 +851,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const Page = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-029c5910"]]);
+const Page = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-5269922c"]]);
 
 export { Page as default };

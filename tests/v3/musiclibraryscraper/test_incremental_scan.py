@@ -873,6 +873,17 @@ class ContractTest(unittest.TestCase):
         form = Path(mls.__file__).read_text(encoding="utf-8").split("def get_form", 1)[1]
         self.assertNotIn('"hint"', form)
 
+    def test_reason_names_the_missing_field_in_ui(self):
+        """原因得说得出差在哪一项：光看 2/3 分分不清该降阈值还是该把文件排出扫描范围。"""
+        comp = Path(mls.__file__).parent / "frontend" / "src" / "components"
+        flow = (comp / "flow.ts").read_text(encoding="utf-8")
+        page = (comp / "Page.vue").read_text(encoding="utf-8")
+        for phrase in ("曲名未对上", "本地无", "整张 CD"):
+            self.assertIn(phrase, flow)
+        # 概览那句提示不能只教人降阈值：本地缺这一项的文件降了也救不回来
+        self.assertIn("本地无", page)
+        self.assertIn("排出", page)
+
     def test_dead_select_mode_option_removed(self):
         """mtw_select_mode 从不进请求体、也不是 MTW 入参，属于死配置，不能复活。"""
         src = Path(mls.__file__).read_text(encoding="utf-8")
@@ -1126,6 +1137,115 @@ class MatchTest(unittest.TestCase):
         picked2, sc2 = p2._mtw_pick_best(fp, cands)
         self.assertIsNone(picked2)
         self.assertEqual(sc2, 3)
+
+    def test_field_hits_separates_miss_from_missing_local(self):
+        """2/3 分必须能说出差在哪一项、是"没对上"还是"本地根本没这项"。
+
+        只看分数做不出决定：曲名没对上要去改文件名或放宽阈值，本地读不出曲名
+        （整张 CD 压成一个 wav）则该把这类文件排出扫描范围 —— 两种提示相反。
+        """
+        hits = mls.MusicLibraryScraper._field_hits
+        want = {"title": "黑面", "artist": "陈奕迅", "album": "黑白灰"}
+        self.assertEqual(
+            hits({"name": "黑面", "artist": "陈奕迅", "album": "The Line-Up"}, want),
+            {"title": mls._HIT, "artist": mls._HIT, "album": mls._MISS},
+        )
+        # 本地缺专辑：这不是候选的错，说成"未对上"会把人支去改文件名
+        no_album = {"title": "黑面", "artist": "陈奕迅", "album": ""}
+        self.assertEqual(
+            hits({"name": "黑面", "artist": "陈奕迅", "album": "黑白灰"}, no_album)["album"],
+            mls._NO_LOCAL,
+        )
+        self.assertEqual(
+            mls.MusicLibraryScraper._miss_text({"title": mls._HIT, "artist": mls._HIT,
+                                                "album": mls._MISS}),
+            "专辑未对上",
+        )
+        self.assertEqual(
+            mls.MusicLibraryScraper._miss_text({"title": mls._MISS, "artist": mls._NO_LOCAL,
+                                                "album": mls._HIT}),
+            "曲名未对上、本地无艺人",
+        )
+
+    def test_scrape_reason_names_the_missing_field(self):
+        """失败原因连着逐项判定写进账本：数据页每一行、/status 的分布都读这一句。"""
+        tmp = Path(tempfile.mkdtemp())
+        fp = tmp / "陈奕迅" / "黑白灰" / "07 - 黑面.flac"
+        fp.parent.mkdir(parents=True)
+        fp.write_bytes(b"x")
+        p = self._plugin(min_score=3)
+
+        def _handler(url, body):
+            return _Resp(200, {"result": True, "data": {
+                "data": [{"name": "黑面", "artist": "陈奕迅", "album": "The Line-Up"}]
+            }})
+
+        orig = mls.RequestUtils
+        mls.RequestUtils = _ru(_handler)
+        try:
+            okf, reason, score, _ = p._MusicLibraryScraper__scrape_file(fp)
+        finally:
+            mls.RequestUtils = orig
+        self.assertFalse(okf)
+        self.assertEqual(score, 2)
+        self.assertIn("未达阈值（最低匹配分数 3）", reason)
+        self.assertIn("专辑未对上", reason)
+
+    def test_scrape_reason_distinguishes_no_local_title(self):
+        """本地读不出曲名时一个请求都不发，原因也不能写成"MTW 无候选"。"""
+        tmp = Path(tempfile.mkdtemp())
+        fp = tmp / "07 - .flac"
+        fp.write_bytes(b"x")
+        p = self._plugin(min_score=3)
+        asked = []
+
+        def _handler(url, body):
+            asked.append(body)
+            return _Resp(200, {"result": True, "data": []})
+
+        orig = mls.RequestUtils
+        mls.RequestUtils = _ru(_handler)
+        try:
+            okf, reason, _, _ = p._MusicLibraryScraper__scrape_file(fp)
+        finally:
+            mls.RequestUtils = orig
+        self.assertFalse(okf)
+        self.assertIn("本地读不出曲名", reason)
+        self.assertNotIn("MTW 无候选", reason)
+
+    def test_failed_file_leaves_a_log_line(self):
+        """失败不能只在账本里留痕：一轮问满 7 个源可能静默跑上百分钟，看着像卡死。"""
+        tmp = Path(tempfile.mkdtemp())
+        fp = tmp / "陈奕迅" / "黑白灰" / "07 - 黑面.flac"
+        fp.parent.mkdir(parents=True)
+        fp.write_bytes(b"x")
+        p = self._plugin(min_score=3)
+        p._scraper_paths = str(tmp)
+        p._exclude_paths = ""
+        p._force_all = False
+
+        def _handler(url, body):
+            return _Resp(200, {"result": True, "data": {
+                "data": [{"name": "乱码", "artist": "别人", "album": "别的"}]
+            }})
+
+        lines = []
+        orig_ru, orig_log = mls.RequestUtils, mls.logger
+
+        class _Log:
+            def __getattr__(self, name):
+                return lambda msg, *a, **k: lines.append(str(msg))
+
+        mls.RequestUtils = _ru(_handler)
+        mls.logger = _Log()
+        try:
+            p._MusicLibraryScraper__scan(target_paths=[str(fp)])
+        finally:
+            mls.RequestUtils = orig_ru
+            mls.logger = orig_log
+        # 原因和重试次数一起进日志，不看数据页也能知道这个文件烧到了第几次
+        self.assertTrue(any("未通过" in l and "未达阈值" in l and "1/5" in l for l in lines),
+                        [l for l in lines if "未通过" in l])
 
     def test_fetch_candidates_queries_clean_title_not_filename(self):
         """搜索词必须是清洗后的曲名；传 "07 - 黑面.flac" 只会召回噪音。"""

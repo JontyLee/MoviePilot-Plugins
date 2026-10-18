@@ -108,6 +108,19 @@ v0.3.3（第二轮复盘）：
   会递归进软链目录，库内一个回环软链能让枚举永不返回、互斥槽被永久占住。
   /files?bucket=pending 的 30s TTL 缓存同时覆盖数据页搜索框每停顿一次的重算。
 
+v0.3.8（真机 12 个失败项只说"差一分"，说不出差在哪一项）：
+- 失败原因要落到逐项判定：账本里 12 条失败全是"未达阈值（最低匹配分数 3）"+ 分数 2，看不出
+  到底是候选对不上，还是本地根本没这项可比 —— 而这两种要做的决定相反：前者放宽阈值或改文件名，
+  后者（整张 CD 压成一个 wav，目录里也没有曲名）降阈值救不回来，只能把它排出扫描范围。
+  _score_candidate 一直逐字段判过，只是把结果折成一个整数就丢了。现在拆成 hit / miss /
+  本地缺这项 三态（_field_hits），原因写成"未达阈值（最低匹配分数 3）：曲名未对上、本地无专辑"，
+  /status 的 failure_reasons 与数据页按它自动分类。
+- 本地读不出曲名的文件不再记成"MTW 无候选"：一个请求都没发过，写"无候选"会让人以为曲库里
+  查不到，其实是插件连该问什么都不知道。
+- 失败要逐行进日志：未达阈值与无候选此前完全静默（只有写标签失败才有一行），19 个文件的定向
+  重试里 12 个失败跑了 100 分钟没有一行输出，看着就是卡死。现在每个失败文件一行，带原因、
+  分数和第几次重试（共 MAX_RETRY 次）。
+
 v0.3.7（切换分桶看到的是同一批数据）：
 - 切换"已处理/失败待重试/待处理"看到同样一批行，根因不在后端的分桶 —— _collect_rows
   三分支各走各的账，而是请求根本没带上桶名：宿主注入给插件的 api.get 只认第一个参数
@@ -255,6 +268,12 @@ _KEY_TARGETED_RUNS = "last_targeted"
 _DEFAULT_CRON = "0 3 * * sun"
 # _score_candidate 的满分：曲名 / 艺人 / 专辑 各 1 分。
 _MAX_SCORE = 3
+# 打分的三项，顺序即失败原因里的表述顺序。
+_MATCH_FIELDS = (("title", "曲名"), ("artist", "艺人"), ("album", "专辑"))
+# 逐项判定的三种状态：对上 / 有得比但没对上 / 本地缺这项（无从比起）。
+_HIT = "hit"
+_MISS = "miss"
+_NO_LOCAL = "no_local"
 # MTW 实测能返回候选的识别源（顺序即查询顺序）：qq / spotify / acoustid / all 恒返回空，
 # 不要列进来。migu 单源给 20 条，musicbrainz 给繁体字形，其余各 10 条。
 _DEFAULT_RESOURCES = ("netease", "qmusic", "kuwo", "kugou", "migu", "musicbrainz", "smart_tag")
@@ -742,7 +761,7 @@ class MusicLibraryScraper(_PluginBase):
         "再沿用 MP 原生音乐刮削链路写入标签与封面。"
     )
     plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/avator.webp"
-    plugin_version = "0.3.7"
+    plugin_version = "0.3.8"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "musiclibraryscraper_"
@@ -1689,6 +1708,13 @@ class MusicLibraryScraper(_PluginBase):
                     done.pop(key, None)
                     failed_n += 1
                     dirty = True
+                    # 失败也要一行一行留痕：一轮里几十个文件逐个问满 7 个源可能静默跑上百分钟，
+                    # 日志一片空白看着就像卡死，而账本里的原因又要刷开数据页才看得到。
+                    logger.info(
+                        f"[music-scraper] 未通过：{key} — {reason}"
+                        f"{'，分数 ' + str(score) if score is not None else ''}"
+                        f"（第 {prev_retries + 1}/{self.MAX_RETRY} 次）"
+                    )
 
             # 定期落账：整轮动辄几小时，中途容器重启不该把已刮好的部分全丢掉。
             # 按时间而不是次数：plugindata 是单行 JSON，每次写都要整本重新序列化。
@@ -1764,15 +1790,24 @@ class MusicLibraryScraper(_PluginBase):
                       overwrite: bool = False) -> Tuple[bool, str, Optional[int], str]:
         """处理单个文件，返回 (是否成功, 失败原因, 命中分数, 命中来源)。"""
         identity = _local_identity(path, tags, roots=self._identity_roots())
+        if not identity["title"]:
+            # 和"MTW 无候选"分开：那种是问过了、曲库里确实查不到，这种是一次都没问 ——
+            # 该做的是把这类文件（整张 CD 压成一个 wav）排出扫描范围，不是放宽阈值。
+            return False, "本地读不出曲名（tag 与目录结构都没给出）", None, ""
         candidates, failure = self._mtw_fetch_candidates(path, identity=identity)
         if failure:
             # MTW 侧故障：不能算这个文件的锅，调用方按原因前缀区分后不记 retries。
             return False, failure, None, ""
         if not candidates:
             return False, "MTW 无候选", None, ""
-        picked, score = self._mtw_pick_best(path, candidates, identity=identity)
-        if not picked:
-            return False, f"未达阈值（最低匹配分数 {self._min_score}）", score, ""
+        picked, score, hits = self._mtw_best_candidate(path, candidates, identity=identity)
+        if not picked or score < self._min_score:
+            # 分数不够时把"差在哪一项"一起写进原因：2/3 分本身不够用来看该改文件名、
+            # 该放宽阈值，还是该把这类文件排出扫描范围 —— 曲名没对上和本地根本没有曲名，
+            # 要做的决定完全相反。
+            miss = self._miss_text(hits)
+            detail = f"未达阈值（最低匹配分数 {self._min_score}）"
+            return False, f"{detail}：{miss}" if miss else detail, score, ""
         source = str(picked.get("resource") or "").strip()
         info = self._candidate_to_musicinfo(picked, path)
         if not info:
@@ -2050,24 +2085,48 @@ class MusicLibraryScraper(_PluginBase):
     def _mtw_pick_best(self, path: Path, candidates: List[dict],
                        identity: Optional[Dict[str, Any]] = None
                        ) -> Tuple[Optional[dict], int]:
+        best, best_score, _ = self._mtw_best_candidate(path, candidates, identity=identity)
+        return (best if best_score >= self._min_score else None), best_score
+
+    def _mtw_best_candidate(self, path: Path, candidates: List[dict],
+                            identity: Optional[Dict[str, Any]] = None
+                            ) -> Tuple[Optional[dict], int, Optional[Dict[str, str]]]:
+        """返回 (分最高的候选, 分数, 该候选的逐项判定)。
+
+        分数不够时调用方要把"差在哪一项"写进失败原因：只知道 2/3 分，就分不清是
+        候选本身对不上，还是本地压根没有这项可以去对（整张 CD 压成一个 wav 的文件
+        就是后者），两种情况要做的决定完全相反。
+        """
         if identity is None:
             identity = _local_identity(path, roots=self._identity_roots())
         want = _want_from(identity)
-        best, best_score = None, 0
+        best, best_score, best_hits = None, 0, None
         for c in candidates:
-            score = self._score_candidate(c, want)
-            if score > best_score:
-                best, best_score = c, score
-        return (best if best_score >= self._min_score else None), best_score
+            hits = self._field_hits(c, want)
+            score = sum(1 for state in hits.values() if state == _HIT)
+            if best is None or score > best_score:
+                best, best_score, best_hits = c, score, hits
+        return best, max(best_score, 0), best_hits
 
     @staticmethod
-    def _score_candidate(c: dict, want: dict) -> int:
-        """MTW utils.match_song 简化版：title / artist / album 各 0/1。"""
-        score = 0
+    def _field_hits(c: dict, want: dict) -> Dict[str, str]:
+        """MTW utils.match_song 简化版：曲名 / 艺人 / 专辑 逐项判定。
+
+        每项是 hit（对上）/ miss（有得比但没对上）/ no_local（本地缺这项，永远比不了）。
+        三者必须分开：no_local 记 0 分是"信息不全"，把它说成"没对上"会让人去改文件名，
+        而真正该做的是把这类文件排除出扫描范围。
+        """
+        hits: Dict[str, str] = {}
+
         want_title = _norm_text(want.get("title"))
         got_title = _norm_text(c.get("name") or c.get("title"))
-        if want_title and got_title and (want_title in got_title or got_title in want_title):
-            score += 1
+        if not want_title:
+            hits["title"] = _NO_LOCAL
+        else:
+            hits["title"] = _HIT if (
+                got_title and (want_title in got_title or got_title in want_title)
+            ) else _MISS
+
         artists_raw = c.get("artists") or c.get("artist") or c.get("singer") or []
         if isinstance(artists_raw, (list, tuple)):
             got_artist = _norm_text(" ".join(
@@ -2076,17 +2135,49 @@ class MusicLibraryScraper(_PluginBase):
         else:
             got_artist = _norm_text(artists_raw)
         want_artist = _norm_text(want.get("artist"))
-        if want_artist and got_artist and (want_artist in got_artist or got_artist in want_artist):
-            score += 1
+        if not want_artist:
+            hits["artist"] = _NO_LOCAL
+        else:
+            hits["artist"] = _HIT if (
+                got_artist and (want_artist in got_artist or got_artist in want_artist)
+            ) else _MISS
+
         album_obj = c.get("album") or {}
         if isinstance(album_obj, dict):
             got_album = _norm_text(album_obj.get("name") or album_obj.get("title"))
         else:
             got_album = _norm_text(album_obj)
         want_album = _norm_text(want.get("album"))
-        if want_album and got_album and (want_album in got_album or got_album in want_album):
-            score += 1
-        return score
+        if not want_album:
+            hits["album"] = _NO_LOCAL
+        else:
+            hits["album"] = _HIT if (
+                got_album and (want_album in got_album or got_album in want_album)
+            ) else _MISS
+
+        return hits
+
+    @staticmethod
+    def _miss_text(hits: Optional[Dict[str, str]]) -> str:
+        """把逐项判定写成一句人话：差哪几项、分别是因为什么。"""
+        if not hits:
+            return ""
+        parts: List[str] = []
+        for key, label in _MATCH_FIELDS:
+            state = hits.get(key)
+            if state == _HIT:
+                continue
+            if state == _NO_LOCAL:
+                parts.append(f"本地无{label}")
+            elif state == _MISS:
+                parts.append(f"{label}未对上")
+        return "、".join(parts)
+
+    @staticmethod
+    def _score_candidate(c: dict, want: dict) -> int:
+        """MTW utils.match_song 简化版：title / artist / album 各 0/1。"""
+        hits = MusicLibraryScraper._field_hits(c, want)
+        return sum(1 for state in hits.values() if state == _HIT)
 
     def _candidate_to_musicinfo(self, c: dict, path: Path) -> Optional[MusicInfo]:
         """把 MTW 候选折叠成 MP MusicInfo。
