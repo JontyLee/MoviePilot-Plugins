@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { F as FLOW_STEPS, _ as _export_sfc } from './_plugin-vue_export-helper-iTF4IZwH.js';
+import { F as FLOW_STEPS, _ as _export_sfc } from './_plugin-vue_export-helper-BRkMt5bj.js';
 
 const {defineComponent:_defineComponent} = await importShared('vue');
 
@@ -323,7 +323,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       }))
     ]);
     const sourceNames = computed(
-      () => (cfg.value?.mtw_resource || []).map((s) => sourceText(s)).join(" → ") || "全部源"
+      () => (cfg.value?.active_resource || []).map((s) => sourceText(s)).join(" → ") || "全部源"
     );
     const activeBucket = computed(() => buckets.find((b) => b.key === bucket.value));
     onMounted(() => {
@@ -370,7 +370,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
             }),
             _cache[10] || (_cache[10] = _createElementVNode("div", { class: "mls-head-text" }, [
               _createElementVNode("div", { class: "text-h6" }, "MusicTagWeb音乐库刮削"),
-              _createElementVNode("div", { class: "text-caption text-medium-emphasis" }, " 枚举库内音频 → 读本地身份 → 逐源问 MTW → 打分定阈值 → 宿主原生写入 → 记账 ")
+              _createElementVNode("div", { class: "text-caption text-medium-emphasis" }, " 枚举库内音频 → 读本地身份 → 逐源检索 → 打分定阈值 → 宿主原生写入 → 记账 ")
             ], -1)),
             _createVNode(_component_v_spacer),
             running.value ? (_openBlock(), _createBlock(_component_v_chip, {
@@ -583,8 +583,8 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                                 cfg.value.cron ? (_openBlock(), _createElementBlock("span", _hoisted_12, "｜定时 " + _toDisplayString(cfg.value.cron) + "（下次 " + _toDisplayString(cfg.value.cron_next) + "）", 1)) : _createCommentVNode("", true)
                               ]),
                               _createElementVNode("div", _hoisted_13, " 发现 " + _toDisplayString(runs.value.scanned ?? 0) + "｜缓存跳过 " + _toDisplayString(runs.value.from_cache ?? 0) + "｜已有tag跳过 " + _toDisplayString(runs.value.skipped_tagged ?? 0), 1),
-                              _createElementVNode("div", _hoisted_14, " 成功 " + _toDisplayString(runs.value.ok ?? 0) + "｜失败 " + _toDisplayString(runs.value.failed ?? 0) + "｜MTW 故障 " + _toDisplayString(runs.value.transport ?? 0) + "｜处理异常 " + _toDisplayString(runs.value.error ?? 0), 1),
-                              runs.value.aborted ? (_openBlock(), _createElementBlock("div", _hoisted_15, " MTW 连续故障，本轮已中止，未处理的留到下一轮 ")) : _createCommentVNode("", true),
+                              _createElementVNode("div", _hoisted_14, " 成功 " + _toDisplayString(runs.value.ok ?? 0) + "｜失败 " + _toDisplayString(runs.value.failed ?? 0) + "｜服务侧故障 " + _toDisplayString(runs.value.transport ?? 0) + "｜处理异常 " + _toDisplayString(runs.value.error ?? 0), 1),
+                              runs.value.aborted ? (_openBlock(), _createElementBlock("div", _hoisted_15, " 识别来源连续故障，本轮已中止，未处理的留到下一轮 ")) : _createCommentVNode("", true),
                               lastTargeted.value.ts ? (_openBlock(), _createElementBlock("div", _hoisted_16, " 最近定向重试 " + _toDisplayString(fmtTime(lastTargeted.value.ts)) + "：成功 " + _toDisplayString(lastTargeted.value.ok ?? 0) + "｜失败 " + _toDisplayString(lastTargeted.value.failed ?? 0), 1)) : _createCommentVNode("", true)
                             ]),
                             _: 1
@@ -604,7 +604,14 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                             default: _withCtx(() => [
                               _cache[15] || (_cache[15] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mb-1" }, "本轮生效的配置", -1)),
                               _createElementVNode("div", _hoisted_17, _toDisplayString(cfg.value.mode === "force_all" ? "强制覆盖" : "只补缺") + "｜最低匹配分数 " + _toDisplayString(cfg.value.min_score) + "｜" + _toDisplayString(sourceNames.value), 1),
-                              _createElementVNode("div", _hoisted_18, " MTW " + _toDisplayString(cfg.value.mtw_base_url || "未配置") + "｜账密 " + _toDisplayString(cfg.value.has_username ? "已配" : "未配"), 1),
+                              _createElementVNode("div", _hoisted_18, [
+                                _createTextVNode(" 识别来源 " + _toDisplayString(cfg.value.backend_label || "自动") + " ", 1),
+                                cfg.value.backend === "builtin" ? (_openBlock(), _createElementBlock(_Fragment, { key: 0 }, [
+                                  _createTextVNode(" ｜直连平台检索，库内路径不外传 ")
+                                ], 64)) : (_openBlock(), _createElementBlock(_Fragment, { key: 1 }, [
+                                  _createTextVNode(" ｜MTW " + _toDisplayString(cfg.value.mtw_base_url || "未配置") + "｜账密 " + _toDisplayString(cfg.value.has_username ? "已配" : "未配"), 1)
+                                ], 64))
+                              ]),
                               _createElementVNode("div", _hoisted_19, " 库路径 " + _toDisplayString((cfg.value.scraper_paths || []).length) + " 个｜排除 " + _toDisplayString((cfg.value.exclude_paths || []).length) + " 个 ", 1),
                               _createElementVNode("div", _hoisted_20, " 实际处理的扩展名：" + _toDisplayString((cfg.value.audio_extensions || []).join(" / ")), 1)
                             ]),
@@ -851,6 +858,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const Page = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-5269922c"]]);
+const Page = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-dac80d3c"]]);
 
 export { Page as default };

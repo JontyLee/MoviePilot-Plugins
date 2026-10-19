@@ -306,8 +306,10 @@ const navItems = computed(() => [
   }))
 ])
 
+// 生效的源清单以服务端给的 active_resource 为准：内置源不认酷我/smart_tag，
+// 回显配置原值会让人以为那两个源也在问。
 const sourceNames = computed(() =>
-  (cfg.value?.mtw_resource || []).map((s: string) => sourceText(s)).join(' → ') || '全部源'
+  (cfg.value?.active_resource || []).map((s: string) => sourceText(s)).join(' → ') || '全部源'
 )
 
 const activeBucket = computed(() => buckets.find(b => b.key === bucket.value))
@@ -328,7 +330,7 @@ onMounted(() => {
       <div class="mls-head-text">
         <div class="text-h6">MusicTagWeb音乐库刮削</div>
         <div class="text-caption text-medium-emphasis">
-          枚举库内音频 → 读本地身份 → 逐源问 MTW → 打分定阈值 → 宿主原生写入 → 记账
+          枚举库内音频 → 读本地身份 → 逐源检索 → 打分定阈值 → 宿主原生写入 → 记账
         </div>
       </div>
       <v-spacer />
@@ -416,11 +418,11 @@ onMounted(() => {
                     {{ runs.skipped_tagged ?? 0 }}
                   </div>
                   <div class="text-body-2">
-                    成功 {{ runs.ok ?? 0 }}｜失败 {{ runs.failed ?? 0 }}｜MTW 故障
+                    成功 {{ runs.ok ?? 0 }}｜失败 {{ runs.failed ?? 0 }}｜服务侧故障
                     {{ runs.transport ?? 0 }}｜处理异常 {{ runs.error ?? 0 }}
                   </div>
                   <div v-if="runs.aborted" class="text-caption text-warning mt-1">
-                    MTW 连续故障，本轮已中止，未处理的留到下一轮
+                    识别来源连续故障，本轮已中止，未处理的留到下一轮
                   </div>
                   <div v-if="lastTargeted.ts" class="text-caption text-grey mt-1">
                     最近定向重试 {{ fmtTime(lastTargeted.ts) }}：成功 {{ lastTargeted.ok ?? 0 }}｜失败
@@ -436,7 +438,13 @@ onMounted(() => {
                     {{ cfg.min_score }}｜{{ sourceNames }}
                   </div>
                   <div class="text-caption text-grey">
-                    MTW {{ cfg.mtw_base_url || '未配置' }}｜账密 {{ cfg.has_username ? '已配' : '未配' }}
+                    识别来源 {{ cfg.backend_label || '自动' }}
+                    <template v-if="cfg.backend === 'builtin'">
+                      ｜直连平台检索，库内路径不外传
+                    </template>
+                    <template v-else>
+                      ｜MTW {{ cfg.mtw_base_url || '未配置' }}｜账密 {{ cfg.has_username ? '已配' : '未配' }}
+                    </template>
                   </div>
                   <div class="text-caption text-grey">
                     库路径 {{ (cfg.scraper_paths || []).length }} 个｜排除

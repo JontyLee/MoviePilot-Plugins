@@ -20,6 +20,8 @@ const DEFAULTS = {
   scraper_paths: '',
   exclude_paths: '',
   mtw_base_url: '',
+  // 识别来源默认 auto（与后端一致）：填过 MTW 地址的装机继续用 MTW，没填的用内置源
+  source_backend: 'auto',
   mtw_username: '',
   mtw_password: '',
   mtw_resource: [] as string[],
@@ -61,8 +63,24 @@ const modeItems = [
   { title: '强制覆盖已有标签', value: 'force_all' }
 ]
 
+const backendItems = [
+  { title: '自动（填了 MTW 地址走 MTW，否则内置源）', value: 'auto' },
+  { title: '内置源（免部署 Music Tag Web）', value: 'builtin' },
+  { title: 'Music Tag Web', value: 'mtw' }
+]
+
+// 插件自己直连的内置源。酷我实测检索接口恒不返回命中、www 接口要签名；
+// smart_tag 是 MTW 侧的 AI 归因，插件这层没有对应的公开接口 —— 这两个只在 MTW 模式列出。
+const builtinResourceItems = [
+  { title: '网易云 netease', value: 'netease' },
+  { title: 'QQ 音乐 qmusic', value: 'qmusic' },
+  { title: '酷狗 kugou', value: 'kugou' },
+  { title: '咪咕 migu', value: 'migu' },
+  { title: 'MusicBrainz', value: 'musicbrainz' }
+]
+
 // 实测能返回候选的 MTW 源；qq / spotify / acoustid / all 恒返回空，不要列进来。
-const resourceItems = [
+const mtwResourceItems = [
   { title: '网易云 netease', value: 'netease' },
   { title: 'QQ 音乐 qmusic', value: 'qmusic' },
   { title: '酷我 kuwo', value: 'kuwo' },
@@ -72,13 +90,37 @@ const resourceItems = [
   { title: '智能 smart_tag', value: 'smart_tag' }
 ]
 
-const ALL_SOURCES_TEXT = resourceItems.map(i => i.title.split(' ')[0]).join(' / ')
+// 与后端 _effective_backend 同一套判断：auto 只是"看有没有填 MTW 地址"，不是第四种来源
+const backend = computed(() => {
+  const raw = String(config.value.source_backend || 'auto')
+  if (raw === 'builtin' || raw === 'mtw') return raw
+  return String(config.value.mtw_base_url || '').trim() ? 'mtw' : 'builtin'
+})
+const isMtw = computed(() => backend.value === 'mtw')
 
-const sourceNote = computed(() =>
-  config.value.mtw_resource?.length
-    ? `已选 ${config.value.mtw_resource.length} 个源，就按这个顺序问`
-    : `留空 = 全部源（${ALL_SOURCES_TEXT}）`
+const resourceItems = computed(() => (isMtw.value ? mtwResourceItems : builtinResourceItems))
+
+// 选中但当前来源不认识的源：后端会安静丢掉，这里先说破，否则用户只会觉得"怎么少了几个源"
+const ignoredResources = computed(() => {
+  const known = resourceItems.value.map(i => i.value)
+  return toResourceList(config.value.mtw_resource).filter(v => !known.includes(v))
+})
+
+const ALL_SOURCES_TEXT = computed(
+  () => resourceItems.value.map(i => i.title.split(' ')[0]).join(' / ')
 )
+
+const sourceNote = computed(() => {
+  const picked = toResourceList(config.value.mtw_resource)
+  if (picked.length) {
+    const dropped = ignoredResources.value
+    return `已选 ${picked.length} 个源，就按这个顺序问`
+      + (dropped.length ? `；${dropped.join(' / ')} 只在另一侧来源有效，本轮会被忽略` : '')
+  }
+  return isMtw.value
+    ? `留空 = 全部源（${ALL_SOURCES_TEXT.value}）`
+    : `留空 = 内置源全部（${ALL_SOURCES_TEXT.value}）`
+})
 
 const modeNote = computed(() =>
   config.value.mode === 'force_all' ? '强制覆盖（当前）' : '只补缺（当前，推荐）'
@@ -152,7 +194,8 @@ onMounted(() => {
               <li>「最低匹配分数」调到 1 表示曲名对上就写入，翻唱、钢琴版、纯音乐同名都会被当成
                 原曲写进文件，且无法回滚。</li>
               <li>「强制覆盖」会替换手工改过的曲名/艺人/专辑/年份/轨道号，也会重新下载并内嵌封面。</li>
-              <li>MTW 与 MP 必须挂载同一份音乐库路径，否则查到的元数据会写到另一个文件上。</li>
+              <li>识别来源选 MTW 时，MTW 与 MP 必须挂载同一份音乐库路径，否则查到的元数据会写到另一个文件上；
+                内置源不发库内路径，没有这个约束。</li>
             </ul>
           </v-alert>
         </div>
@@ -176,7 +219,7 @@ onMounted(() => {
           <div class="mls-block">
             <div class="mls-block-title">写入模式 · {{ modeNote }}</div>
             <div class="text-caption text-grey">
-              只补缺：曲名+艺人+专辑+内嵌封面 四项齐全的文件按 mtime+size 记账直接跳过（不再请求 MTW），
+              只补缺：曲名+艺人+专辑+内嵌封面 四项齐全的文件按 mtime+size 记账直接跳过（一个检索请求都不发），
               缺哪项补哪项，已有非空标签保持不动，手工修改不会被覆盖。
             </div>
             <div class="text-caption text-grey">
@@ -206,27 +249,21 @@ onMounted(() => {
         <!-- 识别与匹配 -->
         <div v-show="pane === 'match'" class="mls-pane">
           <v-row dense>
+            <v-col cols="12" md="4">
+              <v-select v-model="config.source_backend" :items="backendItems"
+                        label="识别来源" hide-details />
+            </v-col>
             <v-col cols="12" md="8">
               <v-text-field
                 v-model="config.mtw_base_url"
-                label="Music Tag Web 地址"
+                :label="isMtw ? 'Music Tag Web 地址（MTW 模式必填）' : 'Music Tag Web 地址（内置源不需要）'"
                 placeholder="http://192.168.x.x:8001"
-                hide-details
-              />
-            </v-col>
-            <v-col cols="12" md="4">
-              <v-text-field
-                v-model.number="config.min_score"
-                label="最低匹配分数（1-3）"
-                type="number"
-                min="1"
-                max="3"
                 hide-details
               />
             </v-col>
           </v-row>
 
-          <v-row dense class="mt-1">
+          <v-row dense class="mt-1" v-if="isMtw">
             <v-col cols="12" md="6">
               <v-text-field v-model="config.mtw_username" label="MTW 用户名" hide-details />
             </v-col>
@@ -241,10 +278,23 @@ onMounted(() => {
             </v-col>
           </v-row>
 
+          <v-row dense class="mt-1">
+            <v-col cols="12" md="4">
+              <v-text-field
+                v-model.number="config.min_score"
+                label="最低匹配分数（1-3）"
+                type="number"
+                min="1"
+                max="3"
+                hide-details
+              />
+            </v-col>
+          </v-row>
+
           <v-select
             v-model="config.mtw_resource"
             :items="resourceItems"
-            label="MTW 识别源（可多选，留空=全部）"
+            :label="isMtw ? 'MTW 识别源（可多选，留空=全部）' : '内置识别源（可多选，留空=全部）'"
             multiple
             chips
             closable-chips
@@ -256,8 +306,18 @@ onMounted(() => {
           <div class="mls-block">
             <div class="mls-block-title">元数据来源</div>
             <div class="text-caption text-grey">
-              全部取自 Music Tag Web（MTW）的识别结果，插件不直连任何音乐平台。
-              qq / spotify / acoustid / all 实测恒返回空候选，没有列进来。
+              内置源：插件自己直连 {{ builtinResourceItems.length }} 个音乐平台的公开检索接口
+              （{{ builtinResourceItems.map(i => i.value).join(' / ') }}），不需要为刮削单独部署 Music Tag Web；
+              发给平台的只有清洗后的「曲名-艺人」检索词，库内路径不出本机。
+            </div>
+            <div class="text-caption text-grey">
+              Music Tag Web：沿用 MTW 的识别结果，除了内置那几个源，还能用酷我与 smart_tag。
+              已经部署了 MTW 的装机选这条（或保持「自动」）行为与之前完全一致；
+              这条会把库内完整路径作为参考一起发给 MTW，所以 MTW 与 MP 必须挂同一份库。
+            </div>
+            <div class="text-caption text-grey">
+              两种来源都不请求歌词：歌词由宿主刮削链自己取（lrclib / AMLL）。
+              qq / spotify / acoustid / all 实测恒返回空候选，两种来源都没有列进来。
             </div>
           </div>
 
@@ -265,7 +325,7 @@ onMounted(() => {
             <div class="mls-block-title">查询与选取</div>
             <div class="text-caption text-grey">
               每个文件按源顺序逐源查询，某源出现 3/3 满分候选就立刻停止，不再问后面的源；都没满分则合并所有候选取最高分。
-              分数为曲名 / 艺人 / 专辑 各 1 分（先做繁简与大小写归一，互相包含即算命中）；同分时按源顺序、同源内按 MTW
+              分数为曲名 / 艺人 / 专辑 各 1 分（先做繁简与大小写归一，互相包含即算命中）；同分时按源顺序、同源内按来源
               返回顺序取第一个。最高分仍低于「最低匹配分数」（默认 3，即要求三项全中）就记为失败、不写入。
             </div>
             <div class="text-caption text-grey">
@@ -300,7 +360,8 @@ onMounted(() => {
             </div>
             <div class="text-caption text-grey">
               路径必须写到实际挂载的目录：只有严格位于「音乐库路径」之下的目录才按 艺人/专辑 解释，
-              库根本身的名字不算专辑名。同一份库需要 MTW 与 MP 挂载到相同路径。
+              库根本身的名字不算专辑名。识别来源用 MTW 时，同一份库还需要 MTW 与 MP 挂载到相同路径
+              （MTW 会收到完整路径作参考）；内置源不受这条约束。
             </div>
           </div>
         </div>

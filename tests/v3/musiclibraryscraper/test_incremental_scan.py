@@ -94,7 +94,12 @@ class _Resp:
 
 
 def _ru(handler):
-    """按 handler(url, body) -> _Resp|None 造一个 RequestUtils 替身类（None = 连不上）。"""
+    """按 handler(url, body) -> _Resp|None 造一个 RequestUtils 替身类（None = 连不上）。
+
+    MTW 那条路是 POST JSON，内置源是 GET 带查询参数（QQ 音乐除外，它也 POST）——
+    两条通道都交给同一个 handler，第二个参数原样给出请求体或查询参数，
+    这样"内置源不许把库内路径发出去"这类断言能直接看请求内容。
+    """
 
     class _Ru:
         def __init__(self, *a, **k):
@@ -102,6 +107,9 @@ def _ru(handler):
 
         def post(self, url=None, json=None, **kw):
             return handler(url, json)
+
+        def get_res(self, url=None, params=None, **kw):
+            return handler(url, params)
 
     return _Ru
 
@@ -843,7 +851,7 @@ class ContractTest(unittest.TestCase):
             encoding="utf-8"
         )
         # 原生表单与 Vue 配置页都要有
-        self.assertIn("留空=全部", src)
+        self.assertIn("留空=当前来源全部", src)
         self.assertIn("留空 = 全部源", cfg)
         for phrase in ("只补缺", "强制覆盖", "宿主", "同分时", "目录结构兜底"):
             self.assertIn(phrase, src)
@@ -862,6 +870,13 @@ class ContractTest(unittest.TestCase):
         for phrase in ("音频白名单", ".trickplay", "软链"):
             self.assertIn(phrase, src)
             self.assertIn(phrase, cfg)
+        # 识别来源两条路都要在两个表面说破：谁能用酷我/smart_tag、要不要 MTW，
+        # 只写在一处会让人配完才发现内置源没有那个源
+        for phrase in ("识别来源", "内置源", "免部署"):
+            self.assertIn(phrase, src)
+            self.assertIn(phrase, cfg)
+        # 隐私边界只能写在配置页上，用户选内置源时看的就是这里
+        self.assertIn("库内路径不出本机", cfg)
 
     def test_config_notes_are_consolidated(self):
         """说明集中在页面底部一个块里，不跟在单个配置项下面（persistent-hint 会撑坏排版）。"""
@@ -904,6 +919,24 @@ class ContractTest(unittest.TestCase):
             )
         )
 
+    def test_builtin_sources_credit_upstream_and_license(self):
+        """内置源是把 Music Tag Web 的调用约定接过来用的：出处与许可要写在代码和 README 里。
+
+        MTW 是 GPL-3.0、本仓库同为 GPL-3.0，引用与再分发本身没有障碍，缺的是说明；
+        MusicBrainz 只取核心数据（CC0）这件事也必须写出来，否则读代码的人无从判断边界。
+        """
+        root = Path(mls.__file__).resolve().parents[2]
+        sources = (Path(mls.__file__).parent / "sources.py").read_text(encoding="utf-8")
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        for surface in (sources, readme):
+            self.assertIn("music-tag-web", surface)
+            self.assertIn("GPL-3.0", surface)
+            self.assertIn("CC0", surface)
+        # 仓库自己的许可要真是 GPL-3.0，上面那句"同等条款下可以引用"才成立
+        self.assertIn("GNU GENERAL PUBLIC LICENSE", (root / "LICENSE").read_text(encoding="utf-8"))
+        self.assertIn("Version 3", (root / "LICENSE").read_text(encoding="utf-8"))
+        self.assertIn("上游、许可与引用", readme)
+
     def test_mtw_endpoints_use_apimt_prefix(self):
         """MTW 的 Django 路由挂在 /apimt/ 下，写成 /api/ 会一律 404。"""
         src = Path(mls.__file__).read_text(encoding="utf-8")
@@ -918,7 +951,7 @@ class ContractTest(unittest.TestCase):
 class MatchTest(unittest.TestCase):
     """候选比对这些坑：繁简之外的空格/标点差异、文件名当搜索词、tag 读不到时的目录兜底。"""
 
-    def _plugin(self, min_score=3, resources="netease"):
+    def _plugin(self, min_score=3, resources="netease", backend="mtw"):
         p = mls.MusicLibraryScraper()
         p._min_score = min_score
         # 故意传字符串：验证旧配置（单选）也能跑
@@ -926,6 +959,15 @@ class MatchTest(unittest.TestCase):
         p._mtw_base_url = "http://mtw:8002"
         p._mtw_username = ""
         p._mtw_password = ""
+        # 后端与真正要问的源分开指定：类默认值是内置源，而这批用例描述的是 MTW 那条链路，
+        # 不写清楚就会拿 MTW 形状的回答去喂内置源解析器，测出来的是形状不匹配而不是被测行为。
+        p._backend = backend
+        builtin = backend == "builtin"
+        p._active_resources = mls._normalize_resources(
+            resources,
+            known=mls._sources.RESOURCES if builtin else None,
+            default=mls._sources.RESOURCES if builtin else None,
+        )
         return p
 
     def test_norm_text_strips_space_and_punctuation(self):
@@ -1859,13 +1901,17 @@ class RobustnessTest(unittest.TestCase):
     def test_transport_reasons_are_the_documented_ones(self):
         """扫描侧靠前缀判断要不要记 retries，两边用同一组常量、不能各写各的。
 
-        三种 MTW 侧故障（不可达 / 鉴权 / 接口报错）都不许算到文件头上：只有鉴权那一种
-        会触发强制重登，另外两种只喂熔断。
+        MTW 那三种故障（不可达 / 鉴权 / 接口报错）都不许算到文件头上：只有鉴权那一种
+        会触发强制重登，另外两种只喂熔断。内置源的同一种故障单列一条，且前缀不能撞
+        MTW —— 撞了 startswith 就把两条链路的账混成一类。
         """
         for reason in (mls._UNREACHABLE_REASON, mls._AUTH_REASON, mls._API_ERROR_REASON):
             self.assertIn(reason, mls._TRANSPORT_REASONS)
             self.assertTrue(reason.startswith("MTW"))
-        self.assertEqual(len(mls._TRANSPORT_REASONS), 3)
+        builtin_reason = mls._BUILTIN_UNREACHABLE_REASON
+        self.assertIn(builtin_reason, mls._TRANSPORT_REASONS)
+        self.assertFalse(builtin_reason.startswith("MTW"))
+        self.assertEqual(len(mls._TRANSPORT_REASONS), 4)
 
     def test_command_retry_uses_same_filter_as_api(self):
         """/music_scraper_retry 也要过一遍库内判定：否则照着账本里已删除、已挪出库的路径
@@ -2056,6 +2102,414 @@ class RobustnessTest(unittest.TestCase):
         written = p._configs[-1]
         self.assertEqual(set(written), set(defaults))
         self.assertIs(written["onlyonce"], False)
+
+
+class BuiltinSourcesTest(unittest.TestCase):
+    """内置识别源：不部署 Music Tag Web 也要能刮完整份库。
+
+    这批用例守的是三件事：候选字段映射真的能喂给 MusicInfo（否则免部署就是空话）、
+    平台改版/风控要说成"这个源没给答案"而不是"曲库里查不到"、以及内置源绝不把库内路径
+    发给平台（MTW 模式会带 full_path，内置模式没有那个必要）。
+    """
+
+    _NETEASE = {
+        "result": {"songs": [{
+            "id": 186016, "name": "晴天", "no": 3, "cd": "01", "dt": 269000,
+            "publishTime": 1059609600000,
+            "ar": [{"name": "周杰伦"}, {"name": "杨瑞代"}],
+            "al": {"name": "叶惠美", "picUrl": "http://p1.music.126.net/x/109.jpg"},
+        }]}
+    }
+    _QMUSIC = {
+        "req_0": {"code": 0, "data": {"body": {"song": {"list": [{
+            "title": "晴天", "mid": "0039MnYb0qxYhV", "interval": 269,
+            "time_public": "2003-07-31", "index_album": 3, "index_cd": 0,
+            "singer": [{"name": "周杰伦"}],
+            "album": {"mid": "000MkMni19ClKG", "name": "叶惠美"},
+        }]}}}}
+    }
+    _KUGOU = {
+        "status": 1, "data": {"info": [{
+            "hash": "b3a52a7a", "songname": "晴天(现场版)", "songname_original": "晴天",
+            "singername": "周杰伦", "album_name": "叶惠美", "duration": 269,
+            "trans_param": {"union_cover": "http://imge.kugou.com/stdmusic/{size}/a.jpg"},
+        }]}
+    }
+    _MIGU = {
+        "code": "000000", "songResultData": {"result": [{
+            "id": "3790007", "name": "晴天",
+            "singers": [{"id": "112", "name": "周杰伦"}],
+            "albums": [{"id": "8592", "name": "叶惠美"}],
+            "imgItems": [{"imgSizeType": "01", "img": "http://s/1.webp"},
+                         {"imgSizeType": "03", "img": "http://s/3.webp"}],
+        }]}
+    }
+    _MUSICBRAINZ = {
+        "recordings": [{
+            "id": "1e6c9c56", "title": "晴天", "length": 269000,
+            "first-release-date": "2003-07-31",
+            "artist-credit": [{"name": "周杰倫", "artist": {"id": "a1", "name": "周杰倫"}}],
+            "releases": [
+                {"id": "r1", "title": "葉惠美", "status": "Promotion", "date": ""},
+                {"id": "r2", "title": "葉惠美", "status": "Official", "date": "2003-07-31"},
+            ],
+        }]
+    }
+    _BY_URL = {
+        "music.163.com": _NETEASE,
+        "musicu.fcg": _QMUSIC,
+        "kugou.com": _KUGOU,
+        "migu.cn": _MIGU,
+        "musicbrainz.org": _MUSICBRAINZ,
+    }
+
+    def _plugin(self, resources=None, backend="builtin", min_score=3):
+        p = mls.MusicLibraryScraper()
+        p._min_score = min_score
+        p._backend = backend
+        p._mtw_base_url = "http://mtw:8002" if backend == "mtw" else ""
+        p._mtw_username = ""
+        p._mtw_password = ""
+        p._mtw_resources = list(resources or mls._DEFAULT_RESOURCES)
+        builtin = backend == "builtin"
+        p._active_resources = mls._normalize_resources(
+            resources,
+            known=mls._sources.RESOURCES if builtin else None,
+            default=mls._sources.RESOURCES if builtin else None,
+        )
+        return p
+
+    def _track(self, title="黑面", artist="陈奕迅", album="黑白灰"):
+        tmp = Path(tempfile.mkdtemp())
+        fp = tmp / artist / album / f"07 - {title}.flac"
+        fp.parent.mkdir(parents=True)
+        fp.write_bytes(b"x")
+        return fp
+
+    def _answer(self, asked, fail_urls=()):
+        """按 URL 命中内置源的固定响应；asked 记录 (url, 查询参数或请求体)。"""
+        def _handler(url, body):
+            asked.append((url, body))
+            for host, payload in self._BY_URL.items():
+                if host in url:
+                    if any(f in url for f in fail_urls):
+                        return None
+                    return _Resp(200, payload)
+            return _Resp(200, {})
+        return _ru(_handler)
+
+    # ---------------- 检索词 ----------------
+
+    def test_build_keyword_follows_mtw_convention(self):
+        """曲名与艺人互不包含时用 "曲名-艺人" 提准，已包含就只发曲名。"""
+        build = mls._sources.build_keyword
+        self.assertEqual(build("黑面", "陈奕迅"), "黑面-陈奕迅")
+        self.assertEqual(build("黑面 陈奕迅", "陈奕迅"), "黑面 陈奕迅")
+        self.assertEqual(build("黑面", ""), "黑面")
+        self.assertEqual(build(""), "")
+
+    # ---------------- 各源字段映射 ----------------
+
+    def test_netease_candidate_normalized(self):
+        cands, err = mls._sources.parse_candidates("netease", self._NETEASE)
+        self.assertIsNone(err)
+        self.assertEqual(len(cands), 1)
+        c = cands[0]
+        self.assertEqual(c["name"], "晴天")
+        self.assertEqual([a["name"] for a in c["artists"]], ["周杰伦", "杨瑞代"])
+        self.assertEqual(c["album"], "叶惠美")
+        self.assertEqual(c["album_img"], "http://p1.music.126.net/x/109.jpg")
+        # cd 是 "01" 这种字符串，轨道号取自 no
+        self.assertEqual((c["tracknumber"], c["discnumber"]), (3, 1))
+        self.assertEqual(c["duration"], 269000)
+        self.assertEqual(str(c["year"]), "1059609600000")
+
+    def test_qmusic_cover_is_built_from_album_mid(self):
+        """QQ 检索结果里没有封面地址，用专辑 mid 拼图片站 —— 不拼就等于每次都缺封套图。"""
+        cands, err = mls._sources.parse_candidates("qmusic", self._QMUSIC)
+        self.assertIsNone(err)
+        c = cands[0]
+        self.assertEqual(c["album_img"],
+                         "https://y.gtimg.cn/music/photo_new/T002R500x500M000000MkMni19ClKG.jpg")
+        self.assertEqual(c["year"], "2003-07-31")
+        self.assertEqual([a["name"] for a in c["artists"]], ["周杰伦"])
+        self.assertEqual(c["id"], "0039MnYb0qxYhV")
+
+    def test_kugou_cover_template_filled_and_original_title_preferred(self):
+        """优先 songname_original：现场版/翻唱版后缀会让曲名与本地身份差一层。"""
+        cands, err = mls._sources.parse_candidates("kugou", self._KUGOU)
+        self.assertIsNone(err)
+        c = cands[0]
+        self.assertEqual(c["name"], "晴天")
+        self.assertNotIn("{size}", c["album_img"])
+        self.assertTrue(c["album_img"].endswith(".jpg"))
+
+    def test_migu_picks_largest_cover_and_requires_success_code(self):
+        cands, err = mls._sources.parse_candidates("migu", self._MIGU)
+        self.assertIsNone(err)
+        self.assertEqual(cands[0]["album_img"], "http://s/3.webp")
+        self.assertEqual(cands[0]["album"], "叶惠美")
+        # 咪咕用字符串业务码表态，码不对时不能当成"查到了零条"
+        bad = {"code": "000001", "songResultData": {"result": []}}
+        self.assertEqual(mls._sources.parse_candidates("migu", bad), ([], mls._sources.API_ERROR))
+
+    def test_musicbrainz_prefers_official_release(self):
+        cands, err = mls._sources.parse_candidates("musicbrainz", self._MUSICBRAINZ)
+        self.assertIsNone(err)
+        c = cands[0]
+        self.assertEqual(c["album"], "葉惠美")
+        self.assertEqual(c["year"], "2003-07-31")
+        self.assertEqual([a["name"] for a in c["artists"]], ["周杰倫"])
+        # 繁体候选必须还能和本地身份对上，否则 MusicBrainz 就没有存在的理由。
+        # 繁转简是宿主 music_text_key 的活（测试环境没有那层 rust zhconv），按同一契约给替身。
+        to_simplified = {"葉": "叶", "倫": "伦"}
+        orig_key = mls._music_text_key
+        mls._music_text_key = staticmethod(
+            lambda value: "".join(to_simplified.get(ch, ch) for ch in str(value)))
+        try:
+            hits = mls.MusicLibraryScraper._field_hits(c, {
+                "title": "晴天", "artist": "周杰伦", "album": "叶惠美", "source": "local"})
+        finally:
+            mls._music_text_key = orig_key
+        self.assertEqual(hits["album"], "hit")
+        self.assertEqual(hits["artist"], "hit")
+
+    # ---------------- 故障与形状的区分 ----------------
+
+    def test_shape_change_is_a_fault_not_an_empty_answer(self):
+        """平台改版或被网关截了：要说成"这个源没给答案"，不能说成"曲库里查不到"。"""
+        for resource in mls._sources.RESOURCES:
+            cands, err = mls._sources.parse_candidates(resource, {"unexpected": True})
+            self.assertEqual(cands, [], resource)
+            self.assertEqual(err, mls._sources.API_ERROR, resource)
+
+    def test_empty_result_is_a_real_answer(self):
+        """正常的零命中是结论，不是故障：该按文件记失败、该烧重试额度。"""
+        empty = {"result": {"songs": []}}
+        self.assertEqual(mls._sources.parse_candidates("netease", empty), ([], None))
+
+    def test_unknown_source_builds_nothing(self):
+        self.assertIsNone(mls._sources.build_request("kuwo", "黑面-陈奕迅"))
+        self.assertEqual(
+            mls._sources.parse_candidates("kuwo", {}), ([], mls._sources.UNREACHABLE))
+        # 酷我与 smart_tag 只在 MTW 模式能问，这份边界要在源清单里说清楚
+        self.assertNotIn("kuwo", mls._sources.RESOURCES)
+        self.assertNotIn("smart_tag", mls._sources.RESOURCES)
+
+    # ---------------- 拉候选与后端派发 ----------------
+
+    def test_builtin_fetch_tags_resource_and_stops_at_perfect(self):
+        asked = []
+        p = self._plugin(resources=list(mls._sources.RESOURCES))
+        fp = self._track("晴天", "周杰伦", "叶惠美")
+        orig = mls.RequestUtils
+        mls.RequestUtils = self._answer(asked)
+        try:
+            cands, failure = p._builtin_fetch_candidates(fp)
+            # 满分候选（曲名+艺人+专辑全中）在第一个源就出现，后面的源不该再被问
+            self.assertIsNone(failure)
+            self.assertEqual([c["resource"] for c in cands], ["netease"])
+            self.assertEqual(len(asked), 1)
+        finally:
+            mls.RequestUtils = orig
+
+    def test_builtin_fetch_reports_transport_only_when_no_source_answered(self):
+        """全部源都连不上才是服务侧故障；只要有一个源答了空，就是"查不到"。"""
+        p = self._plugin()
+        fp = self._track("晴天")
+        orig = mls.RequestUtils
+        mls.RequestUtils = self._answer([], fail_urls=tuple(self._BY_URL.keys()))
+        try:
+            cands, failure = p._builtin_fetch_candidates(fp)
+        finally:
+            mls.RequestUtils = orig
+        self.assertEqual(cands, [])
+        self.assertEqual(failure, mls._BUILTIN_UNREACHABLE_REASON)
+
+    def test_builtin_shape_break_is_a_transport_fault_not_a_file_failure(self):
+        """所有源都返回认不出的形状（平台一起改版）要说成服务侧故障：当成"查不到"会让
+        整库烧满重试后永久跳过，而真正该做的是插件这边跟着改版把解析修好。"""
+        p = self._plugin()
+        fp = self._track("晴天")
+        orig = mls.RequestUtils
+        mls.RequestUtils = _ru(lambda url, body: _Resp(200, {"unexpected": True}))
+        try:
+            cands, failure = p._builtin_fetch_candidates(fp)
+        finally:
+            mls.RequestUtils = orig
+        self.assertEqual(cands, [])
+        self.assertEqual(failure, mls._BUILTIN_UNREACHABLE_REASON)
+
+    def test_one_answered_source_makes_shape_breaks_a_file_failure(self):
+        """有一个源正常答了空就是确定答案"查不到"：其余源改版不该拖成服务侧故障。"""
+        p = self._plugin()
+        fp = self._track("晴天")
+
+        def _handler(url, body):
+            if "music.163.com" in url:
+                return _Resp(200, {"result": {"songs": []}})
+            return _Resp(200, {"unexpected": True})
+
+        orig = mls.RequestUtils
+        mls.RequestUtils = _ru(_handler)
+        try:
+            cands, failure = p._builtin_fetch_candidates(fp)
+        finally:
+            mls.RequestUtils = orig
+        self.assertEqual(cands, [])
+        self.assertIsNone(failure)
+
+    def test_builtin_request_never_carries_the_library_path(self):
+        """MTW 模式会带 full_path；内置源只发检索词，库内目录结构不外传。"""
+        asked = []
+        p = self._plugin(resources=["netease"])
+        fp = self._track("晴天")
+        orig = mls.RequestUtils
+        mls.RequestUtils = self._answer(asked)
+        try:
+            p._builtin_fetch_candidates(fp)
+        finally:
+            mls.RequestUtils = orig
+        self.assertTrue(asked)
+        for url, body in asked:
+            self.assertNotIn(str(fp.parent), url)
+            self.assertNotIn(str(fp.parent), str(body))
+            self.assertNotIn("07 - ", str(body))
+        # 检索词是清洗后的曲名与艺人
+        self.assertIn("晴天", str(asked[0][1]))
+
+    def test_dispatcher_uses_mtw_only_when_backend_is_mtw(self):
+        p = self._plugin(backend="mtw")
+        seen = []
+        orig = p.__class__._mtw_fetch_candidates
+        orig_builtin = p.__class__._builtin_fetch_candidates
+        try:
+            p.__class__._mtw_fetch_candidates = lambda self, path, identity=None: (
+                seen.append("mtw") or ([], None))
+            p.__class__._builtin_fetch_candidates = lambda self, path, identity=None: (
+                seen.append("builtin") or ([], None))
+            p._fetch_candidates(self._track("晴天"))
+            p._backend = "builtin"
+            p._fetch_candidates(self._track("晴天"))
+        finally:
+            p.__class__._mtw_fetch_candidates = orig
+            p.__class__._builtin_fetch_candidates = orig_builtin
+        self.assertEqual(seen, ["mtw", "builtin"])
+
+    def test_auto_backend_follows_the_mtw_address(self):
+        """auto 是升级安全值：配过 MTW 地址的装机继续走 MTW，没配的走内置源。"""
+        _content, defaults = mls.MusicLibraryScraper().get_form()
+        base = {**defaults, "scraper_paths": "/music"}
+        with_mtw = mls.MusicLibraryScraper()
+        with_mtw.init_plugin({**base, "mtw_base_url": "http://mtw:8002"})
+        self.assertEqual(with_mtw._backend, "mtw")
+        without = mls.MusicLibraryScraper()
+        without.init_plugin(base)
+        self.assertEqual(without._backend, "builtin")
+        # 显式选择压过 auto 的判断：填着 MTW 地址也能强行用内置源
+        forced = mls.MusicLibraryScraper()
+        forced.init_plugin({**base, "mtw_base_url": "http://mtw:8002",
+                            "source_backend": "builtin"})
+        self.assertEqual(forced._backend, "builtin")
+        bad = mls.MusicLibraryScraper()
+        bad.init_plugin({**base, "source_backend": "nope"})
+        self.assertEqual(bad._source_backend, "auto")
+
+    def test_builtin_mode_never_touches_mtw_credentials(self):
+        """免部署的意义所在：没配 MTW 地址账密也能跑完整一轮，不戳 /apimt/token/。"""
+        asked = []
+        fp = self._track("晴天", "周杰伦", "叶惠美")
+        p = self._plugin(resources=["netease"], min_score=3)
+        p._scraper_paths = str(fp.parents[2])
+        p._exclude_paths = ""
+        p._force_all = False
+        orig_ru, orig_chain = mls.RequestUtils, mls._MusicScrapeChain
+        written = []
+
+        class _Chain:
+            def scrape_metadata(self, fileitem, mediainfo, overwrite=False):
+                written.append(mediainfo)
+                return True, "ok"
+
+        mls.RequestUtils = self._answer(asked)
+        mls._MusicScrapeChain = _Chain
+        try:
+            ok, reason, score, source = p._MusicLibraryScraper__scrape_file(fp)
+        finally:
+            mls.RequestUtils = orig_ru
+            mls._MusicScrapeChain = orig_chain
+        self.assertTrue(ok, reason)
+        self.assertEqual(source, "netease")
+        self.assertEqual(score, 3)
+        self.assertFalse(any("token" in url or "apimt" in url for url, _ in asked),
+                         [url for url, _ in asked])
+        # 候选真的变成了 MusicInfo：标题/艺人/专辑/封面都落进了写入链
+        info = written[0]
+        self.assertEqual((info.title, info.album), ("晴天", "叶惠美"))
+        self.assertEqual(info.artists, ["周杰伦", "杨瑞代"])
+        self.assertTrue(info.cover_url)
+
+    def test_no_candidate_reason_names_the_backend(self):
+        """两种后端的"查不到"要说成两句话，账本里的处置建议不一样。"""
+        orig = mls.RequestUtils
+        try:
+            p = self._plugin(resources=["netease"], backend="builtin")
+            mls.RequestUtils = _ru(lambda url, body: _Resp(200, {"result": {"songs": []}}))
+            ok, reason, _, _ = p._MusicLibraryScraper__scrape_file(self._track("晴天"))
+            self.assertFalse(ok)
+            self.assertEqual(reason, mls._BUILTIN_NO_CANDIDATE_REASON)
+
+            mtw = self._plugin(resources=["netease"], backend="mtw")
+            mls.RequestUtils = _ru(lambda url, body: _Resp(200, {"result": True, "data": []}))
+            ok, reason, _, _ = mtw._MusicLibraryScraper__scrape_file(self._track("晴天"))
+            self.assertFalse(ok)
+            # 存量账本里就是这句，升级不能把它改名改到统计分成两截
+            self.assertEqual(reason, "MTW 无候选")
+        finally:
+            mls.RequestUtils = orig
+
+    def test_builtin_scraper_keeps_only_supported_sources(self):
+        """旧配置里的酷我/smart_tag 在内置源里要安静地摘掉，不能每个文件白打一次失败请求。"""
+        p = self._plugin(resources=["kuwo", "netease", "smart_tag"])
+        self.assertEqual(p._active_resources, ["netease"])
+        # 整份配置只剩被忽略的那几个时，退回全部内置源而不是产出零候选
+        only_dropped = self._plugin(resources=["kuwo"])
+        self.assertEqual(only_dropped._active_resources, list(mls._sources.RESOURCES))
+
+    def test_builtin_transport_failure_does_not_burn_retries(self):
+        """内置源全挂时的分类与 MTW 故障一致：不写 failed 账、不涨 retries、能熔断。"""
+        names = [f"{i}.mp3" for i in range(mls._ABORT_AFTER_TRANSPORT)]
+        tmp = Path(tempfile.mkdtemp())
+        for name in names:
+            (tmp / name).write_bytes(b"x" * 100)
+        p = self._plugin(resources=["netease"])
+        p._scraper_paths = str(tmp)
+        p._exclude_paths = ""
+        p._force_all = False
+        p._MusicLibraryScraper__done = {}
+        orig_ru, orig_log = mls.RequestUtils, mls.logger
+        mls.RequestUtils = _ru(lambda url, body: None)
+        mls.logger = type("_L", (), {"__getattr__": lambda self, n: (lambda *a, **k: None)})()
+        try:
+            p._MusicLibraryScraper__scan()
+        finally:
+            mls.RequestUtils = orig_ru
+            mls.logger = orig_log
+        runs = p._load_runs()
+        self.assertEqual(runs["transport"], mls._ABORT_AFTER_TRANSPORT)
+        self.assertEqual(p._load_failed(), {})
+
+    def test_status_echoes_the_effective_backend(self):
+        """只回显 auto 等于什么都没回显：用户要看得见本轮到底在问平台还是问 MTW。"""
+        _content, defaults = mls.MusicLibraryScraper().get_form()
+        p = mls.MusicLibraryScraper()
+        p.init_plugin({**defaults, "scraper_paths": "/music"})
+        status = p._build_status()
+        self.assertEqual(status["config"]["source_backend"], "auto")
+        self.assertEqual(status["config"]["backend"], "builtin")
+        self.assertEqual(status["config"]["backend_label"], "内置源")
+        self.assertEqual(status["config"]["active_resource"], list(mls._sources.RESOURCES))
+        self.assertNotIn("mtw_password", status["config"])
 
 
 if __name__ == "__main__":

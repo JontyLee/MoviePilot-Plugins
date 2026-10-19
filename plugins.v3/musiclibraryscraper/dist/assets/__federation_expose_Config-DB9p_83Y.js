@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { F as FLOW_STEPS, _ as _export_sfc } from './_plugin-vue_export-helper-iTF4IZwH.js';
+import { F as FLOW_STEPS, _ as _export_sfc } from './_plugin-vue_export-helper-BRkMt5bj.js';
 
 const {defineComponent:_defineComponent} = await importShared('vue');
 
@@ -26,8 +26,10 @@ const _hoisted_15 = { class: "mls-block" };
 const _hoisted_16 = { class: "mls-block-title" };
 const _hoisted_17 = { class: "mls-pane" };
 const _hoisted_18 = { class: "text-caption text-grey" };
-const _hoisted_19 = { class: "mls-pane" };
-const _hoisted_20 = { class: "mls-actions" };
+const _hoisted_19 = { class: "mls-block" };
+const _hoisted_20 = { class: "text-caption text-grey" };
+const _hoisted_21 = { class: "mls-pane" };
+const _hoisted_22 = { class: "mls-actions" };
 const {ref,computed,onMounted} = await importShared('vue');
 const _sfc_main = /* @__PURE__ */ _defineComponent({
   __name: "Config",
@@ -50,6 +52,8 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       scraper_paths: "",
       exclude_paths: "",
       mtw_base_url: "",
+      // 识别来源默认 auto（与后端一致）：填过 MTW 地址的装机继续用 MTW，没填的用内置源
+      source_backend: "auto",
       mtw_username: "",
       mtw_password: "",
       mtw_resource: [],
@@ -81,7 +85,19 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       { title: "只补缺（推荐）", value: "" },
       { title: "强制覆盖已有标签", value: "force_all" }
     ];
-    const resourceItems = [
+    const backendItems = [
+      { title: "自动（填了 MTW 地址走 MTW，否则内置源）", value: "auto" },
+      { title: "内置源（免部署 Music Tag Web）", value: "builtin" },
+      { title: "Music Tag Web", value: "mtw" }
+    ];
+    const builtinResourceItems = [
+      { title: "网易云 netease", value: "netease" },
+      { title: "QQ 音乐 qmusic", value: "qmusic" },
+      { title: "酷狗 kugou", value: "kugou" },
+      { title: "咪咕 migu", value: "migu" },
+      { title: "MusicBrainz", value: "musicbrainz" }
+    ];
+    const mtwResourceItems = [
       { title: "网易云 netease", value: "netease" },
       { title: "QQ 音乐 qmusic", value: "qmusic" },
       { title: "酷我 kuwo", value: "kuwo" },
@@ -90,10 +106,28 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       { title: "MusicBrainz", value: "musicbrainz" },
       { title: "智能 smart_tag", value: "smart_tag" }
     ];
-    const ALL_SOURCES_TEXT = resourceItems.map((i) => i.title.split(" ")[0]).join(" / ");
-    const sourceNote = computed(
-      () => config.value.mtw_resource?.length ? `已选 ${config.value.mtw_resource.length} 个源，就按这个顺序问` : `留空 = 全部源（${ALL_SOURCES_TEXT}）`
+    const backend = computed(() => {
+      const raw = String(config.value.source_backend || "auto");
+      if (raw === "builtin" || raw === "mtw") return raw;
+      return String(config.value.mtw_base_url || "").trim() ? "mtw" : "builtin";
+    });
+    const isMtw = computed(() => backend.value === "mtw");
+    const resourceItems = computed(() => isMtw.value ? mtwResourceItems : builtinResourceItems);
+    const ignoredResources = computed(() => {
+      const known = resourceItems.value.map((i) => i.value);
+      return toResourceList(config.value.mtw_resource).filter((v) => !known.includes(v));
+    });
+    const ALL_SOURCES_TEXT = computed(
+      () => resourceItems.value.map((i) => i.title.split(" ")[0]).join(" / ")
     );
+    const sourceNote = computed(() => {
+      const picked = toResourceList(config.value.mtw_resource);
+      if (picked.length) {
+        const dropped = ignoredResources.value;
+        return `已选 ${picked.length} 个源，就按这个顺序问` + (dropped.length ? `；${dropped.join(" / ")} 只在另一侧来源有效，本轮会被忽略` : "");
+      }
+      return isMtw.value ? `留空 = 全部源（${ALL_SOURCES_TEXT.value}）` : `留空 = 内置源全部（${ALL_SOURCES_TEXT.value}）`;
+    });
     const modeNote = computed(
       () => config.value.mode === "force_all" ? "强制覆盖（当前）" : "只补缺（当前，推荐）"
     );
@@ -142,7 +176,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               _: 1
             }),
             _createElementVNode("div", _hoisted_2, [
-              _cache[12] || (_cache[12] = _createElementVNode("div", { class: "text-h6" }, "MusicTagWeb音乐库刮削 · 配置", -1)),
+              _cache[13] || (_cache[13] = _createElementVNode("div", { class: "text-h6" }, "MusicTagWeb音乐库刮削 · 配置", -1)),
               _createElementVNode("div", _hoisted_3, _toDisplayString(currentPane.value.desc), 1)
             ]),
             _createVNode(_component_v_spacer),
@@ -224,12 +258,12 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   density: "compact",
                   class: "mt-3"
                 }, {
-                  default: _withCtx(() => [..._cache[13] || (_cache[13] = [
+                  default: _withCtx(() => [..._cache[14] || (_cache[14] = [
                     _createElementVNode("div", { class: "text-body-2" }, "写进文件就回不去的三件事", -1),
                     _createElementVNode("ul", { class: "mls-list" }, [
                       _createElementVNode("li", null, "「最低匹配分数」调到 1 表示曲名对上就写入，翻唱、钢琴版、纯音乐同名都会被当成 原曲写进文件，且无法回滚。"),
                       _createElementVNode("li", null, "「强制覆盖」会替换手工改过的曲名/艺人/专辑/年份/轨道号，也会重新下载并内嵌封面。"),
-                      _createElementVNode("li", null, "MTW 与 MP 必须挂载同一份音乐库路径，否则查到的元数据会写到另一个文件上。")
+                      _createElementVNode("li", null, "识别来源选 MTW 时，MTW 与 MP 必须挂载同一份音乐库路径，否则查到的元数据会写到另一个文件上； 内置源不发库内路径，没有这个约束。")
                     ], -1)
                   ])]),
                   _: 1
@@ -275,11 +309,11 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                 }),
                 _createElementVNode("div", _hoisted_15, [
                   _createElementVNode("div", _hoisted_16, "写入模式 · " + _toDisplayString(modeNote.value), 1),
-                  _cache[14] || (_cache[14] = _createElementVNode("div", { class: "text-caption text-grey" }, " 只补缺：曲名+艺人+专辑+内嵌封面 四项齐全的文件按 mtime+size 记账直接跳过（不再请求 MTW）， 缺哪项补哪项，已有非空标签保持不动，手工修改不会被覆盖。 ", -1)),
-                  _cache[15] || (_cache[15] = _createElementVNode("div", { class: "text-caption text-grey" }, " 强制覆盖：每轮忽略增量账、全库重扫重问，候选与现有标签不同就重写，封面重新下载内嵌、歌词强制重写。 候选里没有的字段不会清空，插件不认识的自定义注释字段也不会删。 ", -1)),
-                  _cache[16] || (_cache[16] = _createElementVNode("div", { class: "text-caption text-grey" }, " 最终是否覆盖还取宿主「设置 → 媒体刮削」音乐三项策略与这里的较强者：宿主标签策略=覆盖时， 即使这里选只补缺也会重写；=跳过时，两种模式都不写该项。宿主默认 标签仅缺失、封面仅缺失、歌词更优才换。 ", -1))
+                  _cache[15] || (_cache[15] = _createElementVNode("div", { class: "text-caption text-grey" }, " 只补缺：曲名+艺人+专辑+内嵌封面 四项齐全的文件按 mtime+size 记账直接跳过（一个检索请求都不发）， 缺哪项补哪项，已有非空标签保持不动，手工修改不会被覆盖。 ", -1)),
+                  _cache[16] || (_cache[16] = _createElementVNode("div", { class: "text-caption text-grey" }, " 强制覆盖：每轮忽略增量账、全库重扫重问，候选与现有标签不同就重写，封面重新下载内嵌、歌词强制重写。 候选里没有的字段不会清空，插件不认识的自定义注释字段也不会删。 ", -1)),
+                  _cache[17] || (_cache[17] = _createElementVNode("div", { class: "text-caption text-grey" }, " 最终是否覆盖还取宿主「设置 → 媒体刮削」音乐三项策略与这里的较强者：宿主标签策略=覆盖时， 即使这里选只补缺也会重写；=跳过时，两种模式都不写该项。宿主默认 标签仅缺失、封面仅缺失、歌词更优才换。 ", -1))
                 ]),
-                _cache[17] || (_cache[17] = _createElementVNode("div", { class: "mls-block" }, [
+                _cache[18] || (_cache[18] = _createElementVNode("div", { class: "mls-block" }, [
                   _createElementVNode("div", { class: "mls-block-title" }, "执行周期"),
                   _createElementVNode("div", { class: "text-caption text-grey" }, " 留空按默认 0 3 * * sun（每周日 03:00）。星期编号按宿主的调度器算：0=周一…6=周日、7 视作周日， 和 crontab 的 0/7=周日 差一位；保存后数据页概览会回显「下次触发在周几」，以它为准。 "),
                   _createElementVNode("div", { class: "text-caption text-grey" }, " 非法表达式不会让插件挂掉：会记一条日志并回落默认值，但你自己配的时刻会一起丢掉。 ")
@@ -301,14 +335,14 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   default: _withCtx(() => [
                     _createVNode(_component_v_col, {
                       cols: "12",
-                      md: "8"
+                      md: "4"
                     }, {
                       default: _withCtx(() => [
-                        _createVNode(_component_v_text_field, {
-                          modelValue: config.value.mtw_base_url,
-                          "onUpdate:modelValue": _cache[4] || (_cache[4] = ($event) => config.value.mtw_base_url = $event),
-                          label: "Music Tag Web 地址",
-                          placeholder: "http://192.168.x.x:8001",
+                        _createVNode(_component_v_select, {
+                          modelValue: config.value.source_backend,
+                          "onUpdate:modelValue": _cache[4] || (_cache[4] = ($event) => config.value.source_backend = $event),
+                          items: backendItems,
+                          label: "识别来源",
                           "hide-details": ""
                         }, null, 8, ["modelValue"])
                       ]),
@@ -316,26 +350,24 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     }),
                     _createVNode(_component_v_col, {
                       cols: "12",
-                      md: "4"
+                      md: "8"
                     }, {
                       default: _withCtx(() => [
                         _createVNode(_component_v_text_field, {
-                          modelValue: config.value.min_score,
-                          "onUpdate:modelValue": _cache[5] || (_cache[5] = ($event) => config.value.min_score = $event),
-                          modelModifiers: { number: true },
-                          label: "最低匹配分数（1-3）",
-                          type: "number",
-                          min: "1",
-                          max: "3",
+                          modelValue: config.value.mtw_base_url,
+                          "onUpdate:modelValue": _cache[5] || (_cache[5] = ($event) => config.value.mtw_base_url = $event),
+                          label: isMtw.value ? "Music Tag Web 地址（MTW 模式必填）" : "Music Tag Web 地址（内置源不需要）",
+                          placeholder: "http://192.168.x.x:8001",
                           "hide-details": ""
-                        }, null, 8, ["modelValue"])
+                        }, null, 8, ["modelValue", "label"])
                       ]),
                       _: 1
                     })
                   ]),
                   _: 1
                 }),
-                _createVNode(_component_v_row, {
+                isMtw.value ? (_openBlock(), _createBlock(_component_v_row, {
+                  key: 0,
                   dense: "",
                   class: "mt-1"
                 }, {
@@ -372,35 +404,63 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     })
                   ]),
                   _: 1
+                })) : _createCommentVNode("", true),
+                _createVNode(_component_v_row, {
+                  dense: "",
+                  class: "mt-1"
+                }, {
+                  default: _withCtx(() => [
+                    _createVNode(_component_v_col, {
+                      cols: "12",
+                      md: "4"
+                    }, {
+                      default: _withCtx(() => [
+                        _createVNode(_component_v_text_field, {
+                          modelValue: config.value.min_score,
+                          "onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => config.value.min_score = $event),
+                          modelModifiers: { number: true },
+                          label: "最低匹配分数（1-3）",
+                          type: "number",
+                          min: "1",
+                          max: "3",
+                          "hide-details": ""
+                        }, null, 8, ["modelValue"])
+                      ]),
+                      _: 1
+                    })
+                  ]),
+                  _: 1
                 }),
                 _createVNode(_component_v_select, {
                   modelValue: config.value.mtw_resource,
-                  "onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => config.value.mtw_resource = $event),
-                  items: resourceItems,
-                  label: "MTW 识别源（可多选，留空=全部）",
+                  "onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => config.value.mtw_resource = $event),
+                  items: resourceItems.value,
+                  label: isMtw.value ? "MTW 识别源（可多选，留空=全部）" : "内置识别源（可多选，留空=全部）",
                   multiple: "",
                   chips: "",
                   "closable-chips": "",
                   density: "compact",
                   class: "mt-1"
-                }, null, 8, ["modelValue"]),
+                }, null, 8, ["modelValue", "items", "label"]),
                 _createElementVNode("div", _hoisted_18, _toDisplayString(sourceNote.value) + "。", 1),
-                _cache[18] || (_cache[18] = _createElementVNode("div", { class: "mls-block" }, [
-                  _createElementVNode("div", { class: "mls-block-title" }, "元数据来源"),
-                  _createElementVNode("div", { class: "text-caption text-grey" }, " 全部取自 Music Tag Web（MTW）的识别结果，插件不直连任何音乐平台。 qq / spotify / acoustid / all 实测恒返回空候选，没有列进来。 ")
-                ], -1)),
-                _cache[19] || (_cache[19] = _createElementVNode("div", { class: "mls-block" }, [
+                _createElementVNode("div", _hoisted_19, [
+                  _cache[19] || (_cache[19] = _createElementVNode("div", { class: "mls-block-title" }, "元数据来源", -1)),
+                  _createElementVNode("div", _hoisted_20, " 内置源：插件自己直连 " + _toDisplayString(builtinResourceItems.length) + " 个音乐平台的公开检索接口 （" + _toDisplayString(builtinResourceItems.map((i) => i.value).join(" / ")) + "），不需要为刮削单独部署 Music Tag Web； 发给平台的只有清洗后的「曲名-艺人」检索词，库内路径不出本机。 ", 1),
+                  _cache[20] || (_cache[20] = _createElementVNode("div", { class: "text-caption text-grey" }, " Music Tag Web：沿用 MTW 的识别结果，除了内置那几个源，还能用酷我与 smart_tag。 已经部署了 MTW 的装机选这条（或保持「自动」）行为与之前完全一致； 这条会把库内完整路径作为参考一起发给 MTW，所以 MTW 与 MP 必须挂同一份库。 ", -1)),
+                  _cache[21] || (_cache[21] = _createElementVNode("div", { class: "text-caption text-grey" }, " 两种来源都不请求歌词：歌词由宿主刮削链自己取（lrclib / AMLL）。 qq / spotify / acoustid / all 实测恒返回空候选，两种来源都没有列进来。 ", -1))
+                ]),
+                _cache[22] || (_cache[22] = _createElementVNode("div", { class: "mls-block" }, [
                   _createElementVNode("div", { class: "mls-block-title" }, "查询与选取"),
-                  _createElementVNode("div", { class: "text-caption text-grey" }, " 每个文件按源顺序逐源查询，某源出现 3/3 满分候选就立刻停止，不再问后面的源；都没满分则合并所有候选取最高分。 分数为曲名 / 艺人 / 专辑 各 1 分（先做繁简与大小写归一，互相包含即算命中）；同分时按源顺序、同源内按 MTW 返回顺序取第一个。最高分仍低于「最低匹配分数」（默认 3，即要求三项全中）就记为失败、不写入。 "),
+                  _createElementVNode("div", { class: "text-caption text-grey" }, " 每个文件按源顺序逐源查询，某源出现 3/3 满分候选就立刻停止，不再问后面的源；都没满分则合并所有候选取最高分。 分数为曲名 / 艺人 / 专辑 各 1 分（先做繁简与大小写归一，互相包含即算命中）；同分时按源顺序、同源内按来源 返回顺序取第一个。最高分仍低于「最低匹配分数」（默认 3，即要求三项全中）就记为失败、不写入。 "),
                   _createElementVNode("div", { class: "text-caption text-grey" }, " 这个阈值只在 1-3 之间生效，越界会按最近的一界执行。用于匹配的本地身份优先读文件已有的 tag， 缺哪项就按 艺人/专辑 (年)/NN - 曲名 的目录结构兜底；只有严格位于「音乐库路径」之下的目录才算艺人/专辑， 库根本身的名字不参与猜测 —— 猜不出来就留空，宁可判「未达阈值」也不拿目录名凑一个假身份去改写标签。 ")
                 ], -1))
               ], 512), [
                 [_vShow, pane.value === "match"]
               ]),
-              _withDirectives(_createElementVNode("div", _hoisted_19, [
+              _withDirectives(_createElementVNode("div", _hoisted_21, [
                 _createVNode(_component_v_textarea, {
                   modelValue: config.value.scraper_paths,
-                  "onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => config.value.scraper_paths = $event),
+                  "onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => config.value.scraper_paths = $event),
                   rows: 7,
                   label: "音乐库路径（一行一个目录）",
                   placeholder: "/media/music/周杰伦\n/media/music",
@@ -408,17 +468,17 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                 }, null, 8, ["modelValue"]),
                 _createVNode(_component_v_textarea, {
                   modelValue: config.value.exclude_paths,
-                  "onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => config.value.exclude_paths = $event),
+                  "onUpdate:modelValue": _cache[11] || (_cache[11] = ($event) => config.value.exclude_paths = $event),
                   rows: 3,
                   label: "排除路径",
                   "hide-details": "",
                   class: "mt-2"
                 }, null, 8, ["modelValue"]),
-                _cache[20] || (_cache[20] = _createElementVNode("div", { class: "mls-block" }, [
+                _cache[23] || (_cache[23] = _createElementVNode("div", { class: "mls-block" }, [
                   _createElementVNode("div", { class: "mls-block-title" }, "会处理的文件"),
                   _createElementVNode("div", { class: "text-caption text-grey" }, " 只扫描宿主音频白名单（设置 → 媒体刮削 → 音频扩展名）与本插件支持列表的交集：宿主不收的扩展名写标签时 会被原生刮削链直接拒成「刮削路径中没有支持的音频文件」，先排除掉才不会白打请求、又把文件记成失败并烧满重试次数。 "),
                   _createElementVNode("div", { class: "text-caption text-grey" }, " Jellyfin 的 .trickplay 预览缓存目录整棵跳过；目录软链不跟随，避免回环目录把这一轮卡死。 指向库外的音频软链同样会跳过并在日志里报数量 —— 写标签是按路径落到真实文件的， 让扫描改到音乐库之外的文件不可接受；确有需要请把它指向的目录也加进库路径。 "),
-                  _createElementVNode("div", { class: "text-caption text-grey" }, " 路径必须写到实际挂载的目录：只有严格位于「音乐库路径」之下的目录才按 艺人/专辑 解释， 库根本身的名字不算专辑名。同一份库需要 MTW 与 MP 挂载到相同路径。 ")
+                  _createElementVNode("div", { class: "text-caption text-grey" }, " 路径必须写到实际挂载的目录：只有严格位于「音乐库路径」之下的目录才按 艺人/专辑 解释， 库根本身的名字不算专辑名。识别来源用 MTW 时，同一份库还需要 MTW 与 MP 挂载到相同路径 （MTW 会收到完整路径作参考）；内置源不受这条约束。 ")
                 ], -1))
               ], 512), [
                 [_vShow, pane.value === "library"]
@@ -426,14 +486,14 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
             ])
           ]),
           _createVNode(_component_v_divider),
-          _createElementVNode("div", _hoisted_20, [
+          _createElementVNode("div", _hoisted_22, [
             _createVNode(_component_v_btn, {
               variant: "text",
               class: "text-none",
               "prepend-icon": "mdi-database-eye-outline",
-              onClick: _cache[11] || (_cache[11] = ($event) => emit("switch"))
+              onClick: _cache[12] || (_cache[12] = ($event) => emit("switch"))
             }, {
-              default: _withCtx(() => [..._cache[21] || (_cache[21] = [
+              default: _withCtx(() => [..._cache[24] || (_cache[24] = [
                 _createTextVNode(" 查看数据页 ", -1)
               ])]),
               _: 1
@@ -446,7 +506,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               class: "text-none",
               onClick: saveConfig
             }, {
-              default: _withCtx(() => [..._cache[22] || (_cache[22] = [
+              default: _withCtx(() => [..._cache[25] || (_cache[25] = [
                 _createTextVNode(" 保存配置 ", -1)
               ])]),
               _: 1
@@ -459,6 +519,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const Config = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-6e57b98b"]]);
+const Config = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-65b694dc"]]);
 
 export { Config as default };
