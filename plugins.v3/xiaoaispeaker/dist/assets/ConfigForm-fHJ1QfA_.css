@@ -1,0 +1,14 @@
+
+/* 仅插件内局部样式；不得写全局 v- 或 mdi- 类规则（构建有 postcss 门禁）。 */
+.xcf[data-v-4ea3903b] { width: 100%; display: flex; flex-direction: column;
+}
+.xcf-top[data-v-4ea3903b] { display: flex; align-items: center; gap: 10px; padding: 10px 16px; flex-wrap: wrap;
+}
+.xcf-body[data-v-4ea3903b] { padding: 4px 16px 12px;
+}
+.xcf-group[data-v-4ea3903b] { margin-bottom: 20px;
+}
+.xcf-group-title[data-v-4ea3903b] { font-size: 13px; font-weight: 600; margin-bottom: 8px; opacity: .8;
+}
+.xcf-actions[data-v-4ea3903b] { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+}

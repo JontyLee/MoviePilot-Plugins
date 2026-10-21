@@ -1,0 +1,264 @@
+<script setup lang="ts">
+import { ref, computed, inject, onMounted } from 'vue'
+import { type Status, type Device } from './types'
+
+interface HostToast {
+  error(msg: string): unknown
+  info(msg: string): unknown
+  success(msg: string): unknown
+  warning(msg: string): unknown
+}
+
+const props = defineProps({
+  api: { type: Object as () => MoviePilotApi, default: () => ({}) as any },
+  pluginId: { type: String, default: '' },
+  sourcePluginId: { type: String, default: '' },
+  // 侧栏全页没有「切换到配置页」这回事（配置就在这一页里），宿主也不接 AppPage 的 switch
+  canSwitch: { type: Boolean, default: false }
+})
+
+const emit = defineEmits(['switch', 'saved'])
+
+const base = computed(() => `plugin/${props.pluginId || props.sourcePluginId}`)
+const toast = inject<HostToast | null>('moviepilot:toast', null)
+const snackbar = ref({ show: false, text: '', color: 'info' })
+const saving = ref(false)
+const status = ref<Status | null>(null)
+const loaded = ref(false)
+
+// /config 只改传上来的字段、密码留空表示保留，所以草稿要按「服务端当前值」起头：
+// 直接用宿主存的配置会把已存的密码位置当成空，保存时一起写没。
+const form = ref<Record<string, any>>({
+  username: '',
+  password: '',
+  default_device_id: '',
+  music_dirs: '',
+  base_url: '',
+  play_mode: 'auto',
+  audio_exts: '',
+  audio_id: '',
+  stream_ttl: 3600,
+  default_volume: 0,
+  auto_next: true,
+  keep_light: false,
+  tts_announce: false
+})
+
+const playModeItems = [
+  { title: '自动（按型号白名单选接口）', value: 'auto' },
+  { title: 'player_play_url（直链电台式）', value: 'url' },
+  { title: 'player_play_music（走小米曲库）', value: 'music' }
+]
+
+const cfg = computed(() => status.value?.config)
+const devices = computed<Device[]>(() => status.value?.devices || [])
+
+// 候选来自服务端刚取到的设备；配置里那台已经不在这个账号的列表里时，选中项会被 v-select
+// 显示成裸 ID，所以另加一句提示，别让人以为设备还在。
+const deviceItems = computed(() => [
+  { title: '留空（第一台在线设备）', value: '' },
+  ...devices.value.map(d => ({
+    title: `${d.name || d.alias || d.device_id}${d.presence === 'online' ? '' : '（离线）'}`,
+    value: d.device_id
+  }))
+])
+
+const enabledText = computed(() => {
+  if (!loaded.value) return '读取中'
+  return cfg.value?.enabled ? '已启用' : '已停用（在插件管理页打开）'
+})
+
+function notify(msg: string, color = 'info') {
+  if (toast) {
+    const fn = (toast as any)[color] || toast.info
+    fn.call(toast, msg)
+    return
+  }
+  snackbar.value = { show: true, text: msg, color }
+}
+
+function fillFromStatus(data: Status) {
+  status.value = data
+  const c = (data?.config || {}) as any
+  form.value = {
+    ...form.value,
+    username: c.username || '',
+    // 密码永不回显：留空即「不改动」，由服务端的 if password 判掉
+    password: '',
+    default_device_id: c.default_device_id || '',
+    music_dirs: c.music_dirs || '',
+    base_url: c.base_url || '',
+    play_mode: c.play_mode || 'auto',
+    audio_exts: c.audio_exts || '',
+    audio_id: c.audio_id || '',
+    stream_ttl: c.stream_ttl ?? 3600,
+    default_volume: c.default_volume ?? 0,
+    auto_next: c.auto_next !== false,
+    keep_light: !!c.keep_light,
+    tts_announce: !!c.tts_announce
+  }
+}
+
+async function loadConfig() {
+  try {
+    fillFromStatus(await (props.api as MoviePilotApi).get(`${base.value}/status`))
+    loaded.value = true
+  } catch (e: any) {
+    notify(`配置读取失败：${e?.message || e}`, 'error')
+  }
+}
+
+async function save() {
+  saving.value = true
+  try {
+    const body: Record<string, any> = { ...form.value }
+    if (!body.password) delete body.password
+    fillFromStatus(await (props.api as MoviePilotApi).post(`${base.value}/config`, body))
+    notify('配置已保存', 'success')
+    emit('saved')
+  } catch (e: any) {
+    notify(`保存失败：${e?.message || e}`, 'error')
+  } finally {
+    saving.value = false
+  }
+}
+
+onMounted(loadConfig)
+
+defineExpose({ loadConfig, save })
+</script>
+
+<template>
+  <div class="xcf">
+    <div class="xcf-top">
+      <v-chip size="small" variant="tonal" :color="cfg?.enabled ? 'success' : 'grey'">
+        {{ enabledText }}
+      </v-chip>
+      <span class="text-caption text-grey">
+        侧栏入口与启用开关在「插件管理 → 小爱音箱」里改，这里改了不会让侧栏立刻出现或消失
+      </span>
+      <v-spacer />
+      <v-btn size="small" variant="text" class="text-none" prepend-icon="mdi-refresh"
+             @click="loadConfig">重新读取</v-btn>
+    </div>
+
+    <div class="xcf-body">
+      <div class="xcf-group">
+        <div class="xcf-group-title">小米账号</div>
+        <v-alert type="info" variant="tonal" density="compact" class="mb-3">
+          这里只保存账密与设备偏好；<b>登录本身（含图形验证码 / 二次校验）在「账号与设备」那一栏做</b>，
+          改完账号密码后重新登录才会生效。
+        </v-alert>
+        <v-row dense>
+          <v-col cols="12" md="6">
+            <v-text-field v-model="form.username" label="小米账号（手机号 / 邮箱 / 账号ID）" hide-details />
+          </v-col>
+          <v-col cols="12" md="6">
+            <v-text-field v-model="form.password" :type="form.password ? 'text' : 'password'"
+                          :label="cfg?.password_set ? '密码（留空保留已存的）' : '密码'" hide-details />
+          </v-col>
+        </v-row>
+        <div class="text-caption text-grey mt-1">
+          票据只存在本机插件数据里，任何接口都不回显明文。账密登不上时可以在「账号与设备」里粘贴 cookie 票据。
+        </div>
+      </div>
+
+      <div class="xcf-group">
+        <div class="xcf-group-title">音箱</div>
+        <v-select v-model="form.default_device_id" :items="deviceItems" label="默认音箱"
+                  hide-details placeholder="留空则用第一台在线设备" />
+        <div class="text-caption text-grey mt-1">
+          {{ devices.length ? `已取到 ${devices.length} 台设备` : '还没取到设备列表：登录后这里才会填充候选' }}
+          <template v-if="cfg?.default_device_id && !devices.some(d => d.device_id === cfg?.default_device_id)">
+            ｜当前配置的默认音箱不在列表里，操作会回落到在线设备
+          </template>
+        </div>
+        <div class="d-flex mt-3" style="gap: 16px; flex-wrap: wrap">
+          <v-switch v-model="form.auto_next" color="success" hide-details inset label="队列自动连播" />
+          <v-switch v-model="form.keep_light" color="success" hide-details inset label="播放时常亮" />
+          <v-switch v-model="form.tts_announce" color="success" hide-details inset label="连播时先播报下一曲" />
+        </div>
+      </div>
+
+      <div class="xcf-group">
+        <div class="xcf-group-title">音乐库与直链</div>
+        <v-textarea v-model="form.music_dirs" :rows="3" hide-details
+                    label="音乐库路径（一行一个目录，只有这些目录里的文件可被列出与播放）"
+                    placeholder="/media/music&#10;/nas/music" />
+        <div v-if="cfg && cfg.dir_count" class="text-caption text-grey mt-1">
+          当前生效 {{ cfg.dir_count }} 个目录
+          <template v-if="cfg.missing_dirs.length">｜读不到：{{ cfg.missing_dirs.join('、') }}</template>
+        </div>
+        <v-row dense class="mt-2">
+          <v-col cols="12" md="7">
+            <v-text-field v-model="form.base_url" hide-details
+                          label="外部访问地址（音箱能访问到的 MP 地址）"
+                          placeholder="http://192.168.1.10:3000，留空用主程序设置" />
+          </v-col>
+          <v-col cols="12" md="5">
+            <v-select v-model="form.play_mode" :items="playModeItems" label="播放接口" hide-details />
+          </v-col>
+        </v-row>
+        <div class="text-caption text-grey mt-1">
+          实际使用：{{ cfg?.base_url_effective || '拿不到可用地址（音箱必然拉不到流）' }}
+          <template v-if="cfg?.base_url_source">｜来自 {{ cfg.base_url_source }}</template>
+        </div>
+        <v-row dense class="mt-2">
+          <v-col cols="12" md="4">
+            <v-text-field v-model.number="form.default_volume" type="number" min="0" max="100" hide-details
+                          label="播放前设置音量（0=不改）" />
+          </v-col>
+          <v-col cols="12" md="4">
+            <v-text-field v-model.number="form.stream_ttl" type="number" min="300" max="259200" hide-details
+                          label="直链有效期（秒）" />
+          </v-col>
+          <v-col cols="12" md="4">
+            <v-text-field v-model="form.audio_exts" hide-details label="可播放扩展名（留空用默认）"
+                          placeholder="mp3 m4a aac flac wav ogg opus wma" />
+          </v-col>
+        </v-row>
+        <v-row dense class="mt-2">
+          <v-col cols="12" md="6">
+            <v-text-field v-model="form.audio_id" hide-details label="play_music audioID（留空用默认）" />
+          </v-col>
+        </v-row>
+      </div>
+
+      <div class="xcf-group">
+        <div class="xcf-group-title">两条最容易踩的坑</div>
+        <div class="text-caption text-grey">
+          「外部访问地址」必须是音箱所在网段连得到的 IP 或域名，不能是 127.0.0.1，也不能是
+          MP 容器自己看的地址 —— 这一项填错是「点了没声音」最常见的原因。
+        </div>
+        <div class="text-caption text-grey mt-1">
+          直链由插件用本机随机密钥签名并带有效期，只有落在上面这些库目录内的音频能被取到；
+          换密钥会让已经发出去的链接一起失效，这是有意的，不做兼容层。
+        </div>
+      </div>
+    </div>
+
+    <div class="xcf-actions">
+      <v-btn v-if="props.canSwitch" variant="text" class="text-none" prepend-icon="mdi-speaker"
+             @click="emit('switch')">查看播放台
+      </v-btn>
+      <v-spacer />
+      <v-btn color="primary" variant="flat" prepend-icon="mdi-content-save" class="text-none"
+             :loading="saving" @click="save">保存配置
+      </v-btn>
+    </div>
+
+    <v-snackbar v-model="snackbar.show" :color="snackbar.color" timeout="3500" location="bottom">
+      {{ snackbar.text }}
+    </v-snackbar>
+  </div>
+</template>
+
+<style scoped>
+/* 仅插件内局部样式；不得写全局 v- 或 mdi- 类规则（构建有 postcss 门禁）。 */
+.xcf { width: 100%; display: flex; flex-direction: column; }
+.xcf-top { display: flex; align-items: center; gap: 10px; padding: 10px 16px; flex-wrap: wrap; }
+.xcf-body { padding: 4px 16px 12px; }
+.xcf-group { margin-bottom: 20px; }
+.xcf-group-title { font-size: 13px; font-weight: 600; margin-bottom: 8px; opacity: .8; }
+.xcf-actions { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
+</style>

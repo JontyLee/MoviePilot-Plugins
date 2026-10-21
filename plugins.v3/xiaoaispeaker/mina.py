@@ -1,0 +1,813 @@
+"""
+mina.py — 小米账号登录 + 小爱音箱（Mina/MIoT）云端控制协议。
+
+出处与许可：本模块把 Songloft「智能音箱」插件 songloft-plugin-miot
+（https://github.com/songloft-org/songloft-plugin-miot ，Apache-2.0 © 2026 hanxi，
+TypeScript/QuickJS）的小米云端接入约定移植到 Python：登录三步流程、clientSign 算法、
+ubus 请求体、设备型号白名单与 play_music 载荷都按它的契约实现，并按 Yonsm/MiService（MIT）与
+Music Tag Web（GPL-3.0，其小米协议本身转调 miservice）的同类实现交叉核对。
+两处与 miot 取值不一致的地方在对应位置的注释里点明。移植而非复制：语言、运行时、
+错误处理与网络层都是本仓库自己的写法（宿主 RequestUtils + requests 会话）。
+上游只在 README 与 plugin.json 里声明 Apache-2.0、仓库内没有 LICENSE 正文，本目录的
+LICENSE.upstream-songloft-miot.txt 用的是 apache.org 的规范全文（未改动一个字），
+并按 Apache-2.0 4(b) 在此声明这些约定经过修改与重写；本仓库整体是 GPL-3.0，
+Apache-2.0 与 GPL-3.0 单向兼容，所以在保留上述声明与正文的前提下可以合进本仓库。
+
+不实现的部分（有意省略，不是遗漏）：
+- MiIO/MIoT RPC（api.io.mi.com 的签名请求）：miot 只用它在特定型号上走
+  `siid-aiid` 的 TTS action，普通 `mibrain/text_to_speech` 已经能播报；签名链路
+  需要额外的 xiaomiio serviceToken 与 HMAC 细节，收益不抵复杂度。
+- 触屏歌词的 /music/search audioID 匹配：需要型号白名单命中且用户开歌词模式，
+  默认走 player_play_url 与固定 audioID。
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import random
+import re
+import string
+import time
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, quote, unquote, urlparse
+
+from app.sdk.logging import logger
+from app.sdk.network import RequestUtils
+
+# ---------------- 常量（与 miot mina/constants.ts 一致） ----------------
+
+ACCOUNT_BASE_URL = "https://account.xiaomi.com"
+MINA_API_BASE_URL = "https://api2.mina.mi.com"
+MINA_SID = "micoapi"
+
+# 登录 UA 里的 %s 由 deviceId 填充（Android 米家客户端）
+USER_AGENT_TEMPLATE = "Android-7.1.1-1.0.0-ONEPLUS A3010-136-%s APP/xiaomi.smarthome APPV/62830"
+
+# 小米云接口把 JSON 前面拼了这一段，直接 json.loads 会失败
+JSON_PREFIX = "&&&START&&&"
+
+SERVICE_TOKEN_VALID_HOURS = 12
+
+# passToken 是长期票据：serviceToken 过期时用它静默换新的，不用用户重填账密
+PASS_TOKEN_VALID_DAYS = 30
+
+# 播放走云端 ubus，慢的时候能到十几秒；太短的超时会被当成设备离线
+HTTP_TIMEOUT = 20
+
+# 需要走 player_play_music 的型号（miot DEFAULT_MUSIC_API_MODELS）。
+# miservice 的那份是这里的子集，取更全的这份；配不准时用 play_mode="url" 覆盖。
+MUSIC_API_MODELS: Tuple[str, ...] = (
+    "X08C", "X08E", "X8F", "X4B", "LX05", "OH11", "OH2", "OH2P", "X6A",
+    "LX04", "L05B", "L05C", "LX06", "L06A", "X08A", "X10A", "L15A", "L16A", "L17A",
+)
+
+# play_music 的默认 audioID：决定封面/歌词归属的云端条目，两家实现给的值不同
+# （miot 1732418460076477549 / miservice 1582971365183456177），取 miot 的这份，
+# 并在配置里可改 —— 选错顶多是触屏不显示封面，不影响出声。
+DEFAULT_MUSIC_AUDIO_ID = "1732418460076477549"
+MUSIC_CP_ID = "355454500"
+
+# player_get_play_status 的 status 语义：0 停止、1 播放中、2 暂停
+PLAY_STATUS_STOPPED = 0
+PLAY_STATUS_PLAYING = 1
+PLAY_STATUS_PAUSED = 2
+
+LOGIN_SUCCESS = "success"
+LOGIN_NEED_CAPTCHA = "need_captcha"
+LOGIN_NEED_VERIFY = "need_verify"
+LOGIN_FAILED = "failed"
+
+
+class MinaError(Exception):
+    """小米云端返回的业务失败（含鉴权失效），调用方据此决定重试或重新登录。"""
+
+
+class MinaAuthError(MinaError):
+    """票据失效：401 或响应明确说没权限，需要重新登录或刷新 serviceToken。"""
+
+
+def generate_device_id() -> str:
+    """生成 16 位大写设备标识，登录与 UA 都要用。
+
+    必须持久化：每次登录换一个新 deviceId，小米风控更容易要验证码，
+    passToken 也会跟着票据上下文一起废掉。
+    """
+    alphabet = string.ascii_uppercase + string.digits
+    return "".join(random.choice(alphabet) for _ in range(16))
+
+
+def _md5_upper(text: str) -> str:
+    """小米登录要求的密码哈希：MD5 十六进制大写。"""
+    return hashlib.md5(text.encode("utf-8")).hexdigest().upper()
+
+
+def _client_sign(nonce: Any, ssecurity: str) -> str:
+    """clientSign = base64(sha1("nonce={nonce}&{ssecurity}"))。"""
+    raw = f"nonce={nonce}&{ssecurity}".encode("utf-8")
+    return base64.b64encode(hashlib.sha1(raw).digest()).decode("utf-8")
+
+
+def _strip_prefix(text: str) -> str:
+    return (text or "").replace(JSON_PREFIX, "").strip()
+
+
+def _parse_json(text: str) -> Optional[Dict[str, Any]]:
+    try:
+        data = json.loads(_strip_prefix(text))
+    except (TypeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _request_id() -> str:
+    """ubus 的 requestId，形如 app_ios_ + 30 位随机串。"""
+    alphabet = string.ascii_lowercase + string.digits
+    return "app_ios_" + "".join(random.choice(alphabet) for _ in range(30))
+
+
+def _form_body(params: Dict[str, Any]) -> str:
+    return "&".join(f"{quote(str(k))}={quote(str(v))}" for k, v in params.items())
+
+
+def _cookie_value(cookies: Dict[str, str], name: str) -> str:
+    value = cookies.get(name) or ""
+    return value.strip('"')
+
+
+def _collect_cookies(response: Any, cookies: Dict[str, str]) -> None:
+    """把响应里的 Set-Cookie 并进调用方维护的 cookie 表。
+
+    只用 requests 的 resp.cookies 不够：手动跟随重定向时，中间跳（尤其是签发
+    serviceToken/passToken 的那一跳）的 cookie 必须逐跳收下来，否则最后拿不到票据。
+    """
+    try:
+        for key, value in (getattr(response, "cookies", {}) or {}).items():
+            cookies[key] = str(value)
+    except Exception:  # pragma: no cover - 极端情况下 cookie jar 不是映射
+        pass
+    for header in response.headers.get("Set-Cookie", "").split(", "):
+        if not header or "=" not in header:
+            continue
+        pair = header.split(";")[0]
+        name, _, value = pair.partition("=")
+        if name:
+            cookies[name.strip()] = value.strip('"')
+
+
+def _redirect_target(response: Any, current_url: str) -> Optional[str]:
+    location = response.headers.get("Location") or ""
+    if not location:
+        return None
+    if location.startswith("http"):
+        return location
+    if location.startswith("/"):
+        parsed = urlparse(current_url)
+        return f"{parsed.scheme}://{parsed.netloc}{location}"
+    base = current_url.rsplit("/", 1)[0]
+    return f"{base}/{location}"
+
+
+class XiaoaiAuth:
+    """小米账号登录状态机。
+
+    一次登录可能停在三个地方：直接成功、要图形验证码、要手机/邮箱验证码。
+    验证码不是「重试一次就好」的分支 —— 实例必须活着跨到用户把码填回来，
+    所以这里把中间态（step1 的 _sign/qs/callback、ick、verifyUrl、已收的 cookie）
+    都存在 self 上，由插件持有实例本身。
+    """
+
+    def __init__(self, username: str, password: str, device_id: str = "") -> None:
+        self.username = username
+        self.password = password
+        self.device_id = device_id or generate_device_id()
+        self.user_agent = USER_AGENT_TEMPLATE % self.device_id
+        self.cookies: Dict[str, str] = {
+            "sdkVersion": "3.8.6",
+            "deviceId": self.device_id,
+        }
+        self._step1: Dict[str, Any] = {}
+        self._captcha_url: str = ""
+        self._verify_url: str = ""
+        self._ssecurity: str = ""
+        self._user_id: str = ""
+        self._location: str = ""
+
+    # ---------------- 请求 ----------------
+
+    def _get(self, url: str, allow_redirects: bool = False) -> Any:
+        return RequestUtils(
+            headers={"User-Agent": self.user_agent},
+            cookies=dict(self.cookies),
+            timeout=HTTP_TIMEOUT,
+        ).get_res(url, allow_redirects=allow_redirects, raise_exception=False)
+
+    def _post(self, url: str, params: Dict[str, Any]) -> Any:
+        return RequestUtils(
+            headers={
+                "User-Agent": self.user_agent,
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            cookies=dict(self.cookies),
+            timeout=HTTP_TIMEOUT,
+        ).post_res(url, data=_form_body(params), allow_redirects=False,
+                    raise_exception=False)
+
+    def _follow(self, url: str, max_hops: int = 10) -> None:
+        """跟随重定向链，只为了收集每一跳的 cookie（passToken/serviceToken）。"""
+        current = url
+        for _ in range(max_hops):
+            response = self._get(current)
+            if response is None:
+                return
+            _collect_cookies(response, self.cookies)
+            if response.status_code not in (301, 302, 303, 307, 308):
+                return
+            current = _redirect_target(response, current)
+            if not current:
+                return
+
+    # ---------------- 登录流程 ----------------
+
+    def login(self) -> Tuple[str, Optional[Dict[str, Any]], str]:
+        """开始登录，返回 (state, token, message)。"""
+        step1 = self._step1_login()
+        if step1 is None:
+            return LOGIN_FAILED, None, "获取小米登录签名失败（网络或接口变更）"
+        self._step1 = step1
+        return self._step2_login("")
+
+    def submit_captcha(self, code: str) -> Tuple[str, Optional[Dict[str, Any]], str]:
+        """提交图形验证码后继续第二步。"""
+        if not self._step1:
+            return LOGIN_FAILED, None, "验证码会话已过期，请重新发起登录"
+        self._captcha_url = ""
+        return self._step2_login(code)
+
+    def submit_verify_code(self, code: str) -> Tuple[str, Optional[Dict[str, Any]], str]:
+        """提交手机/邮箱验证码：验票据 → 收 passToken → 换 serviceToken。"""
+        if not self._verify_url:
+            return LOGIN_FAILED, None, "没有待验证的二次校验会话，请重新发起登录"
+        location = self._verify_ticket(code)
+        if not location:
+            return LOGIN_NEED_VERIFY, None, "验证码不正确或已失效"
+        self._follow(location)
+        self._verify_url = ""
+        state, token, message = self._service_login()
+        if state == LOGIN_SUCCESS:
+            message = "二次校验通过，登录成功"
+        return state, token, message
+
+    @classmethod
+    def from_token(cls, token: Dict[str, Any]) -> "XiaoaiAuth":
+        """从存档票据恢复会话：只为拿 passToken 做静默续期，不需要账密。"""
+        token = token or {}
+        mina = (token.get("services") or {}).get(MINA_SID) or {}
+        auth = cls(
+            username=str(token.get("username") or ""),
+            password="",
+            device_id=str(token.get("device_id") or ""),
+        )
+        auth._user_id = str(token.get("user_id") or "")
+        auth._ssecurity = str(mina.get("ssecurity") or "")
+        for name, value in (("passToken", token.get("pass_token")),
+                            ("cUserId", token.get("c_user_id")),
+                            ("userId", auth._user_id)):
+            if value:
+                auth.cookies[str(name)] = str(value)
+        return auth
+
+    def refresh(self) -> Tuple[str, Optional[Dict[str, Any]], str]:
+        """用 passToken 静默换一个新的 serviceToken。"""
+        if not _cookie_value(self.cookies, "passToken"):
+            return (LOGIN_FAILED, None,
+                    "本地没有 passToken，无法静默续期，请填写账号密码重新登录")
+        return self._service_login()
+
+    def _step1_login(self) -> Optional[Dict[str, Any]]:
+        url = f"{ACCOUNT_BASE_URL}/pass/serviceLogin?sid={MINA_SID}&_json=true"
+        response = self._get(url)
+        if response is None:
+            return None
+        _collect_cookies(response, self.cookies)
+        return _parse_json(response.text or "")
+
+    def _step2_login(self, captcha: str) -> Tuple[str, Optional[Dict[str, Any]], str]:
+        url = f"{ACCOUNT_BASE_URL}/pass/serviceLoginAuth2?_json=true"
+        params: Dict[str, Any] = {
+            "user": self.username,
+            "hash": _md5_upper(self.password),
+            "callback": self._step1.get("callback") or "",
+            "sid": self._step1.get("sid") or MINA_SID,
+            "qs": self._step1.get("qs") or "",
+            "_sign": self._step1.get("_sign") or "",
+        }
+        if captcha:
+            params["captCode"] = captcha
+        response = self._post(url, params)
+        if response is None:
+            return LOGIN_FAILED, None, "小米登录请求失败（网络或风控）"
+        _collect_cookies(response, self.cookies)
+        data = _parse_json(response.text or "")
+        if not data:
+            return LOGIN_FAILED, None, "小米登录响应无法解析"
+
+        # 二次校验（手机/邮箱验证码）
+        notification = data.get("notificationUrl")
+        if notification:
+            self._verify_url = self._abs_url(notification)
+            channel = "邮箱" if "email" in self._verify_url else "手机"
+            return (LOGIN_NEED_VERIFY, None,
+                    f"小米要求{channel}二次校验，请查收验证码后填写")
+
+        # 图形验证码：兼容小米返回过的多种字段名
+        captcha_raw = ""
+        for field in ("captchaUrl", "captchaURL", "captcha_url", "captcha", "imgUrl"):
+            value = data.get(field)
+            if isinstance(value, str) and value.strip():
+                captcha_raw = value.strip()
+                break
+        if captcha_raw:
+            self._captcha_url = self._abs_url(captcha_raw)
+            image = self._fetch_captcha(self._captcha_url)
+            hint = "小米要求图形验证码，请在下方填写"
+            if not image:
+                hint = "小米要求图形验证码，但图片获取失败（见插件日志），可重试登录"
+            return (LOGIN_NEED_CAPTCHA, {"captcha_image": image}, hint)
+
+        location = data.get("location")
+        if not location:
+            return (LOGIN_FAILED, None,
+                    f"登录失败：code={data.get('code')}, desc={data.get('description')}")
+
+        self._ssecurity = str(data.get("ssecurity") or "")
+        self._user_id = str(data.get("userId") or "")
+        # 没有 location 的尾段会缺 clientSign 参数，这里按 miot 的拼法补
+        self._location = self._append_params(location, {
+            "_userIdNeedEncrypt": "true",
+            "clientSign": _client_sign(data.get("nonce"), self._ssecurity),
+        })
+        return self._step3_login()
+
+    def _step3_login(self) -> Tuple[str, Optional[Dict[str, Any]], str]:
+        """跟随 location 的重定向链，从 cookie 收 serviceToken。"""
+        if not self._location:
+            return LOGIN_FAILED, None, "登录会话已过期，请重新发起登录"
+        service_token = ""
+        current = self._location
+        for _ in range(10):
+            response = self._get(current)
+            if response is None:
+                break
+            _collect_cookies(response, self.cookies)
+            hop_token = _cookie_value(self.cookies, "serviceToken")
+            if hop_token:
+                service_token = hop_token
+            if response.status_code not in (301, 302, 303, 307, 308):
+                break
+            current = _redirect_target(response, current)
+            if not current:
+                break
+        return self._finish(service_token, "登录成功")
+
+    def _service_login(self) -> Tuple[str, Optional[Dict[str, Any]], str]:
+        """用 passToken 换 serviceToken（serviceToken 会到期，passToken 不会）。"""
+        pass_token = _cookie_value(self.cookies, "passToken")
+        if not pass_token:
+            return (LOGIN_FAILED, None,
+                    "缺少 passToken，无法静默续期，请重新输入账密登录")
+        url = f"{ACCOUNT_BASE_URL}/pass/serviceLogin?sid={MINA_SID}&_json=true"
+        self.cookies.update({
+            "passToken": pass_token,
+            "deviceId": self.device_id,
+            "sdkVersion": "3.8.6",
+        })
+        response = self._get(url)
+        if response is None:
+            return LOGIN_FAILED, None, "静默续期请求失败"
+        _collect_cookies(response, self.cookies)
+        data = _parse_json(response.text or "")
+        if not data or int(data.get("code") or 0) != 0:
+            return (LOGIN_FAILED, None,
+                    f"静默续期失败：desc={(data or {}).get('desc') or '未知原因'}")
+        location = data.get("location")
+        if not location:
+            return LOGIN_FAILED, None, "静默续期没有返回跳转地址"
+        ssecurity = str(data.get("ssecurity") or "")
+        if data.get("userId"):
+            self._user_id = str(data.get("userId"))
+        self._location = self._append_params(location, {
+            "_userIdNeedEncrypt": "true",
+            "clientSign": _client_sign(data.get("nonce"), ssecurity),
+        })
+        self._ssecurity = ssecurity or self._ssecurity
+        service_token = ""
+        current = self._location
+        for _ in range(10):
+            response = self._get(current)
+            if response is None:
+                break
+            _collect_cookies(response, self.cookies)
+            hop_token = _cookie_value(self.cookies, "serviceToken")
+            if hop_token:
+                service_token = hop_token
+            if response.status_code not in (301, 302, 303, 307, 308):
+                break
+            current = _redirect_target(response, current)
+            if not current:
+                break
+        return self._finish(service_token, "已用 passToken 静默续期")
+
+    def _finish(self, service_token: str, ok_message: str) -> Tuple[str, Optional[Dict[str, Any]], str]:
+        if not service_token:
+            return LOGIN_FAILED, None, "没有取到 serviceToken（登录被风控或未通过验证）"
+        self._user_id = self._user_id or _cookie_value(self.cookies, "userId")
+        token = {
+            "username": self.username,
+            "user_id": self._user_id,
+            "device_id": self.device_id,
+            "services": {
+                MINA_SID: {
+                    "service_token": service_token,
+                    "ssecurity": self._ssecurity,
+                    "expires_at": time.time() + SERVICE_TOKEN_VALID_HOURS * 3600,
+                }
+            },
+            "pass_token": _cookie_value(self.cookies, "passToken"),
+            "c_user_id": _cookie_value(self.cookies, "cUserId"),
+            "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        return LOGIN_SUCCESS, token, ok_message
+
+    def _fetch_captcha(self, url: str) -> str:
+        """取验证码图片，返回 data URI；同时收下 ick（提交验证码要带）。"""
+        try:
+            response = RequestUtils(
+                headers={"User-Agent": self.user_agent},
+                cookies=dict(self.cookies),
+                timeout=HTTP_TIMEOUT,
+            ).get_res(url, allow_redirects=False, raise_exception=False)
+        except Exception as err:  # pragma: no cover - 网络层异常形状不固定
+            logger.warning(f"[xiaoai] 验证码图片请求异常: {err}")
+            return ""
+        if response is None:
+            return ""
+        _collect_cookies(response, self.cookies)
+        raw = response.content or b""
+        if not raw:
+            return ""
+        return "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
+
+    def _verify_ticket(self, code: str) -> str:
+        """提交短信/邮箱验证码，成功时返回后续跳转地址。"""
+        is_email = "email" in (self._verify_url or "")
+        api = "/identity/auth/verifyEmail" if is_email else "/identity/auth/verifyPhone"
+        flag = "8" if is_email else "4"
+        url = f"{ACCOUNT_BASE_URL}{api}?_dc={int(time.time() * 1000)}"
+        response = self._post(url, {
+            "ticket": code,
+            "trust": "true",
+            "_json": "true",
+            "_flag": flag,
+        })
+        if response is None:
+            return ""
+        _collect_cookies(response, self.cookies)
+        data = _parse_json(response.text or "")
+        if not data or int(data.get("code") or 0) != 0:
+            return ""
+        location = data.get("location")
+        return self._abs_url(location) if location else ""
+
+    @staticmethod
+    def _abs_url(value: str) -> str:
+        value = (value or "").strip()
+        if not value:
+            return ""
+        if value.startswith("http"):
+            return value
+        return f"{ACCOUNT_BASE_URL}{value}"
+
+    @staticmethod
+    def _append_params(url: str, params: Dict[str, str]) -> str:
+        sep = "&" if "?" in url else "?"
+        return url + sep + "&".join(
+            f"{quote(k)}={quote(v)}" for k, v in params.items())
+
+
+class XiaoaiClient:
+    """小爱音箱 Mina 云端客户端：设备列表与播放控制。
+
+    只认 userId + serviceToken 两个 cookie，其余走 form 编码的 /remote/ubus。
+    401 一律抛 MinaAuthError 让上层决定是静默续期还是重新登录 —— 在这里
+    悄悄返回空列表会让「token 过期」和「账号名下没有音箱」长得一模一样。
+    """
+
+    def __init__(self, token: Dict[str, Any], audio_id: str = "") -> None:
+        self.token = token or {}
+        self.audio_id = audio_id or DEFAULT_MUSIC_AUDIO_ID
+        self.device_id = str(self.token.get("device_id") or "")
+        self.user_agent = USER_AGENT_TEMPLATE % self.device_id
+
+    # ---------------- 只读查询 ----------------
+
+    @property
+    def user_id(self) -> str:
+        return str(self.token.get("user_id") or "")
+
+    def service_token(self) -> str:
+        services = self.token.get("services") or {}
+        return str((services.get(MINA_SID) or {}).get("service_token") or "")
+
+    def token_expired(self) -> bool:
+        services = self.token.get("services") or {}
+        expiry = float((services.get(MINA_SID) or {}).get("expires_at") or 0)
+        return bool(expiry and time.time() >= expiry)
+
+    def is_usable(self) -> bool:
+        return bool(self.user_id and self.service_token() and not self.token_expired())
+
+    def get_devices(self, master: bool = True) -> List[Dict[str, Any]]:
+        """设备列表。
+
+        master=1 只回主控设备（miot 用它 + 设备分组），master=0 回全部（miservice 用它）。
+        两种取值在不同账号上各能多看见几台，所以主查询为空时再问一次另一档。
+        """
+        query = "master=1" if master else "master=0"
+        data = self._get_json(f"{MINA_API_BASE_URL}/admin/v2/device_list?{query}")
+        devices = self._normalize_devices(data)
+        if not devices and master:
+            data = self._get_json(f"{MINA_API_BASE_URL}/admin/v2/device_list?master=0")
+            devices = self._normalize_devices(data)
+        return devices
+
+    @staticmethod
+    def _normalize_devices(data: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not data or int(data.get("code") or 0) != 0:
+            return []
+        rows = data.get("data") or []
+        devices: List[Dict[str, Any]] = []
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            device_id = str(row.get("deviceID") or "")
+            if not device_id:
+                continue
+            devices.append({
+                "device_id": device_id,
+                "name": str(row.get("name") or ""),
+                "alias": str(row.get("alias") or ""),
+                "model": str(row.get("model") or ""),
+                "hardware": str(row.get("hardware") or ""),
+                "miot_did": str(row.get("miotDID") or ""),
+                "presence": str(row.get("presence") or "offline"),
+            })
+        return devices
+
+    def get_status(self, device_id: str) -> Dict[str, Any]:
+        """播放状态：{code, status, volume, position}；读不到时 status=-1。"""
+        result = self._ubus(device_id, "player_get_play_status", "mediaplayer", {})
+        info = self._parse_info(result)
+        return {
+            "code": int(result.get("code") or 0) if isinstance(result, dict) else -1,
+            "status": int(info.get("status") or 0) if isinstance(info.get("status"), (int, float)) else -1,
+            "volume": info.get("volume"),
+            "position": info.get("position"),
+            "duration": info.get("duration"),
+            "raw": info,
+        }
+
+    def get_volume(self, device_id: str) -> int:
+        status = self.get_status(device_id)
+        try:
+            return int(status.get("volume"))
+        except (TypeError, ValueError):
+            return -1
+
+    # ---------------- 播放控制 ----------------
+
+    def play(self, device_id: str, url: str, hardware: str = "",
+             play_mode: str = "auto", keep_light: bool = False) -> Dict[str, Any]:
+        """推送一个音频 URL。
+
+        返回 {"ok", "api", "error"}：api 说明实际走的接口，出问题时
+        「型号没走对接口」和「云端没受理」是两种完全不同的排查方向。
+        """
+        use_music = (play_mode == "music") or (
+            play_mode == "auto" and hardware in MUSIC_API_MODELS)
+        if use_music:
+            return self._play_music(device_id, url, keep_light)
+        message = {"url": url, "type": 1 if keep_light else 2, "media": "app_ios"}
+        result = self._ubus(device_id, "player_play_url", "mediaplayer", message)
+        return self._device_result(result, "player_play_url")
+
+    def _play_music(self, device_id: str, url: str, keep_light: bool) -> Dict[str, Any]:
+        music = {
+            "payload": {
+                "audio_type": "MUSIC" if keep_light else "",
+                "audio_items": [{
+                    "item_id": {
+                        "audio_id": self.audio_id,
+                        "cp": {"album_id": "-1", "episode_index": 0,
+                               "id": MUSIC_CP_ID, "name": "xiaowei"},
+                    },
+                    "stream": {"url": url},
+                }],
+                "list_params": {"listId": "-1", "loadmore_offset": 0,
+                                "origin": "xiaowei", "type": "MUSIC"},
+            },
+            "play_behavior": "REPLACE_ALL",
+        }
+        message = {"startaudioid": self.audio_id, "music": json.dumps(music)}
+        result = self._ubus(device_id, "player_play_music", "mediaplayer", message)
+        return self._device_result(result, "player_play_music")
+
+    def play_operation(self, device_id: str, action: str) -> Dict[str, Any]:
+        """play / pause / stop。"""
+        if action not in ("play", "pause", "stop"):
+            return {"ok": False, "api": "player_play_operation", "error": f"不支持的操作 {action}"}
+        result = self._ubus(device_id, "player_play_operation", "mediaplayer",
+                            {"action": action, "media": "app_ios"})
+        return self._device_result(result, "player_play_operation")
+
+    def set_volume(self, device_id: str, volume: int) -> Dict[str, Any]:
+        value = max(0, min(100, int(volume)))
+        result = self._ubus(device_id, "player_set_volume", "mediaplayer",
+                            {"volume": value, "media": "app_ios"})
+        return self._device_result(result, "player_set_volume")
+
+    def text_to_speech(self, device_id: str, text: str) -> Dict[str, Any]:
+        """播报文本：先 mibrain/text_to_speech，失败回退 mediaplayer/player_play_tts。
+
+        设备回执 3012 是「超时但很可能已经播出」，不能当失败重发，
+        所以这里返回 ok=None + 明确文案，由调用方决定怎么显示。
+        """
+        text = (text or "").strip()
+        if not text:
+            return {"ok": False, "api": "text_to_speech", "error": "播报内容为空"}
+        result = self._ubus(device_id, "text_to_speech", "mibrain", {"text": text})
+        accepted = self._tts_acceptance(result)
+        if accepted is True:
+            return {"ok": True, "api": "text_to_speech", "error": ""}
+        if accepted is None:
+            return {"ok": None, "api": "text_to_speech", "error": "音箱回执超时，可能已经播报"}
+        fallback = self._ubus(device_id, "player_play_tts", "mediaplayer", {"text": text})
+        accepted = self._tts_acceptance(fallback)
+        if accepted is True:
+            return {"ok": True, "api": "player_play_tts", "error": ""}
+        if accepted is None:
+            return {"ok": None, "api": "player_play_tts", "error": "音箱回执超时，可能已经播报"}
+        return {"ok": False, "api": "player_play_tts", "error": "两个播报接口都被设备拒绝"}
+
+    @staticmethod
+    def _tts_acceptance(result: Dict[str, Any]) -> Optional[bool]:
+        if not isinstance(result, dict):
+            return False
+        code = int(result.get("code") or 0)
+        device_code = XiaoaiClient._device_code(result)
+        if code in (0, 101) and device_code == 3012:
+            return None
+        return code == 0 and (device_code is None or device_code == 0)
+
+    # ---------------- 底层请求 ----------------
+
+    def _headers(self) -> Dict[str, str]:
+        return {"User-Agent": self.user_agent}
+
+    def _cookies(self) -> Dict[str, str]:
+        return {
+            "userId": self.user_id,
+            "serviceToken": self.service_token(),
+            "channel": "MI_APP_STORE",
+        }
+
+    def _get_json(self, url: str) -> Optional[Dict[str, Any]]:
+        response = RequestUtils(headers=self._headers(), cookies=self._cookies(),
+                                timeout=HTTP_TIMEOUT).get_res(
+            url, allow_redirects=False, raise_exception=False)
+        return self._handle(response, url)
+
+    def _post_form(self, url: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        response = RequestUtils(
+            headers={**self._headers(),
+                     "Content-Type": "application/x-www-form-urlencoded"},
+            cookies=self._cookies(), timeout=HTTP_TIMEOUT).post_res(
+            url, data=_form_body(params), allow_redirects=False, raise_exception=False)
+        return self._handle(response, url)
+
+    def _handle(self, response: Any, url: str) -> Optional[Dict[str, Any]]:
+        if response is None:
+            raise MinaError(f"请求小米云端失败: {url}")
+        if response.status_code in (401, 403):
+            raise MinaAuthError(
+                f"小米云端鉴权失效（HTTP {response.status_code}）")
+        if response.status_code >= 400:
+            raise MinaError(f"小米云端返回 HTTP {response.status_code}: {url}")
+        data = _parse_json(response.text or "")
+        if data is None:
+            raise MinaError(f"小米云端响应不是可识别的 JSON: {url}")
+        # 有些接口把失败写在 body 的 code 里而不是 HTTP 状态
+        code = int(data.get("code") or 0)
+        message = str(data.get("message") or "")
+        if code in (401, 403) or (code != 0 and re.search(r"auth", message, re.I)):
+            raise MinaAuthError(f"小米云端业务鉴权失败: {message}")
+        return data
+
+    def _ubus(self, device_id: str, method: str, path: str,
+              message: Dict[str, Any]) -> Dict[str, Any]:
+        """一次 ubus 调用；非 0 code 原样返回（_device_result 负责判定与记录）。"""
+        data = self._post_form(f"{MINA_API_BASE_URL}/remote/ubus", {
+            "deviceId": device_id,
+            "method": method,
+            "path": path,
+            "message": json.dumps(message, ensure_ascii=False),
+            "requestId": _request_id(),
+        })
+        if data is None:  # pragma: no cover - _handle 已经抛错
+            raise MinaError(f"ubus 无响应: {method}")
+        return data
+
+    def _device_result(self, result: Dict[str, Any], action: str) -> Dict[str, Any]:
+        """云端受理 != 音箱执行：必须再看 data.code / device_data.code。"""
+        code = int(result.get("code") or 0)
+        device_code = self._device_code(result)
+        if code != 0:
+            return {"ok": False, "api": action,
+                    "error": f"{action} 被云端拒绝 code={code} {result.get('message') or ''}".strip()}
+        if device_code not in (None, 0):
+            return {"ok": False, "api": action,
+                    "error": f"{action} 云端受理但设备返回 code={device_code}"}
+        return {"ok": True, "api": action, "error": ""}
+
+    @staticmethod
+    def _device_code(result: Dict[str, Any]) -> Optional[int]:
+        data = result.get("data")
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except (TypeError, ValueError):
+                data = None
+        if isinstance(data, dict):
+            inner = data.get("device_data", data)
+            if isinstance(inner, str):
+                try:
+                    inner = json.loads(inner)
+                except (TypeError, ValueError):
+                    return None
+            if isinstance(inner, dict) and "code" in inner:
+                try:
+                    return int(inner.get("code") or 0)
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    @staticmethod
+    def _parse_info(result: Dict[str, Any]) -> Dict[str, Any]:
+        data = result.get("data") if isinstance(result, dict) else None
+        info = data.get("info") if isinstance(data, dict) else None
+        if isinstance(info, str):
+            try:
+                info = json.loads(info)
+            except (TypeError, ValueError):
+                info = {}
+        return info if isinstance(info, dict) else {}
+
+    def validate(self) -> bool:
+        """票据是否真的能用：device_list 返回 code=0 即有效（没有音箱也是 0）。
+
+        不能复用 get_devices() 的结果判真伪 —— 它把失败兜底成空列表，
+        空列表会让失效票据看起来像「账号名下没设备」。
+        """
+        try:
+            data = self._get_json(f"{MINA_API_BASE_URL}/admin/v2/device_list?master=1")
+        except MinaError:
+            return False
+        return bool(data) and int(data.get("code") or 0) == 0
+
+
+def token_from_manual(userId: str, serviceToken: str, ssecurity: str = "",
+                      device_id: str = "") -> Dict[str, Any]:
+    """手工粘贴票据：从浏览器 cookie 里抄 userId/serviceToken 的兜底入口。"""
+    cookies: Dict[str, str] = {}
+    for part in (serviceToken or "").split(";"):
+        if "=" in part:
+            name, _, value = part.partition("=")
+            cookies[name.strip()] = unquote(value.strip()).strip('"')
+    token = {
+        "user_id": (userId or "").strip(),
+        "device_id": (device_id or "").strip() or generate_device_id(),
+        "services": {
+            MINA_SID: {
+                # 允许整串 cookie 粘进来：那种情况下 serviceToken= 前缀已经被拆掉
+                "service_token": cookies.get("serviceToken") or (serviceToken or "").strip(),
+                "ssecurity": (ssecurity or "").strip(),
+                "expires_at": time.time() + SERVICE_TOKEN_VALID_HOURS * 3600,
+            }
+        },
+        "pass_token": cookies.get("passToken", ""),
+        "c_user_id": cookies.get("cUserId", ""),
+        "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "manual": True,
+    }
+    return token

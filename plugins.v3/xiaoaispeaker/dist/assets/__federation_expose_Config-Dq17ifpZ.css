@@ -1,0 +1,8 @@
+
+/* 仅插件内局部样式；不得写全局 v- 或 mdi- 类规则（构建有 postcss 门禁）。 */
+.xai-config[data-v-dcb84d14] { width: 100%; display: flex; flex-direction: column;
+}
+.xai-head[data-v-dcb84d14] { display: flex; align-items: center; gap: 8px; padding: 14px 18px;
+}
+.xai-head-text[data-v-dcb84d14] { min-width: 0;
+}

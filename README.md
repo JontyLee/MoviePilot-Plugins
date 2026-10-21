@@ -278,6 +278,77 @@ V3 新插件使用 `plugins.v3/<plugin_id_lower>/`、`tests/v3/<plugin_id_lower>
   「这个源没给答案」和「曲库里查不到」分开记账的原因，不是客套话。把它当公开 API 长期依赖、
   或用于商用与批量抓取前，请自行确认各平台的服务条款。
 
+### 小爱音箱
+
+| 项 | 值 |
+| --- | --- |
+| 类名 / 目录 | `XiaoaiSpeaker` / `plugins.v3/xiaoaispeaker/` |
+| 配置前缀 | `xiaoaispeaker_` |
+| 版本 | 0.1.0 |
+| 元数据来源 | 无（不刮削，只播放）；设备与播放状态来自小米云端 Mina/ubus |
+| 图标 | `icons/xiaoai.svg`（仓库自绘，市场走 raw 地址） |
+
+把 MP 音乐库里的音频推送到小爱音箱：侧栏播放台（设备、音量、播放控制、队列连播、播报）、
+库内目录浏览与文件名搜索、远程命令。播放地址由插件本机签发限时直链，不经过媒体服务器转码。
+
+- 小米云端的登录三步流程、`clientSign` 算法、ubus 请求体与需要走 `player_play_music` 的型号
+  白名单，移植自 Songloft 的「智能音箱」插件 `songloft-plugin-miot`（Apache-2.0），并与
+  Yonsm/MiService（MIT）、Music Tag Web（GPL-3.0）的同类实现交叉核对。**移植而非复制**：
+  语言、运行时、错误处理与网络层都是本仓库的写法（宿主 `RequestUtils` + `requests` 会话）。
+  不实现 MiIO/MIoT RPC —— 它只在个别触屏型号上用来走 `siid-aiid` 的 TTS action，普通
+  `mibrain/text_to_speech` 已经能播报，而那条签名链路要额外的 xiaomiio serviceToken 与 HMAC
+  细节，收益不抵复杂度。
+- 登录：账密在服务端换 `serviceToken/passToken/userId`，票据只落本机插件数据。小米要图形验证码
+  或邮箱/短信二次校验时，把码填回**同一次进行中的会话**继续跑（不是重新发起登录）；风控过不去
+  还能在高级里粘贴整串 cookie，插件会拿 `device_list` 真跑一次校验，不通过就说清失败在哪一步，
+  不假装登录成功。`/status` 只回「是否已设置密码 / 票据何时存的」，永不回显明文。
+- 播放接口两档：`player_play_url` 推签名直链；硬件码命中型号白名单的（`LX05`/`LX04`/`L05B`
+  等一批较新的音箱）走 `player_play_music`，配不准时用 `play_mode="url"` 覆盖。控制
+  `player_play_operation`、音量 `player_set_volume`、播报 `text_to_speech` 失败回落
+  `player_play_tts`。小米对同一句播报会返回设备码 `3012`，那被译成「可能已经播报」而不是报错。
+- `/stream` 是**匿名**端点（音箱带不上 MP 的登录态），权限靠三重判据：HMAC-SHA256(`path|exp`)
+  的前 32 位十六进制摘要 + `hmac.compare_digest` 常量时间比较、有效期、以及 `realpath` 必须落在
+  配置的库目录内。支持 `Range`/206。越库、过期、签名不对分别是明确的 403 文案，不笼统说
+  「链接无效」—— 用户要能分辨「地址填错了」和「这台音箱访问不到 MP」。签名密钥首次随机生成后
+  留在本机，换密钥会让已发出的链接失效（可接受，不做兼容层）。
+- 连播交宿主 `IntervalTrigger(20s)` 托管，插件不自建调度器。判「播完了」要同时满足：起播已过
+  25 秒宽限，且**连续两次**读到停止 —— 起播初期云端会瞬时回一个 0 状态，单次判定会把队列
+  一首一首烧掉。可选「连播时先播报下一曲」。
+- 目标设备优先级：显式传入 > 配置的默认音箱（配置的默认音箱不在当前账号列表里时直接说明，
+  而不是悄悄换一台）> 第一台在线 > 列表第一台。设备列表缓存 5 分钟，票据过期或网络失败时
+  回落到缓存并带上失败原因。
+- 外部访问地址取主程序设置里的**第一个**域名：主程序那一项允许逗号分隔多个，而一条直链只能有
+  一个 host；host 里带空白的写法（`192.168.1.10 3000` 这类手误）直接判非法，`urlparse` 不会报错、
+  只会拼出音箱必然拉不到的地址。
+- 远程命令五个：`/xiaoai_status`、`/xiaoai_play <曲名或库内绝对路径>`、
+  `/xiaoai_control play|pause|stop|next|prev|<序号>`、`/xiaoai_volume 0-100`、`/xiaoai_tts <文本>`。
+  参数文本读宿主注入的 `arg_str`（不是 `arg`），失败也回一条消息而不是把异常抛到消息渠道里。
+- 侧栏 Vue3 页面（`./AppPage`）分播放台 / 音乐库 / 账号与设备三栏，状态 5 秒轮询、页面隐藏时停；
+  详情页 `./Page` 是同一批接口的紧凑版。`api.get` 只认第一个参数，`/browse` 与 `/search` 的条件
+  由页面自己编码进 URL。配置页只发插件认识的字段（`/config` 缺省即保留原值、密码留空不覆盖）；
+  「启用插件」与「显示侧栏入口」刻意不在这里改 —— 那两项要宿主重新注册服务与导航，只有在插件
+  管理页保存才会走到那条链路。
+- 库内路径与音频内容不出本机：只有签名直链的 URL 交给音箱。可播放范围由「音乐库路径」与扩展名
+  白名单限定，三处按同一条判据收敛（realpath 后必须落在库目录内、扩展名在名单里）：`/stream` 走
+  `resolve_playable`，浏览与搜索本身就只从库根出发遍历，所以不会出现「列表里看得到、点下去 403」。
+  搜索限深 6 层、命中 100 条就停：整库几万个文件时无脑 `rglob` 会先把请求拖死。
+
+#### 上游、许可与引用
+
+- **songloft-plugin-miot** —— <https://github.com/songloft-org/songloft-plugin-miot>，
+  `Apache-2.0 © 2026 hanxi`。本插件 `mina.py` 的小米云端接入约定（登录三步、`clientSign`、
+  ubus 请求体、`play_music` 型号白名单）按它的契约移植。上游只在 README 与 `plugin.json` 里
+  声明 Apache-2.0、仓库内没有 LICENSE 正文，`plugins.v3/xiaoaispeaker/LICENSE.upstream-songloft-miot.txt`
+  收的是 apache.org 的规范全文（一字未改），并在其中与 `mina.py` 顶部按 **Apache-2.0 4(b)**
+  声明这些约定经过修改与重写。Apache-2.0 与本仓库的 `GPL-3.0` 单向兼容：可以在 GPL-3.0 下再分发
+  这份改编，前提是不再附加 GPL 之外的限制，出处、许可正文与修改声明随仓库一起公开。
+- **Yonsm/MiService** —— <https://github.com/Yonsm/MiService>，`MIT`。用于交叉核对登录与 ubus 的
+  取值（尤其 `sid=micoapi`、`channel=MI_APP_STORE` 与 `&&&START&&&` 前缀），未复制其代码；
+  Music Tag Web 的小米协议本身也是转调它。
+- 小米账号接口是小米自己的在线服务，不属于任何开源许可范围，也不承诺稳定：接口改版、风控加严、
+  票据提前失效都会发生。插件只在用户明确填入账密或票据时才向小米云端发请求，设备与播放操作
+  只作用于用户自己账号下的音箱；把它当长期稳定的自动化依赖前请自行确认小米的服务条款。
+
 ## 最重要的提交规则
 
 - 插件目录名必须是插件主类名的小写形式，主类定义在目录的 `__init__.py`。
