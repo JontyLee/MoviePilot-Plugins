@@ -41,7 +41,23 @@ const form = ref<Record<string, any>>({
   default_volume: 0,
   auto_next: true,
   keep_light: false,
-  tts_announce: false
+  tts_announce: false,
+  voice_enabled: false,
+  voice_devices: '',
+  voice_poll: 2,
+  voice_interrupt: true,
+  voice_hint_tts: false,
+  voice_hint_text: '正在搜索，请稍候',
+  voice_reply: true,
+  voice_memory: true,
+  ai_enabled: false,
+  ai_chat: false,
+  ai_api_url: '',
+  ai_api_key: '',
+  ai_model: '',
+  ai_timeout: 6,
+  library_limit: 10000,
+  library_refresh: 60
 })
 
 const playModeItems = [
@@ -67,6 +83,21 @@ const enabledText = computed(() => {
   if (!loaded.value) return '读取中'
   return cfg.value?.enabled ? '已启用' : '已停用（在插件管理页打开）'
 })
+
+// 「监听哪些音箱」后端收的是逗号/空格分隔的 device_id，这里用多选组件来回转，
+// 免得让人手抄那串又长又难认的 ID。
+const voiceDeviceList = computed<string[]>({
+  get: () => String(form.value.voice_devices || '')
+    .split(/[,;\s]+/)
+    .map(item => item.trim())
+    .filter(Boolean),
+  set: (value) => { form.value.voice_devices = value.join(',') }
+})
+
+const voiceDeviceItems = computed(() => devices.value.map(d => ({
+  title: `${d.name || d.alias || d.device_id}${d.presence === 'online' ? '' : '（离线）'}`,
+  value: d.device_id
+})))
 
 function notify(msg: string, color = 'info') {
   if (toast) {
@@ -95,7 +126,23 @@ function fillFromStatus(data: Status) {
     default_volume: c.default_volume ?? 0,
     auto_next: c.auto_next !== false,
     keep_light: !!c.keep_light,
-    tts_announce: !!c.tts_announce
+    tts_announce: !!c.tts_announce,
+    voice_enabled: !!c.voice_enabled,
+    voice_devices: c.voice_devices || '',
+    voice_poll: c.voice_poll ?? 2,
+    voice_interrupt: c.voice_interrupt !== false,
+    voice_hint_tts: !!c.voice_hint_tts,
+    voice_hint_text: c.voice_hint_text ?? '正在搜索，请稍候',
+    voice_reply: c.voice_reply !== false,
+    voice_memory: c.voice_memory !== false,
+    ai_enabled: !!c.ai_enabled,
+    ai_chat: !!c.ai_chat,
+    ai_api_url: c.ai_api_url || '',
+    ai_api_key: '',
+    ai_model: c.ai_model || '',
+    ai_timeout: c.ai_timeout ?? 6,
+    library_limit: c.library_limit ?? 10000,
+    library_refresh: c.library_refresh ?? 60
   }
 }
 
@@ -112,7 +159,9 @@ async function save() {
   saving.value = true
   try {
     const body: Record<string, any> = { ...form.value }
+    // 密码与 AI key 都是「留空即不改动」：服务端按 if xxx 判掉空串，这里先删掉免得写成空
     if (!body.password) delete body.password
+    if (!body.ai_api_key) delete body.ai_api_key
     fillFromStatus(await (props.api as MoviePilotApi).post(`${base.value}/config`, body))
     notify('配置已保存', 'success')
     emit('saved')
@@ -222,6 +271,90 @@ defineExpose({ loadConfig, save })
             <v-text-field v-model="form.audio_id" hide-details label="play_music audioID（留空用默认）" />
           </v-col>
         </v-row>
+      </div>
+
+      <div class="xcf-group">
+        <div class="xcf-group-title">语音控制</div>
+        <v-alert type="info" variant="tonal" density="compact" class="mb-3">
+          打开后插件周期性读这几台音箱在小米云端的<b>对话记录</b>，命中口令表的话才接手播放。
+          每读一次就是一个请求，只对真的要听的那几台开。
+        </v-alert>
+        <div class="d-flex" style="gap: 16px; flex-wrap: wrap">
+          <v-switch v-model="form.voice_enabled" color="success" hide-details inset label="开启语音监听" />
+          <v-switch v-model="form.voice_interrupt" color="success" hide-details inset label="命中前先打断音箱" />
+          <v-switch v-model="form.voice_reply" color="success" hide-details inset label="播报执行结果" />
+          <v-switch v-model="form.voice_hint_tts" color="success" hide-details inset label="搜索期间播提示语" />
+          <v-switch v-model="form.voice_memory" color="success" hide-details inset label="记住刚才那首（用于「再播一遍」）" />
+        </div>
+        <v-row dense class="mt-3">
+          <v-col cols="12" md="7">
+            <v-select v-model="voiceDeviceList" :items="voiceDeviceItems" label="监听哪些音箱" multiple
+                      chips dense closable hide-details placeholder="留空 = 只监听默认音箱" />
+          </v-col>
+          <v-col cols="12" md="5">
+            <v-text-field v-model.number="form.voice_poll" type="number" min="2" max="30" hide-details
+                          label="轮询间隔（秒，2-30）" />
+          </v-col>
+        </v-row>
+        <v-text-field v-model="form.voice_hint_text" class="mt-3" hide-details density="compact"
+                      label="搜索期间的提示语（留空用默认）" placeholder="正在搜索，请稍候" />
+        <div class="text-caption text-grey mt-1">
+          {{ devices.length
+             ? `已取到 ${devices.length} 台设备，可直接勾选；留空时只跟着默认音箱走`
+             : '设备候选要登录后才有；也可以先手填 device_id（逗号分隔）' }}
+          ｜口令表逐类的开关在「语音控制」那一栏里改，不在这里。
+        </div>
+      </div>
+
+      <div class="xcf-group">
+        <div class="xcf-group-title">AI 兜底与对话</div>
+        <div class="d-flex" style="gap: 16px; flex-wrap: wrap">
+          <v-switch v-model="form.ai_enabled" color="success" hide-details inset label="口令表没命中时交给 AI 判定" />
+          <v-switch v-model="form.ai_chat" color="success" hide-details inset label="没命中的话当成聊天（说完 2 分钟内可追问）" />
+        </div>
+        <v-row dense class="mt-3">
+          <v-col cols="12" md="6">
+            <v-text-field v-model="form.ai_api_url" hide-details
+                          label="OpenAI 兼容接口地址（不含 /chat/completions）" />
+          </v-col>
+          <v-col cols="12" md="6">
+            <v-text-field v-model="form.ai_api_key" :type="form.ai_api_key ? 'text' : 'password'" hide-details
+                          :label="cfg?.ai_key_set ? 'API Key（留空保留已存的）' : 'API Key'" />
+          </v-col>
+        </v-row>
+        <v-row dense class="mt-2">
+          <v-col cols="12" md="7">
+            <v-text-field v-model="form.ai_model" hide-details label="模型名"
+                          :placeholder="cfg?.ai_model || 'qwen-flash'" />
+          </v-col>
+          <v-col cols="12" md="5">
+            <v-text-field v-model.number="form.ai_timeout" type="number" min="2" max="30" hide-details
+                          label="超时（秒，2-30）" />
+          </v-col>
+        </v-row>
+        <div class="text-caption text-grey mt-1">
+          AI 只能给出口令表里已有的那几种动作，置信度低或动作未知都当没判出来 —— 它只是多一个入口，
+          权限不比口令表大。Key 只存本机配置，任何接口都不回显明文。
+        </div>
+      </div>
+
+      <div class="xcf-group">
+        <div class="xcf-group-title">曲库索引</div>
+        <v-row dense>
+          <v-col cols="12" md="5">
+            <v-text-field v-model.number="form.library_limit" type="number" min="500" max="200000" hide-details
+                          label="最多入库多少首" />
+          </v-col>
+          <v-col cols="12" md="5">
+            <v-text-field v-model.number="form.library_refresh" type="number" min="0" max="1440" hide-details
+                          label="自动保鲜周期（分钟，0=只手动）" />
+          </v-col>
+        </v-row>
+        <div class="text-caption text-grey mt-1">
+          索引只为语音点歌服务（读标签与目录名，元数据缓存落在插件数据目录）。
+          当前 {{ cfg?.library_limit ?? 10000 }} 首上限、每 {{ cfg?.library_refresh ?? 60 }} 分钟保鲜一次；
+          索引状态与手动重建在「音乐库」那一栏。
+        </div>
       </div>
 
       <div class="xcf-group">

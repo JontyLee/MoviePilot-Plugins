@@ -1,14 +1,20 @@
 """
 xiaoaispeaker — MoviePilot v3 插件（插件名：小爱音箱）
 
-把 MoviePilot 的音乐库推到小爱音箱上放：侧栏播放台（设备、音量、播放控制、队列连播）、
-库内目录浏览与搜索、以及一组远程命令。播放走「插件签发一条带签名与有效期的 HTTP 直链，
-音箱自己经云端拉流」这条路，不依赖 Emby/Jellyfin，也不需要额外部署 Music Tag Web。
+把 MoviePilot 的音乐库推到小爱音箱上放：侧栏页面（播放台 / 音乐库 / 歌单与收藏 / 定时任务 /
+语音控制 / 账号与设备 / 配置）、曲库索引与文本匹配、小爱对话监听驱动的口令引擎、设备分组同步、
+定时任务、歌词，以及一组远程命令。播放走「插件签发一条带签名与有效期的 HTTP 直链，音箱自己经
+云端拉流」这条路，不依赖 Emby/Jellyfin，也不需要额外部署 Music Tag Web。
 
-v0.1.0 的边界（有意为之，不是遗漏）：
+v0.2.0 的边界（有意为之，不是遗漏）：
 - 只支持小米云端 Mina 接口（登录 → serviceToken → /remote/ubus），不做 MiIO 本地 RPC：
   局域网直连要额外拿 token 与 miio 密钥、按型号试 siid/piid，收益不抵复杂度。
-- 只放库内文件与调用方显式给的一条 URL，不做歌词、不做触屏封面匹配。
+- 歌词只在本页面上显示（同目录 .lrc/.txt 与音频内嵌标签）：触屏音箱的本机歌词要那块的
+  Music API 与设备侧 UI，插件既拿不到也没有渲染处。
+- 不做 DLNA/UPnP 接收端：SSDP 组播与监听端口要在宿主容器里另开，第三方投送也就无从认证；
+  程序化投送等价物是 /play + /stream 那对签名直链接口。
+- 定时任务按星期/几号触发，不做法定节假日调休：上游把 holiday-cn 数据集编进插件产物，宿主
+  容器里的插件既没有那份数据也没有更新渠道。
 - 队列连播靠轮询 player_get_play_status 判「播完」，不是音箱侧的真实播放列表。
 - /stream 必须匿名可达（音箱不会带上 MP 的登录态），因此用「路径 + 过期时间」的 HMAC 签名
   收敛成「只能取配置目录内、在有效期内的音频文件」，签名不匹配或路径越库一律 403。
@@ -22,6 +28,8 @@ LICENSE.upstream-songloft-miot.txt。
 
 from __future__ import annotations
 
+import random
+import re
 import secrets
 import threading
 import time
@@ -38,8 +46,13 @@ from app.schemas.types import EventType
 from app.sdk.events import Event, eventmanager
 from app.sdk.logging import logger
 
+from . import library as _library
+from . import lyrics as _lyrics
 from . import media as _media
 from . import mina as _mina
+from . import intents as _intents
+from . import speech as _speech
+from . import voice as _voice
 from .mina import (
     LOGIN_NEED_CAPTCHA,
     LOGIN_NEED_VERIFY,
@@ -53,6 +66,9 @@ from .mina import (
 from .schemas import (
     ActionOut,
     BrowseOut,
+    CommandOut,
+    CommandsIn,
+    CommandsOut,
     ConfigIn,
     ConfigOut,
     ControlIn,
@@ -60,18 +76,40 @@ from .schemas import (
     DeviceSelectIn,
     DevicesOut,
     DirOut,
+    FavoriteIn,
+    FavoriteOut,
+    FavoritesOut,
     FileOut,
+    GroupIn,
+    GroupOut,
+    GroupsOut,
+    LibraryOut,
     LoginIn,
     LoginOut,
+    LyricLineOut,
+    LyricOut,
+    ModeIn,
     PlayIn,
+    PlaylistOut,
+    PlaylistsOut,
     PlayOut,
     PlayingOut,
     QueueIn,
     QueueItemOut,
     QueueOut,
     SearchOut,
+    SongsOut,
     StatusOut,
+    TaskIn,
+    TaskLogsOut,
+    TaskRunIn,
+    TasksOut,
+    TimerIn,
+    TimerOut,
     TtsIn,
+    VoiceIn,
+    VoiceOut,
+    VoiceRecordOut,
     VolumeIn,
 )
 
@@ -80,12 +118,19 @@ try:  # 主程序较新版本才有：一次性任务交给宿主调度器，插
 except Exception:  # pragma: no cover - 老版本主程序没有该模块
     scheduler_sdk = None
 
-# plugindata 键：票据、设备缓存、队列、签名密钥、最近一次推流
+# plugindata 键：票据、设备缓存、队列、签名密钥、最近一次推流、收藏、睡眠定时、语音记忆
 _KEY_TOKEN = "token"
 _KEY_DEVICES = "devices"
 _KEY_QUEUE = "queue"
 _KEY_SECRET = "secret"
 _KEY_LAST = "last"
+_KEY_FAVORITES = "favorites"
+_KEY_TIMER = "sleep_timer"
+_KEY_MEMORY = "voice_memory"
+_KEY_COMMANDS = "voice_commands"
+_KEY_GROUPS = "device_groups"
+_KEY_TASKS = "scheduled_tasks"
+_KEY_TASK_LOGS = "schedule_logs"
 
 # 音箱状态是云端读来的，前端每几秒刷一次；给一个很短的缓存避免把小米接口打爆
 _STATUS_CACHE_SECONDS = 3.0
@@ -96,6 +141,42 @@ _REFRESH_COOLDOWN_SECONDS = 300.0
 # 连播判定：推流后这么久仍读到「停止」才认为真的播完了
 _ADVANCE_GRACE_SECONDS = 25.0
 _ADVANCE_TICK_SECONDS = 20
+# 顺序/单曲播放模式下"没有下一首了"的固定回执：调用方按它区分"切歌成功"和"到此为止"
+_QUEUE_END_MESSAGE = "队列已播到最后一首"
+# 播放方式的中文名：语音回执与 /mode 接口共用
+_MODE_TEXT = {
+    "order": "顺序播放",
+    "loop": "列表循环",
+    "random": "随机播放",
+    "single": "单曲循环",
+    "single_play": "只播这一首",
+}
+# 定时任务能做的动作（与上游 schedule/executor.ts 同一套），以及各自需要的参数
+_TASK_ACTIONS = {
+    "play_playlist": "播放歌单",
+    "play_playlist_from": "歌单从某首播",
+    "stop": "停止播放",
+    "set_volume": "设置音量",
+    "set_play_mode": "设置播放方式",
+    "enable_monitor": "开启语音监听",
+    "disable_monitor": "关闭语音监听",
+}
+# 执行日志只在内存与 plugindata 里各留这么多条：够回看一周，又不至于把数据文件撑大
+_TASK_LOG_KEEP = 200
+# 星期几的中文名（0=周日，与 JS getDay() 一致，任务里勾的也是这个编号）
+_TASK_WEEK_TEXT = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"]
+# 任务条数上限：一次巡检要把每条都判一遍，也为了 plugindata 文件不至于无限膨胀
+_TASK_MAX = 50
+# 索引重建的最短间隔：语音未命中会触发一次重建，不能让它变成扫盘循环
+_LIBRARY_MIN_REFRESH_SECONDS = 60.0
+# AI 对话窗口：说过话之后这么久内仍按满速轮询，追问才接得上
+_CHAT_WINDOW_SECONDS = 120.0
+# 带给模型的历史条数（一问一答算两条）
+_CHAT_TURNS = 8
+
+# AI 兜底默认打到阿里云的 OpenAI 兼容端点（与上游一致）；换别的网关就改这三项
+_DEFAULT_AI_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+_DEFAULT_AI_MODEL = "qwen-flash"
 
 _DEFAULT_CONFIG: Dict[str, Any] = {
     "enabled": False,
@@ -113,6 +194,22 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
     "auto_next": True,
     "keep_light": False,
     "tts_announce": False,
+    "voice_enabled": False,
+    "voice_devices": "",
+    "voice_poll": 2,
+    "voice_interrupt": True,
+    "voice_hint_tts": False,
+    "voice_hint_text": "正在搜索，请稍候",
+    "voice_reply": True,
+    "voice_memory": True,
+    "ai_enabled": False,
+    "ai_chat": False,
+    "ai_api_url": _DEFAULT_AI_URL,
+    "ai_api_key": "",
+    "ai_model": _DEFAULT_AI_MODEL,
+    "ai_timeout": 6,
+    "library_limit": _library.DEFAULT_SONG_LIMIT,
+    "library_refresh": 60,
 }
 
 _PLAY_MODES = ("auto", "url", "music")
@@ -143,7 +240,7 @@ class XiaoaiSpeaker(_PluginBase):
         "库内目录浏览与搜索、远程命令；播放直链由插件签名限时，不依赖媒体服务器。"
     )
     plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/xiaoai.svg"
-    plugin_version = "0.1.0"
+    plugin_version = "0.2.0"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "xiaoaispeaker_"
@@ -166,6 +263,22 @@ class XiaoaiSpeaker(_PluginBase):
     _auto_next: bool = True
     _keep_light: bool = False
     _tts_announce: bool = False
+    _voice_enabled: bool = False
+    _voice_devices: str = ""
+    _voice_poll: int = 2
+    _voice_interrupt: bool = True
+    _voice_hint_tts: bool = False
+    _voice_hint_text: str = "正在搜索，请稍候"
+    _voice_reply: bool = True
+    _voice_memory: bool = True
+    _ai_enabled: bool = False
+    _ai_chat: bool = False
+    _ai_api_url: str = _DEFAULT_AI_URL
+    _ai_api_key: str = ""
+    _ai_model: str = _DEFAULT_AI_MODEL
+    _ai_timeout: int = 6
+    _library_limit: int = _library.DEFAULT_SONG_LIMIT
+    _library_refresh: int = 60
 
     def init_plugin(self, config: Dict[str, Any] = None) -> None:
         """读取配置并准备运行态（登录会话、缓存、锁）。可重复调用。"""
@@ -181,6 +294,9 @@ class XiaoaiSpeaker(_PluginBase):
         self.__dict__.setdefault("_refresh_attempt_at", 0.0)
         self.__dict__.setdefault("_idle_ticks", 0)
         self.__dict__.setdefault("_stop_flag", threading.Event())
+        self.__dict__.setdefault("_library_index", _library.LibraryIndex())
+        self.__dict__.setdefault("_speech_listener", None)
+        self.__dict__.setdefault("_library_error", "")
 
         if config:
             self._enabled = bool(config.get("enabled"))
@@ -198,6 +314,22 @@ class XiaoaiSpeaker(_PluginBase):
             self._auto_next = bool(config.get("auto_next", True))
             self._keep_light = bool(config.get("keep_light"))
             self._tts_announce = bool(config.get("tts_announce"))
+            self._voice_enabled = bool(config.get("voice_enabled"))
+            self._voice_devices = str(config.get("voice_devices") or "").strip()
+            self._voice_poll = self._clamp_poll(config.get("voice_poll"))
+            self._voice_interrupt = bool(config.get("voice_interrupt", True))
+            self._voice_hint_tts = bool(config.get("voice_hint_tts"))
+            self._voice_hint_text = str(config.get("voice_hint_text") or "正在搜索，请稍候").strip()
+            self._voice_reply = bool(config.get("voice_reply", True))
+            self._voice_memory = bool(config.get("voice_memory", True))
+            self._ai_enabled = bool(config.get("ai_enabled"))
+            self._ai_chat = bool(config.get("ai_chat"))
+            self._ai_api_url = str(config.get("ai_api_url") or _DEFAULT_AI_URL).strip().rstrip("/")
+            self._ai_api_key = str(config.get("ai_api_key") or "").strip()
+            self._ai_model = str(config.get("ai_model") or _DEFAULT_AI_MODEL).strip()
+            self._ai_timeout = self._clamp_ai_timeout(config.get("ai_timeout"))
+            self._library_limit = _library.clamp_song_limit(config.get("library_limit"))
+            self._library_refresh = self._clamp_library_refresh(config.get("library_refresh"))
             # 换账号就丢掉旧的登录会话与票据：那属于上一个账号，继续用会把
             # 上一个账号的设备列表和音箱当成当前配置的结果。
             if config.get("username") and config.get("username") != self.__dict__.get("_last_username"):
@@ -230,6 +362,32 @@ class XiaoaiSpeaker(_PluginBase):
             return 0
         return min(max(value, 0), 100)
 
+    @staticmethod
+    def _clamp_poll(raw: Any) -> int:
+        """语音轮询间隔（秒）：1~30。低于 1 秒是在刷小米接口，高于 30 秒用户已经走开了。"""
+        try:
+            value = int(float(raw))
+        except (TypeError, ValueError):
+            return int(_DEFAULT_CONFIG["voice_poll"])
+        return min(max(value, 1), 30)
+
+    @staticmethod
+    def _clamp_ai_timeout(raw: Any) -> int:
+        try:
+            value = int(float(raw))
+        except (TypeError, ValueError):
+            return 6
+        return min(max(value, 2), 30)
+
+    @staticmethod
+    def _clamp_library_refresh(raw: Any) -> int:
+        """索引自动重建周期（分钟）：0 = 不自动重建，只靠手动和未命中触发。"""
+        try:
+            value = int(float(raw))
+        except (TypeError, ValueError):
+            return int(_DEFAULT_CONFIG["library_refresh"])
+        return min(max(value, 0), 1440)
+
     def get_state(self) -> bool:
         return bool(self._enabled)
 
@@ -240,6 +398,35 @@ class XiaoaiSpeaker(_PluginBase):
 
     def _exts(self) -> Tuple[str, ...]:
         return _media.parse_exts(self._audio_exts)
+
+    # ---------------- 曲库索引 ----------------
+
+    def _library(self) -> _library.LibraryIndex:
+        """内存索引（每个插件实例一份）。落盘的只有标签增量表。"""
+        index: _library.LibraryIndex = self.__dict__.setdefault("_library_index",
+                                                                 _library.LibraryIndex())
+        try:
+            index.configure(Path(self.get_data_path()) / "library-tags.json.gz")
+        except Exception as err:  # pragma: no cover - 数据目录不可写时只做内存索引
+            self.__dict__["_library_error"] = f"索引缓存不可用：{err}"
+        return index
+
+    def _library_rebuild(self, force: bool = False) -> bool:
+        """起一轮索引重建；同一时刻只会有一轮在跑。"""
+        roots = self._roots()
+        if not roots:
+            return False
+        return self._library().refresh(roots, self._exts(), self._library_limit, force=force)
+
+    def _library_status(self) -> Dict[str, Any]:
+        status = self._library().status()
+        status["roots"] = [str(item) for item in self._roots()]
+        status["limit"] = self._library_limit
+        status["refresh_minutes"] = self._library_refresh
+        error = self.__dict__.get("_library_error")
+        if error:
+            status["error"] = str(error)
+        return status
 
     def _effective_base_url(self) -> Tuple[str, str]:
         """返回 (地址, 来源)：配置优先，其次主程序的外部访问地址。"""
@@ -270,6 +457,22 @@ class XiaoaiSpeaker(_PluginBase):
             "auto_next": self._auto_next,
             "keep_light": self._keep_light,
             "tts_announce": self._tts_announce,
+            "voice_enabled": self._voice_enabled,
+            "voice_devices": self._voice_devices,
+            "voice_poll": self._voice_poll,
+            "voice_interrupt": self._voice_interrupt,
+            "voice_hint_tts": self._voice_hint_tts,
+            "voice_hint_text": self._voice_hint_text,
+            "voice_reply": self._voice_reply,
+            "voice_memory": self._voice_memory,
+            "ai_enabled": self._ai_enabled,
+            "ai_chat": self._ai_chat,
+            "ai_api_url": self._ai_api_url,
+            "ai_api_key": self._ai_api_key,
+            "ai_model": self._ai_model,
+            "ai_timeout": self._ai_timeout,
+            "library_limit": self._library_limit,
+            "library_refresh": self._library_refresh,
         }
 
     def _save_config(self) -> None:
@@ -359,6 +562,101 @@ class XiaoaiSpeaker(_PluginBase):
         pick = (online or devices)[0]
         return pick, ""
 
+    # ---------------- 设备分组（多房间同步） ----------------
+
+    def _groups(self) -> List[Dict[str, Any]]:
+        """分组列表：一台设备最多属于一个组，加入新组时自动从别的组移出来。"""
+        raw = self.get_data(_KEY_GROUPS)
+        rows: List[Dict[str, Any]] = []
+        for item in raw if isinstance(raw, list) else []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            members = [str(mid).strip() for mid in (item.get("device_ids") or []) if str(mid).strip()]
+            if not name or len(members) < 2:
+                continue
+            rows.append({"name": name, "device_ids": list(dict.fromkeys(members))})
+        return rows
+
+    def _save_groups(self, rows: List[Dict[str, Any]]) -> None:
+        self.save_data(_KEY_GROUPS, rows)
+
+    def _group_name_of(self, device_id: str) -> str:
+        if not device_id:
+            return ""
+        for row in self._groups():
+            if device_id in row["device_ids"]:
+                return str(row["name"])
+        return ""
+
+    def _fanout_ids(self, device_id: str) -> List[str]:
+        """要一起收到这条指令的设备：所在分组的成员（含它自己），没分组就只它一台。
+
+        与上游一致：全组共用同一份队列与播放方式，指令一次性下发，所以随机模式、
+        自动续播也不会各放各的。
+        """
+        if not device_id:
+            return []
+        name = self._group_name_of(device_id)
+        if not name:
+            return [device_id]
+        for row in self._groups():
+            if row["name"] == name:
+                members = [item for item in row["device_ids"] if item != device_id]
+                return [device_id] + members
+        return [device_id]
+
+    def _fanout_devices(self, device_id: str) -> List[Dict[str, Any]]:
+        """把 `_fanout_ids` 解析成设备字典，落在当前账号设备列表之外的成员直接跳过。"""
+        devices, _ = self._devices_cached(force=False)
+        by_id = {str(item.get("device_id") or ""): item for item in devices}
+        rows: List[Dict[str, Any]] = []
+        for mid in self._fanout_ids(device_id):
+            device = by_id.get(mid)
+            if device:
+                rows.append(device)
+            elif mid != device_id:
+                logger.warning(f"{_LOG} 分组成员 {mid} 已不在设备列表里，跳过")
+        return rows or ([by_id[device_id]] if device_id in by_id else [])
+
+    def _group_follow(self, device: Dict[str, Any], action) -> List[str]:
+        """对同一分组的其他成员各做一次 action，返回失败清单（成功时为空）。
+
+        组内某台离线只记一条告警、其余照常，这与上游一致：音箱各自经云端收指令，
+        没有帧级同步，轻微起播时差属正常，不做补偿。
+        """
+        device_id = str(device.get("device_id") or "")
+        failures: List[str] = []
+        for other in self._fanout_devices(device_id)[1:]:
+            name = str(other.get("name") or other.get("device_id") or "音箱")
+            try:
+                ok, error = action(other)
+            except Exception as exc:  # pragma: no cover - 网络层异常形状不固定
+                ok, error = False, str(exc)
+            if not ok:
+                failures.append(f"{name}：{error or '未受理'}")
+                logger.warning(f"{_LOG} 分组同步失败 {name}: {error}")
+        return failures
+
+    @staticmethod
+    def _group_suffix(total: int, failures: List[str]) -> str:
+        """把「全组几台、哪几台没跟上」拼进回执，只有一台时什么都不加。"""
+        if total <= 1:
+            return ""
+        text = f"（已同步 {total} 台"
+        if failures:
+            text += f"，未跟上：{'、'.join(failures)}"
+        return text + "）"
+
+    def _groups_out(self, ok: bool = True, message: str = "") -> GroupsOut:
+        devices, _ = self._devices_cached(force=False)
+        names = {str(item.get("device_id") or ""): str(item.get("name") or item.get("alias") or "")
+                 for item in devices}
+        return GroupsOut(ok=ok, message=message,
+                         items=[GroupOut(name=row["name"], device_ids=row["device_ids"],
+                                         devices=[names.get(mid, mid) for mid in row["device_ids"]])
+                                for row in self._groups()])
+
     def _devices_cached(self, force: bool = False) -> Tuple[List[Dict[str, Any]], str]:
         """设备列表：优先用缓存，过期或强制时重新拉取（失败则退回上次结果）。"""
         cache = self.__dict__.get("_devices_cache") or {}
@@ -438,6 +736,25 @@ class XiaoaiSpeaker(_PluginBase):
             except MinaError as exc:
                 # 音量失败不影响已经推上去的曲目，只把这条限制说清楚
                 logger.info(f"{_LOG} 设置音量失败: {exc}")
+
+        def follow(target: Dict[str, Any]) -> Tuple[bool, str]:
+            other = str(target.get("device_id") or "")
+            outcome = client.play(
+                device_id=other,
+                url=url,
+                hardware=str(target.get("hardware") or ""),
+                play_mode=self._play_mode,
+                keep_light=self._keep_light,
+            )
+            if outcome.get("ok") and self._default_volume:
+                try:
+                    client.set_volume(other, self._default_volume)
+                except MinaError:
+                    pass
+            return bool(outcome.get("ok")), str(outcome.get("error") or "")
+
+        failures = self._group_follow(device, follow)
+        members = len(self._fanout_devices(device_id))
         self.save_data(_KEY_LAST, {
             "device_id": device_id,
             "device_name": str(device.get("name") or ""),
@@ -450,7 +767,8 @@ class XiaoaiSpeaker(_PluginBase):
             "at": self._now_text(),
         })
         self.__dict__["_idle_ticks"] = 0
-        return True, f"已推送到 {device.get('name') or device_id}", api
+        return True, (f"已推送到 {device.get('name') or device_id}"
+                      + self._group_suffix(members, failures)), api
 
     def _play_file(self, path_text: str, device_id: Optional[str] = None,
                    queue_paths: Optional[List[str]] = None) -> PlayOut:
@@ -515,11 +833,16 @@ class XiaoaiSpeaker(_PluginBase):
             items.append({"path": str(real), "name": real.name,
                           "title": _media.strip_index(real.name), "size": real.stat().st_size})
         safe_index = index if 0 <= index < len(items) else (0 if items else -1)
+        # 播放方式是"这台音箱现在怎么播"，换一批曲目不该把它重置：
+        # 说"随机播放"之后切歌单还应该是随机，随机进度则跟着新队列重来
+        mode = str(self._queue_state().get("mode") or "order")
         state = {
             "device_id": device_id,
             "index": safe_index,
             "items": items,
             "source": "library",
+            "mode": mode,
+            "random_played": [],
             "updated_at": self._now_text(),
         }
         self.save_data(_KEY_QUEUE, state)
@@ -536,7 +859,7 @@ class XiaoaiSpeaker(_PluginBase):
     def _queue_state(self) -> Dict[str, Any]:
         data = self.get_data(_KEY_QUEUE)
         if not isinstance(data, dict):
-            return {"device_id": "", "index": -1, "items": [], "source": ""}
+            return {"device_id": "", "index": -1, "items": [], "source": "", "mode": "order"}
         items = data.get("items")
         if not isinstance(items, list):
             items = []
@@ -560,19 +883,25 @@ class XiaoaiSpeaker(_PluginBase):
                                 size=int(item.get("size") or 0)) for item in items],
             auto_next=self._auto_next,
             source=str(state.get("source") or ""),
+            mode=str(state.get("mode") or "order"),
         )
 
     def _advance(self, direction: str) -> PlayOut:
-        """切到下一首/上一首（next 也用于连播推进）。"""
+        """切到下一首/上一首/指定序号（next 也用于连播推进）。
+
+        下一首去哪由队列的播放方式决定，这一点与上游 playlist-manager 一致：
+        顺序播完就停、列表循环回到第一首、随机跳过已播过的（播完一轮自动清空重来）、
+        单曲循环重播当前、单曲播放播完就停。
+        """
         state = self._queue_state()
         items = state.get("items") or []
         if not items:
             return PlayOut(ok=False, message="队列为空")
         current = int(state.get("index") or 0)
         if direction == "next":
-            if current + 1 >= len(items):
-                return PlayOut(ok=True, message="队列已播到最后一首")
-            target = current + 1
+            target = self._next_index(state, current)
+            if target is None:
+                return PlayOut(ok=True, message=_QUEUE_END_MESSAGE)
         elif direction == "prev":
             target = max(current - 1, 0)
         else:
@@ -581,9 +910,58 @@ class XiaoaiSpeaker(_PluginBase):
         result = self._play_file(path, device_id=state.get("device_id") or None)
         if result.ok:
             state["index"] = target
+            self._note_played(state, target)
             self.save_data(_KEY_QUEUE, state)
             result.queue = self._queue_out(state)
         return result
+
+    def _next_index(self, state: Dict[str, Any], current: int) -> Optional[int]:
+        """下一首的序号；返回 None 表示"到此为止，别再播了"。"""
+        items = state.get("items") or []
+        total = len(items)
+        if total <= 0:
+            return None
+        mode = str(state.get("mode") or "order")
+        if mode == "single":
+            return current if 0 <= current < total else 0
+        if mode == "single_play":
+            return None
+        if mode == "loop":
+            return (current + 1) % total
+        if mode == "random":
+            played = {int(value) for value in (state.get("random_played") or [])
+                      if str(value).lstrip("-").isdigit()}
+            left = [position for position in range(total) if position not in played]
+            if not left:
+                played = {current}
+                left = [position for position in range(total) if position not in played]
+            return int(random.choice(left)) if left else None
+        following = current + 1
+        return following if following < total else None
+
+    def _note_played(self, state: Dict[str, Any], target: int) -> None:
+        if str(state.get("mode") or "") != "random":
+            state["random_played"] = []
+            return
+        played = [int(value) for value in (state.get("random_played") or [])
+                  if str(value).lstrip("-").isdigit()]
+        if target not in played:
+            played.append(target)
+        if len(played) >= len(state.get("items") or []):
+            played = [target]
+        state["random_played"] = played
+
+    def _set_mode(self, mode: str) -> bool:
+        """把播放方式写进队列状态。
+
+        队列为空时也写：说"随机播放"的人要的是"接下来都随机"，不是"这堆里现在随机"。
+        """
+        state = self._queue_state()
+        state["mode"] = mode
+        if mode != "random":
+            state["random_played"] = []
+        self.save_data(_KEY_QUEUE, state)
+        return True
 
     def _control(self, action: str, device_id: Optional[str] = None) -> PlayOut:
         """播放控制：play/pause/stop 交给音箱，next/prev/数字由插件自己推队列位置。"""
@@ -609,8 +987,16 @@ class XiaoaiSpeaker(_PluginBase):
         label = {"play": "继续播放", "pause": "已暂停", "stop": "已停止"}[action]
         if action == "stop":
             self.__dict__["_idle_ticks"] = 0
+
+        def follow(target: Dict[str, Any]) -> Tuple[bool, str]:
+            outcome = client.play_operation(str(target.get("device_id") or ""), action)
+            return bool(outcome.get("ok")), str(outcome.get("error") or "")
+
+        failures = self._group_follow(device, follow)
+        suffix = self._group_suffix(len(self._fanout_devices(str(device.get("device_id") or ""))), failures)
         return PlayOut(ok=bool(result.get("ok")),
-                       message=label if result.get("ok") else str(result.get("error") or "音箱没有受理"),
+                       message=(label if result.get("ok")
+                                else str(result.get("error") or "音箱没有受理")) + suffix,
                        api=str(result.get("api") or ""),
                        playing=self._playing_out(device, force=True) if result.get("ok") else None,
                        queue=self._queue_out())
@@ -627,8 +1013,16 @@ class XiaoaiSpeaker(_PluginBase):
             result = client.set_volume(str(device.get("device_id") or ""), value)
         except (MinaAuthError, MinaError) as exc:
             return ActionOut(ok=False, message=f"设置音量失败：{exc}")
+
+        def follow(target: Dict[str, Any]) -> Tuple[bool, str]:
+            outcome = client.set_volume(str(target.get("device_id") or ""), value)
+            return bool(outcome.get("ok")), str(outcome.get("error") or "")
+
+        failures = self._group_follow(device, follow)
+        suffix = self._group_suffix(len(self._fanout_devices(str(device.get("device_id") or ""))), failures)
         return ActionOut(ok=bool(result.get("ok")),
-                         message=f"音量 {value}" if result.get("ok") else str(result.get("error") or ""),
+                         message=(f"音量 {value}" if result.get("ok")
+                                  else str(result.get("error") or "")) + suffix,
                          playing=self._playing_out(device, force=True) if result.get("ok") else None)
 
     def _tts(self, text: str, device_id: Optional[str] = None) -> ActionOut:
@@ -642,13 +1036,375 @@ class XiaoaiSpeaker(_PluginBase):
             result = client.text_to_speech(str(device.get("device_id") or ""), text)
         except (MinaAuthError, MinaError) as exc:
             return ActionOut(ok=False, message=f"播报失败：{exc}")
+
+        def follow(target: Dict[str, Any]) -> Tuple[bool, str]:
+            outcome = client.text_to_speech(str(target.get("device_id") or ""), text)
+            return bool(outcome.get("ok") is not False), str(outcome.get("error") or "")
+
+        failures = self._group_follow(device, follow)
+        suffix = self._group_suffix(len(self._fanout_devices(str(device.get("device_id") or ""))), failures)
         ok = result.get("ok")
         if ok is None:
-            return ActionOut(ok=True, message=str(result.get("error") or "音箱回执超时，可能已播报"),
+            return ActionOut(ok=True,
+                             message=str(result.get("error") or "音箱回执超时，可能已播报") + suffix,
                              playing=self._playing_out(device, force=True))
         return ActionOut(ok=bool(ok),
-                         message="已播报" if ok else str(result.get("error") or "音箱拒绝播报"),
+                         message=("已播报" if ok else str(result.get("error") or "音箱拒绝播报")) + suffix,
                          playing=self._playing_out(device, force=True) if ok else None)
+
+    # ---------------- 语音控制 ----------------
+
+    def _timer(self) -> _intents.SleepTimer:
+        return _intents.SleepTimer(
+            lambda: self.get_data(_KEY_TIMER),
+            lambda state: self.save_data(_KEY_TIMER, state),
+        )
+
+    def _memory(self) -> _intents.Memory:
+        return _intents.Memory(
+            lambda: self.get_data(_KEY_MEMORY),
+            lambda rows: self.save_data(_KEY_MEMORY, rows),
+        )
+
+    def _favorites(self) -> List[str]:
+        raw = self.get_data(_KEY_FAVORITES)
+        return [str(item) for item in raw if item] if isinstance(raw, list) else []
+
+    def _toggle_favorite(self, path: str, remove: bool = False) -> Tuple[bool, str]:
+        """收藏/取消收藏当前这一首：只存库内路径，"播放我的收藏"再按顺序排。"""
+        rows = self._favorites()
+        real, reason = _media.resolve_playable(path, self._roots(), self._exts())
+        if not real and not remove:
+            return False, self._reject_text(reason)
+        key = str(real or path)
+        if remove:
+            if key not in rows:
+                return False, "这一首本来就不在收藏里"
+            rows = [item for item in rows if item != key]
+        elif key in rows:
+            return True, "已经在收藏里了"
+        else:
+            rows.append(key)
+        self.save_data(_KEY_FAVORITES, rows[-2000:])
+        return True, ("已取消收藏" if remove else f"已收藏，共 {len(rows)} 首")
+
+    def _listener(self) -> Optional[_speech.SpeechListener]:
+        """语音监听器（懒建）。语音控制关掉时返回 None；没登录时轮询自己退避。"""
+        if not self._voice_enabled:
+            return None
+        listener = self.__dict__.get("_speech_listener")
+        if not isinstance(listener, _speech.SpeechListener):
+            listener = _speech.SpeechListener(
+                handler=self._on_voice_text,
+                get_client=self._client,
+                get_devices=self._voice_monitored,
+                speak=lambda device_id, text: self._tts(text, device_id=device_id),
+                interval=float(self._voice_poll),
+                chat_active=self._chat_active,
+            )
+            self.__dict__["_speech_listener"] = listener
+        listener.configure(float(self._voice_poll))
+        return listener
+
+    def _voice_monitored(self) -> List[Dict[str, Any]]:
+        """要读对话记录的设备：配置里点名的那几台，没点名就用当前默认设备。
+
+        轮询是按设备计费（请求数）的，全账号扫一遍再过滤会把小米接口打爆；
+        真要控制客厅那台，就把它的 device_id 填进配置。
+        """
+        devices, _ = self._devices_cached()
+        wanted = [item.strip() for item in re.split(r"[,;\s]+", self._voice_devices or "") if item.strip()]
+        if not wanted:
+            device, _err = self._target_device()
+            return [device] if device else []
+        return [device for device in devices
+                if str(device.get("device_id") or "") in wanted]
+
+    def _on_voice_text(self, text: str, device_id: str, hardware: str) -> str:
+        """一句话 → 要做的事 → 要播报的话。硬件参数留着，型号不同要换接口的地方在 _push。"""
+        text = (text or "").strip()
+        if not text:
+            return ""
+        logger.info(f"{_LOG} 语音「{text}」设备 {device_id or '-'}")
+        match = self._match_voice(text)
+        if match is None:
+            return self._chat_reply(text, device_id)
+        if self._voice_interrupt:
+            self._interrupt(device_id)
+        if self._voice_hint_tts and match.kind in _voice.SEARCH_TYPES:
+            self._tts(self._voice_hint_text, device_id=device_id or None)
+        reply = self._run_intent(match, device_id)
+        if reply and match.kind in _voice.SEARCH_TYPES and self._voice_memory:
+            self._remember(match, text)
+        return reply if self._voice_reply else ""
+
+    def _match_voice(self, text: str) -> Optional[_voice.Match]:
+        """一句话的三级判定：口令表 → 记忆表 → AI 兜底（顺序与上游一致）。"""
+        match = _voice.match_command(text, _voice.enabled_commands(self._voice_commands()))
+        if match is not None:
+            return match
+        if self._voice_memory:
+            replay = self._memory().lookup("play_song", text)
+            if replay:
+                # 上次这么说播过一首：直接重播，省掉一次搜索也省掉误判
+                return _voice.Match("play_song", "", "memory", text, text)
+        if self._ai_available():
+            return self._analyzer().analyze(text)
+        return None
+
+    def _voice_commands(self) -> List[str]:
+        """启用的口令类型：配置里没关就全开。"""
+        raw = self.get_data(_KEY_COMMANDS)
+        if not isinstance(raw, dict) or not raw:
+            return [row[0] for row in _voice.DEFAULT_COMMANDS]
+        return sorted({str(row[0]) for row in _voice.DEFAULT_COMMANDS
+                       if raw.get(str(row[0]), True)})
+
+    def _ai_available(self) -> bool:
+        return bool(self._ai_enabled and self._ai_api_key)
+
+    def _ai_config(self) -> Dict[str, Any]:
+        return {"api_url": self._ai_api_url, "api_key": self._ai_api_key,
+                "model": self._ai_model, "timeout": self._ai_timeout}
+
+    def _analyzer(self) -> _intents.AIAnalyzer:
+        """AI 兜底与对话用的分析器：每轮按当前配置新建，改配置立刻生效。"""
+        return _intents.AIAnalyzer(self._ai_config())
+
+    def _chat_active(self) -> bool:
+        """对话窗口还开着就按满速轮询：追问隔 5 秒才读到很出戏。"""
+        if not (self._ai_chat and self._ai_available()):
+            return False
+        return time.time() - float(self.__dict__.get("_chat_at") or 0.0) < _CHAT_WINDOW_SECONDS
+
+    def _chat_reply(self, text: str, device_id: str) -> str:
+        """口令表没命中时的一次 AI 对话；没开 ai_chat 就什么都不做。
+
+        上下文只留在本轮进程内存里，不落 plugindata：家里人跟音箱说的话多半
+        不该写进配置库，而且对话窗口本来就是短命的。
+        """
+        if not (self._ai_chat and self._ai_available()):
+            return ""
+        history = list(self.__dict__.get("_chat_history") or [])
+        answer = self._analyzer().chat(text, history[-_CHAT_TURNS:])
+        if not answer:
+            return ""
+        history += [{"role": "user", "content": text},
+                    {"role": "assistant", "content": answer}]
+        self.__dict__["_chat_history"] = history[-_CHAT_TURNS * 2:]
+        self.__dict__["_chat_at"] = time.time()
+        return answer
+
+    def _chat_reset(self) -> None:
+        self.__dict__["_chat_history"] = []
+        self.__dict__["_chat_at"] = 0.0
+
+    def _interrupt(self, device_id: str) -> None:
+        """抢在小爱的回答之前把声道清出来。失败不打扰用户：顶多听到半句"我帮你找找"。"""
+        if not device_id:
+            return
+        client, _err = self._client()
+        if not client:
+            return
+        try:
+            client.interrupt(device_id)
+        except (MinaAuthError, MinaError):
+            pass
+
+    def _current_path(self) -> str:
+        """队列里当前这一首的路径；队列空了就退回最近一次推送的记录。"""
+        state = self._queue_state()
+        items = state.get("items") or []
+        index = int(state.get("index") or 0)
+        if 0 <= index < len(items):
+            return str(items[index].get("path") or "")
+        last = self.get_data(_KEY_LAST)
+        return str(last.get("path") or "") if isinstance(last, dict) else ""
+
+    def _remember(self, match: _voice.Match, text: str) -> None:
+        path = self._current_path()
+        if path:
+            self._memory().remember(match.kind, text, path)
+
+    def _run_intent(self, match: _voice.Match, device_id: str) -> str:
+        """执行一个意图，返回要播报的话（空串 = 没什么可说的）。"""
+        kind = match.kind
+        target = device_id or None
+        selection = _intents.Selection(self._library(), self._favorites())
+
+        if kind == "play_song":
+            if not selection.ready:
+                return "曲库还没索引好，请先在侧栏页重建索引"
+            remembered = self._memory().lookup("play_song", match.argument) if self._voice_memory else ""
+            path, queue, label = selection.song(match.argument, remembered)
+            if not path:
+                self._library_rebuild(force=False)
+                return f"没找到{match.argument}"
+            result = self._play_file(path, device_id=target, queue_paths=queue)
+            return f"播放 {label}" if result.ok else str(result.message or "播放失败")
+
+        if kind == "play_artist":
+            if not selection.ready:
+                return "曲库还没索引好，请先在侧栏页重建索引"
+            paths, label = selection.artist(match.argument)
+            if not paths:
+                return f"没找到{match.argument}的歌"
+            result = self._play_file(paths[0], device_id=target, queue_paths=paths)
+            return f"播放{label}" if result.ok else str(result.message or "播放失败")
+
+        if kind == "play_playlist":
+            paths, label = selection.playlist(match.argument)
+            if not paths and selection.ready:
+                paths, label = selection.playlist(match.argument)
+            if not paths:
+                return f"没找到歌单{match.argument}" if match.argument else "没有可用的歌单"
+            index = _library.parse_track_index(match.raw, len(paths)) or 0
+            result = self._play_file(paths[index], device_id=target, queue_paths=paths)
+            return f"播放歌单 {label}" if result.ok else str(result.message or "播放失败")
+
+        if kind == "play_recommend":
+            paths, label = selection.random_songs()
+            if not paths:
+                return "曲库里没有可播的曲目"
+            result = self._play_file(paths[0], device_id=target, queue_paths=paths)
+            if result.ok:
+                self._set_mode("random")
+            return f"随便放点：{label}" if result.ok else str(result.message or "播放失败")
+
+        if kind == "play_index":
+            number = _intents.parse_index_number(match.argument)
+            if not number:
+                return "没听清要播第几首"
+            state = self._queue_state()
+            total = len(state.get("items") or [])
+            if not total:
+                return "队列为空，先选一首歌"
+            if number > total:
+                return f"队列里只有 {total} 首"
+            result = self._advance(str(number - 1))
+            if not result.ok:
+                return str(result.message or "切歌失败")
+            row = (state.get("items") or [])[number - 1]
+            return f"播放第 {number} 首 {str(row.get('title') or '')}".strip()
+
+        if kind == "set_play_mode":
+            mode = match.param or _intents.normalize_mode(match.argument)
+            if not mode:
+                return "没听清要哪种播放方式"
+            self._set_mode(mode)
+            return _MODE_TEXT.get(mode, "已调整播放方式")
+
+        if kind == "set_volume":
+            if match.param == "up":
+                return self._nudge_volume(10, target)
+            if match.param == "down":
+                return self._nudge_volume(-10, target)
+            value = _intents.parse_volume_number(match.argument)
+            if value is None:
+                return "没听清要调到多少音量"
+            result = self._volume(value, device_id=target)
+            return f"音量 {value}" if result.ok else str(result.message or "设置音量失败")
+
+        if kind in ("next", "previous"):
+            result = self._advance("next" if kind == "next" else "prev")
+            if result.message == _QUEUE_END_MESSAGE:
+                return str(result.message)
+            return "" if result.ok else str(result.message or "切歌失败")
+        if kind == "resume":
+            result = self._control("play", device_id=target)
+            return "" if result.ok else str(result.message or "继续播放失败")
+        if kind == "stop":
+            result = self._control("stop", device_id=target)
+            return "" if result.ok else str(result.message or "停止失败")
+
+        if kind == "favorite":
+            current = self._current_path()
+            if not current:
+                return "现在没有正在播的歌，收藏不了"
+            ok, message = self._toggle_favorite(current, remove=match.param == "remove")
+            return message if ok else (message or "收藏操作失败")
+
+        if kind == "sleep_timer":
+            if match.param == "songs":
+                count = _intents.parse_positive_number(match.argument)
+                if not count:
+                    return "没听清要再播几首"
+                self._timer().set_songs(count, device_id)
+                return f"好的，再播 {count} 首后停止"
+            minutes = _intents.parse_positive_number(match.argument)
+            if not minutes:
+                return "没听清要定时多久"
+            self._timer().set_minutes(minutes)
+            return f"好的，{minutes} 分钟后停止播放"
+        if kind == "cancel_sleep_timer":
+            self._timer().cancel()
+            return "已取消定时停止"
+        if kind == "query_sleep_timer":
+            return self._timer().remaining_text()
+
+        if kind == "query_playing":
+            state = self._queue_state()
+            items = state.get("items") or []
+            index = int(state.get("index") or 0)
+            if 0 <= index < len(items):
+                return f"现在播的是 {str(items[index].get('title') or '')}".strip()
+            playing = self._playing_out(self._target_device(target)[0] or {})
+            return f"现在播的是 {playing.title}".strip() if playing.title else "现在没有播歌"
+
+        if kind == "tts":
+            if not match.argument:
+                return ""
+            self._tts(match.argument, device_id=target)
+            return ""
+        return ""
+
+    def _nudge_volume(self, delta: int, device_id: Optional[str]) -> str:
+        """按增量调音量：先读当前值，避免把"大声一点"变成固定值。"""
+        device, err = self._target_device(device_id)
+        if not device:
+            return err
+        client, err = self._client()
+        if not client:
+            return err
+        try:
+            current = client.get_volume(str(device.get("device_id") or ""))
+        except (MinaAuthError, MinaError):
+            current = -1
+        if current < 0:
+            current = int(self._default_volume or 50)
+        result = self._volume(max(0, min(100, current + delta)), device_id=device_id)
+        return str(result.message or ("已调整音量" if result.ok else "调整音量失败"))
+
+    def _timer_state_out(self) -> Dict[str, Any]:
+        """睡眠定时的可序列化状态（侧栏页与 /status.extra 共用）。"""
+        state = self._timer().state()
+        stop_at = float(state.get("stop_at") or 0)
+        songs = state.get("stop_after_songs")
+        songs = int(songs) if isinstance(songs, (int, float)) and songs > 0 else 0
+        return {
+            "active": bool(stop_at > time.time()) or songs > 0,
+            "stop_at": self._stamp_text(stop_at) if stop_at > time.time() else "",
+            "stop_after_songs": songs,
+            "remaining": self._timer().remaining_text(),
+        }
+
+    def _voice_state_out(self) -> Dict[str, Any]:
+        """监听器概况：没开启就只回 enabled=False，不去创建监听器。"""
+        if not self._voice_enabled:
+            return {"enabled": False, "interval": int(self._voice_poll),
+                    "handled": 0, "devices": [], "error": "", "last_poll_at": "",
+                    "chat": False, "chat_active": False}
+        listener = self._listener()
+        if listener is None:
+            return {"enabled": False, "interval": int(self._voice_poll),
+                    "handled": 0, "devices": [], "error": "", "last_poll_at": ""}
+        status = listener.status()
+        status["enabled"] = True
+        status["chat"] = bool(self._ai_chat and self._ai_available())
+        status["chat_active"] = self._chat_active()
+        status["devices"] = [str(device.get("device_id") or "")
+                             for device in self._voice_monitored()]
+        return status
 
     # ---------------- 状态读取 ----------------
 
@@ -705,11 +1461,52 @@ class XiaoaiSpeaker(_PluginBase):
     # ---------------- 连播 ----------------
 
     def _tick(self) -> None:
-        """宿主周期任务：发现「播完了」就推队列下一首。"""
-        if not self._enabled or not self._auto_next:
+        """宿主周期任务：睡眠定时到点、曲库索引保鲜、定时任务到点、队列连播。"""
+        if not self._enabled:
             return
         if self._stop_event().is_set():
             return
+        self._tick_timer()
+        self._tick_library()
+        self._tick_tasks()
+        if self._auto_next:
+            self._tick_advance()
+
+    def _tick_timer(self) -> None:
+        """定时到点就停：只认"到时间"这一种，按首数停止在播完一首时判。"""
+        try:
+            due, message = self._timer().due()
+        except Exception as err:  # pragma: no cover - 落盘状态被手改坏
+            logger.warning(f"{_LOG} 读取睡眠定时失败: {err}")
+            return
+        if not due:
+            return
+        logger.info(f"{_LOG} {message}，停止播放")
+        device_id = str(self._queue_state().get("device_id") or "")
+        if not device_id:
+            device_id = str((self._target_device()[0] or {}).get("device_id") or "")
+        self._control("stop", device_id=device_id or None)
+
+    def _tick_library(self) -> None:
+        """索引保鲜：首轮起来就建，之后按配置周期重扫。周期 0 表示只手动。"""
+        if not self._roots():
+            return
+        index = self._library()
+        now = time.time()
+        if not index.ready:
+            self.__dict__["_index_at"] = now
+            self._library_rebuild(force=True)
+            return
+        minutes = int(self._library_refresh or 0)
+        if minutes <= 0:
+            return
+        if now - float(self.__dict__.get("_index_at") or 0.0) < minutes * 60.0:
+            return
+        self.__dict__["_index_at"] = now
+        self._library_rebuild(force=False)
+
+    def _tick_advance(self) -> None:
+        """发现「播完了」就推队列下一首。"""
         state = self._queue_state()
         items = state.get("items") or []
         index = int(state.get("index") or 0)
@@ -740,21 +1537,319 @@ class XiaoaiSpeaker(_PluginBase):
         logger.info(f"{_LOG} 队列 {index + 1}/{len(items)} 已播完，推进下一首")
         if self._stop_event().is_set():
             return
+        try:
+            stopped, message = self._timer().on_track_finished()
+        except Exception as err:  # pragma: no cover - 落盘状态被手改坏
+            logger.warning(f"{_LOG} 更新睡眠定时失败: {err}")
+            stopped, message = False, ""
+        if stopped:
+            logger.info(f"{_LOG} {message}，停止连播")
+            self._control("stop", device_id=device_id)
+            return
         result = self._advance("next")
         if self._tts_announce and result.ok:
             advanced = self._queue_state()
             rows = advanced.get("items") or []
             position = int(advanced.get("index") or 0)
-            if 0 <= position < len(rows):
+            # 顺序播到最后一首、或"单曲播放"模式播完：_advance 会原地返回成功，
+            # 这时并没有"接下来"，别播一句报下一首而音箱已经安静了
+            if position != index and 0 <= position < len(rows):
                 title = str(rows[position].get("title") or "").strip()
                 if title:
                     self._tts(f"接下来播放 {title}", device_id=device_id)
+
+    def _voice_tick(self) -> None:
+        """宿主周期任务：读一轮小爱对话记录，把新说的话交给口令引擎。
+
+        监听器内部还会按配置的间隔掐表（含失败退避），所以这里的注册间隔只是
+        "最快多久醒一次"，配置改小不会真的把小米接口打得更频繁。
+        """
+        if not self._enabled or not self._voice_enabled:
+            return
+        if self._stop_event().is_set():
+            return
+        listener = self._listener()
+        if listener is None:
+            return
+        try:
+            listener.tick()
+        except Exception as err:  # pragma: no cover - 轮询自身已兜异常，这里只防 handler 之外漏出
+            logger.warning(f"{_LOG} 语音轮询异常: {err}")
+
+    # ---------------- 定时任务 ----------------
+
+    def _tasks(self) -> List[Dict[str, Any]]:
+        """读回定时任务：形状不对的行直接丢掉，一条坏任务不该拖垮整轮巡检。"""
+        data = self.get_data(_KEY_TASKS)
+        rows = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(rows, list):
+            return []
+        return [task for task in (self._clean_task(row) for row in rows) if task]
+
+    def _save_tasks(self, rows: List[Dict[str, Any]]) -> None:
+        self.save_data(_KEY_TASKS, {"items": rows, "at": self._now_text()})
+
+    @staticmethod
+    def _ints(value: Any, low: int, high: int) -> List[int]:
+        if not isinstance(value, (list, tuple)):
+            return []
+        out: List[int] = []
+        for item in value:
+            try:
+                number = int(item)
+            except (TypeError, ValueError):
+                continue
+            if low <= number <= high and number not in out:
+                out.append(number)
+        return out
+
+    def _clean_task(self, row: Any) -> Optional[Dict[str, Any]]:
+        """把一条任务收敛成可执行形状；不合规的直接判成 None（调用方丢弃）。"""
+        if not isinstance(row, dict):
+            return None
+        action = str(row.get("action") or "")
+        if action not in _TASK_ACTIONS:
+            return None
+        name = str(row.get("name") or "").strip()[:40]
+        if not name:
+            return None
+        schedule = row.get("schedule") if isinstance(row.get("schedule"), dict) else {}
+        time_text = str(schedule.get("time") or "").strip()
+        if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", time_text):
+            return None
+        stype = str(schedule.get("type") or "weekly")
+        if stype not in ("weekly", "monthly"):
+            stype = "weekly"
+        weekdays = sorted(self._ints(schedule.get("weekdays"), 0, 6))
+        monthdays = sorted(self._ints(schedule.get("monthdays"), 1, 31))
+        if not (weekdays if stype == "weekly" else monthdays):
+            return None
+        target = row.get("target") if isinstance(row.get("target"), dict) else {}
+        params = row.get("params") if isinstance(row.get("params"), dict) else {}
+        now = self._now_text()
+        return {
+            "id": str(row.get("id") or f"task_{int(time.time() * 1000)}"),
+            "name": name,
+            "enabled": bool(row.get("enabled")),
+            "action": action,
+            "schedule": {"type": stype, "time": time_text,
+                         "weekdays": weekdays, "monthdays": monthdays},
+            "target": {"all": bool(target.get("all")),
+                       "device_ids": [str(item).strip() for item in
+                                      (target.get("device_ids") or []) if str(item).strip()]},
+            "params": dict(params),
+            "created_at": str(row.get("created_at") or now),
+            "updated_at": now,
+        }
+
+    def _task_logs(self, limit: int = 0) -> List[Dict[str, Any]]:
+        data = self.get_data(_KEY_TASK_LOGS)
+        rows = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(rows, list):
+            return []
+        rows = [row for row in rows if isinstance(row, dict)]
+        return rows[-limit:] if limit else rows
+
+    def _append_task_logs(self, rows: List[Dict[str, Any]]) -> None:
+        if not rows:
+            return
+        kept = self._task_logs() + [row for row in rows if isinstance(row, dict)]
+        self.save_data(_KEY_TASK_LOGS, {"items": kept[-_TASK_LOG_KEEP:],
+                                        "at": self._now_text()})
+
+    def _task_log(self, task: Dict[str, Any], device: str,
+                  ok: bool, message: str) -> Dict[str, Any]:
+        return {"task_id": str(task.get("id") or ""), "task_name": str(task.get("name") or ""),
+                "action": str(task.get("action") or ""), "device": device,
+                "success": bool(ok), "message": str(message or ""), "at": self._now_text()}
+
+    @staticmethod
+    def _schedule_hit(schedule: Dict[str, Any], now: datetime) -> bool:
+        """weekly 看星期几（0=周日），monthly 看几号。
+
+        上游那套"法定节假日感知"没搬：它把假期表编进插件产物里，宿主容器里的插件
+        没有那份数据也没有更新渠道。要"只工作日"或"只周末"就分建两条任务勾不同的周几。
+        """
+        if str(schedule.get("time") or "") != now.strftime("%H:%M"):
+            return False
+        if str(schedule.get("type")) == "monthly":
+            return now.day in set(int(item) for item in schedule.get("monthdays") or [])
+        return (now.isoweekday() % 7) in set(int(item) for item in schedule.get("weekdays") or [])
+
+    @staticmethod
+    def _schedule_text(schedule: Dict[str, Any]) -> str:
+        time_text = str(schedule.get("time") or "")
+        if str(schedule.get("type")) == "monthly":
+            days = "、".join(f"{item} 号" for item in schedule.get("monthdays") or [])
+            return f"每月 {days} {time_text}"
+        # 「每」+「周一」正好连成「每周一」，不必再插「的」这种废话
+        days = "、".join(_TASK_WEEK_TEXT[item] for item in schedule.get("weekdays") or [])
+        return f"每{days} {time_text}"
+
+    def _task_devices(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
+        target = task.get("target") or {}
+        devices, _ = self._devices_cached(force=False)
+        if target.get("all"):
+            # 「全部音箱」先只挑在线的：离线的那台每次都留一条失败日志，一周下来全是噪音
+            return [item for item in devices if str(item.get("presence") or "") == "online"] or devices
+        ids = [str(item) for item in (target.get("device_ids") or [])]
+        if not ids:
+            device, _ = self._target_device()
+            return [device] if device else []
+        by_id = {str(item.get("device_id") or ""): item for item in devices}
+        return [by_id[item] for item in ids if item in by_id]
+
+    def _run_task(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
+        action = str(task.get("action") or "")
+        if action in ("enable_monitor", "disable_monitor"):
+            ok, message = self._task_monitor(action)
+            return [self._task_log(task, "全部", ok, message)]
+        devices = self._task_devices(task)
+        if not devices:
+            return [self._task_log(task, "", False, "没有可用的目标音箱（先登录小米账号）")]
+        logs: List[Dict[str, Any]] = []
+        covered: set = set()
+        for device in devices:
+            device_id = str(device.get("device_id") or "")
+            if device_id in covered:
+                continue
+            ok, message = self._run_on_device(task, device)
+            logs.append(self._task_log(task, str(device.get("name") or device_id), ok, message))
+            if ok:
+                # 同组的其它成员已被 _control/_volume/_push 带动，别再作为独立目标各下发一次
+                covered.update(str(item.get("device_id") or "")
+                               for item in self._fanout_devices(device_id)[1:])
+        return logs
+
+    def _run_on_device(self, task: Dict[str, Any], device: Dict[str, Any]) -> Tuple[bool, str]:
+        action = str(task.get("action") or "")
+        device_id = str(device.get("device_id") or "")
+        params = task.get("params") or {}
+        if action in ("play_playlist", "play_playlist_from"):
+            return self._task_play(task, device_id, params)
+        if action == "stop":
+            out = self._control("stop", device_id=device_id)
+            return bool(out.ok), str(out.message or "已停止")
+        if action == "set_volume":
+            try:
+                volume = int(params.get("volume"))
+            except (TypeError, ValueError):
+                return False, "任务里没有音量值"
+            out = self._volume(volume, device_id=device_id)
+            return bool(out.ok), str(out.message or "")
+        if action == "set_play_mode":
+            mode = _intents.normalize_mode(str(params.get("play_mode") or ""))
+            if not mode:
+                return False, "任务里没有有效的播放方式"
+            if not self._set_mode(mode):
+                return False, "设置播放方式失败（音箱可能离线）"
+            return True, f"已设为{_MODE_TEXT.get(mode, mode)}"
+        return False, f"不支持的任务动作：{action}"
+
+    def _task_monitor(self, action: str) -> Tuple[bool, str]:
+        enable = action == "enable_monitor"
+        if self._voice_enabled == enable:
+            return True, f"语音监听已经是{'开' if enable else '关'}的"
+        self._voice_enabled = enable
+        self._save_config()
+        self._refresh_jobs()
+        return True, "语音监听已开启" if enable else "语音监听已关闭"
+
+    def _task_play(self, task: Dict[str, Any], device_id: str,
+                   params: Dict[str, Any]) -> Tuple[bool, str]:
+        index = self._library()
+        if not index.ready:
+            return False, "曲库索引还没建好，先到「音乐库」栏重建索引"
+        playlist = None
+        try:
+            pid = int(params.get("playlist_id") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        if pid:
+            playlist = index.get_playlist(pid)
+        name = str(params.get("playlist_name") or "").strip()
+        if playlist is None and name:
+            playlist = index.find_playlist_by_name(name)
+        if playlist is None:
+            return False, f"找不到歌单「{name or pid}」，可能索引过期，重建后再试"
+        paths = [song.path for song in index.playlist_songs(playlist)]
+        if not paths:
+            return False, f"歌单「{playlist.name}」里没有可读到的音频"
+        start = 0
+        note = ""
+        if str(task.get("action")) == "play_playlist_from":
+            song_name = str(params.get("song_name") or "").strip()
+            hit = index.find_song_in_playlist(playlist, song_name) if song_name else None
+            if hit:
+                start = hit[0]
+                note = f"（从「{hit[1].title or hit[1].name}」开始）"
+            elif song_name:
+                note = f"（没找到「{song_name}」，从第一首开始）"
+        elif str(params.get("start") or "first") == "random" and len(paths) > 1:
+            start = random.randrange(len(paths))
+            note = "（随机起始）"
+        mode = _intents.normalize_mode(str(params.get("play_mode") or ""))
+        if mode:
+            self._set_mode(mode)
+        extras: List[str] = []
+        volume = params.get("volume")
+        if volume not in (None, ""):
+            try:
+                out = self._volume(int(volume), device_id=device_id)
+                extras.append(f"音量 {int(volume)}" if out.ok else f"音量没设成：{out.message}")
+            except (TypeError, ValueError):
+                pass
+        minutes = params.get("stop_after_minutes")
+        try:
+            if minutes and int(minutes) > 0:
+                self._timer().set_minutes(int(minutes))
+                extras.append(f"{int(minutes)} 分钟后停")
+        except (TypeError, ValueError):
+            pass
+        result = self._play_file(paths[start], device_id=device_id, queue_paths=paths)
+        if not result.ok:
+            return False, f"播放歌单「{playlist.name}」失败：{result.message}"
+        suffix = f"（{'，'.join(extras)}）" if extras else ""
+        return True, f"播放歌单「{playlist.name}」{note}{suffix}：{result.message}"
+
+    def _tick_tasks(self) -> None:
+        """分钟级去重的到点执行：巡检 20 秒一次，同一分钟只认一次，任务不会双触发。"""
+        now = datetime.now()
+        minute = now.strftime("%Y-%m-%d %H:%M")
+        if self.__dict__.get("_task_minute") == minute:
+            return
+        self.__dict__["_task_minute"] = minute
+        for task in self._tasks():
+            if not task["enabled"]:
+                continue
+            if not self._schedule_hit(task["schedule"], now):
+                continue
+            logger.info(f"{_LOG} 定时任务触发：{task['name']}（{_TASK_ACTIONS.get(task['action'], task['action'])}）")
+            try:
+                self._append_task_logs(self._run_task(task))
+            except Exception as err:  # pragma: no cover - 单条任务异常不外溢
+                logger.warning(f"{_LOG} 定时任务 {task['name']} 执行异常: {err}")
+                self._append_task_logs([self._task_log(task, "", False, f"执行异常：{err}")])
 
     def _stop_event(self) -> threading.Event:
         return self.__dict__.setdefault("_stop_flag", threading.Event())
 
     def _play_lock(self) -> threading.Lock:
         return self.__dict__.setdefault("_op_lock", threading.Lock())
+
+    def _refresh_jobs(self) -> None:
+        """让宿主按当前配置重建本插件的周期任务。
+
+        语音任务只在 `voice_enabled` 为真时才登记，而从侧栏页保存配置不会走插件管理
+        那条链路，不主动喊一声的话，打开监听也不会有轮询真的跑起来。
+        """
+        update = getattr(scheduler_sdk, "update_plugin_job", None) if scheduler_sdk else None
+        if not update:
+            return
+        try:
+            update(self._plugin_id())
+        except Exception as err:  # pragma: no cover - 调度器不可用不影响配置已落盘
+            logger.warning(f"{_LOG} 重建周期任务失败: {err}")
 
     # ---------------- 登录 ----------------
 
@@ -919,6 +2014,10 @@ class XiaoaiSpeaker(_PluginBase):
     def _now_text() -> str:
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    @staticmethod
+    def _stamp_text(stamp: float) -> str:
+        return datetime.fromtimestamp(stamp).strftime("%Y-%m-%d %H:%M:%S") if stamp else ""
+
     # ---------------- 状态汇总 ----------------
 
     def _status(self, force_devices: bool = False) -> StatusOut:
@@ -947,6 +2046,13 @@ class XiaoaiSpeaker(_PluginBase):
         queue_state = self._queue_state()
         # 拿不到客户端 = 票据过期或已被小米判失效，两种都要重新登录
         token_expired = bool(token) and (client is None or client.token_expired())
+        library_status = self._library_status()
+        if self._voice_enabled and not token:
+            needs.append("语音控制：读不到小爱的对话记录，需要先在上面登录小米账号")
+        elif self._voice_enabled and not self._voice_monitored():
+            needs.append("语音控制：没有可监听的设备，检查默认音箱或「监听设备」")
+        elif self._voice_enabled and not library_status.get("ready") and roots:
+            notices.append("语音点歌还不可用：曲库索引尚未建好，稍等或手动点「重建索引」")
         return StatusOut(
             enabled=self._enabled,
             version=self.plugin_version,
@@ -980,11 +2086,36 @@ class XiaoaiSpeaker(_PluginBase):
                 auto_next=self._auto_next,
                 keep_light=self._keep_light,
                 tts_announce=self._tts_announce,
+                voice_enabled=self._voice_enabled,
+                voice_devices=self._voice_devices,
+                voice_poll=self._voice_poll,
+                voice_interrupt=self._voice_interrupt,
+                voice_hint_tts=self._voice_hint_tts,
+                voice_hint_text=self._voice_hint_text,
+                voice_reply=self._voice_reply,
+                voice_memory=self._voice_memory,
+                ai_enabled=self._ai_enabled,
+                ai_chat=self._ai_chat,
+                ai_api_url=self._ai_api_url,
+                ai_key_set=bool(self._ai_api_key),
+                ai_model=self._ai_model,
+                ai_timeout=self._ai_timeout,
+                library_limit=self._library_limit,
+                library_refresh=self._library_refresh,
             ),
             extra={
                 "devices_fetched_at": fetched_at,
                 "exts": list(self._exts()),
                 "music_api_models": list(_mina.MUSIC_API_MODELS),
+                "library": library_status,
+                "timer": self._timer_state_out(),
+                "voice": self._voice_state_out(),
+                "favorites": len(self._favorites()),
+                "groups": [item.model_dump() for item in self._groups_out().items],
+                "default_group": self._group_name_of(
+                    str((default_device or {}).get("device_id") or "")),
+                "tasks": [self._task_row(task) for task in self._tasks()],
+                "task_logs": self._task_logs(10)[::-1],
             },
         )
 
@@ -1213,6 +2344,166 @@ class XiaoaiSpeaker(_PluginBase):
                 "summary": "按文件名搜索库内音频",
             },
             {
+                "path": "/lyric",
+                "endpoint": self.api_lyric,
+                "methods": ["GET"],
+                "auth": "bear",
+                "response_model": LyricOut,
+                "summary": "读取库内音频的歌词（侧车 .lrc 或内嵌标签）",
+            },
+            {
+                "path": "/mode",
+                "endpoint": self.api_mode,
+                "methods": ["POST"],
+                "auth": "bear",
+                "response_model": ActionOut,
+                "summary": "设置播放方式（顺序/循环/随机/单曲循环/单曲播放）",
+            },
+            {
+                "path": "/timer",
+                "endpoint": self.api_timer_status,
+                "methods": ["GET"],
+                "auth": "bear",
+                "response_model": TimerOut,
+                "summary": "查询睡眠定时停止状态",
+            },
+            {
+                "path": "/timer",
+                "endpoint": self.api_timer,
+                "methods": ["POST"],
+                "auth": "bear",
+                "response_model": TimerOut,
+                "summary": "设置/取消睡眠定时（按分钟或按首数）",
+            },
+            {
+                "path": "/favorites",
+                "endpoint": self.api_favorites,
+                "methods": ["GET"],
+                "auth": "bear",
+                "response_model": FavoritesOut,
+                "summary": "收藏列表",
+            },
+            {
+                "path": "/favorites",
+                "endpoint": self.api_favorite,
+                "methods": ["POST"],
+                "auth": "bear",
+                "response_model": FavoritesOut,
+                "summary": "收藏/取消收藏一首（省略 path 则作用于当前在播）",
+            },
+            {
+                "path": "/library",
+                "endpoint": self.api_library,
+                "methods": ["GET"],
+                "auth": "bear",
+                "response_model": LibraryOut,
+                "summary": "曲库索引状态（点数、歌单数、上次重建时间）",
+            },
+            {
+                "path": "/library/refresh",
+                "endpoint": self.api_library_refresh,
+                "methods": ["POST"],
+                "auth": "bear",
+                "response_model": LibraryOut,
+                "summary": "立刻重建曲库索引（后台执行）",
+            },
+            {
+                "path": "/playlists",
+                "endpoint": self.api_playlists,
+                "methods": ["GET"],
+                "auth": "bear",
+                "response_model": PlaylistsOut,
+                "summary": "歌单列表（目录歌单与 m3u）",
+            },
+            {
+                "path": "/playlist",
+                "endpoint": self.api_playlist,
+                "methods": ["GET"],
+                "auth": "bear",
+                "response_model": SongsOut,
+                "summary": "展开一个歌单的曲目",
+            },
+            {
+                "path": "/voice",
+                "endpoint": self.api_voice,
+                "methods": ["GET"],
+                "auth": "bear",
+                "response_model": VoiceOut,
+                "summary": "语音监听状态与小爱最近听到的话",
+            },
+            {
+                "path": "/voice/test",
+                "endpoint": self.api_voice_test,
+                "methods": ["POST"],
+                "auth": "bear",
+                "response_model": VoiceOut,
+                "summary": "试一句话会被判成哪个口令，可选直接执行",
+            },
+            {
+                "path": "/commands",
+                "endpoint": self.api_commands,
+                "methods": ["GET"],
+                "auth": "bear",
+                "response_model": CommandsOut,
+                "summary": "口令表与开关",
+            },
+            {
+                "path": "/commands",
+                "endpoint": self.api_commands_save,
+                "methods": ["POST"],
+                "auth": "bear",
+                "response_model": CommandsOut,
+                "summary": "保存启用的口令类型",
+            },
+            {
+                "path": "/groups",
+                "endpoint": self.api_groups,
+                "methods": ["GET"],
+                "auth": "bear",
+                "response_model": GroupsOut,
+                "summary": "设备分组列表（多房间同步）",
+            },
+            {
+                "path": "/groups",
+                "endpoint": self.api_group_save,
+                "methods": ["POST"],
+                "auth": "bear",
+                "response_model": GroupsOut,
+                "summary": "新建/修改/删除设备分组",
+            },
+            {
+                "path": "/tasks",
+                "endpoint": self.api_tasks,
+                "methods": ["GET"],
+                "auth": "bear",
+                "response_model": TasksOut,
+                "summary": "定时任务列表",
+            },
+            {
+                "path": "/tasks",
+                "endpoint": self.api_task_save,
+                "methods": ["POST"],
+                "auth": "bear",
+                "response_model": TasksOut,
+                "summary": "新建/修改/删除定时任务",
+            },
+            {
+                "path": "/tasks/run",
+                "endpoint": self.api_task_run,
+                "methods": ["POST"],
+                "auth": "bear",
+                "response_model": TaskLogsOut,
+                "summary": "立刻执行一次指定定时任务",
+            },
+            {
+                "path": "/tasks/logs",
+                "endpoint": self.api_task_logs,
+                "methods": ["GET"],
+                "auth": "bear",
+                "response_model": TaskLogsOut,
+                "summary": "定时任务执行日志",
+            },
+            {
                 "path": "/config",
                 "endpoint": self.api_config,
                 "methods": ["POST"],
@@ -1323,10 +2614,310 @@ class XiaoaiSpeaker(_PluginBase):
         """GET /search?keyword=<曲名> —— 库内文件名搜索，深度上限 6 层。"""
         return self._search((keyword or "").strip())
 
+    def api_lyric(self, path: str = "") -> LyricOut:
+        """GET /lyric?path=<库内音频> —— 侧车 .lrc/.txt 优先，其次音频内嵌歌词标签。"""
+        real, reason = _media.resolve_playable(path, self._roots(), self._exts())
+        if not real:
+            return LyricOut(ok=False, message=self._reject_text(reason), path=str(path or ""))
+        data, _ = _lyrics.load_lyric(real, self._roots())
+        lines = [LyricLineOut(time=float(row.get("time") or -1),
+                              text=str(row.get("text") or ""))
+                 for row in data.get("lines") or []]
+        return LyricOut(ok=bool(lines), message="" if lines else "这首歌没有歌词文件，也没有内嵌歌词标签",
+                        path=str(real), name=str(data.get("name") or real.name),
+                        source=str(data.get("source") or ""),
+                        has_time=bool(data.get("has_time")), lines=lines)
+
+    def api_mode(self, payload: ModeIn) -> ActionOut:
+        """POST /mode —— {mode: order|loop|random|single|single_play}。"""
+        mode = _intents.normalize_mode(payload.mode)
+        if not mode:
+            return ActionOut(ok=False, message="播放方式只能是 order/loop/random/single/single_play")
+        self._set_mode(mode)
+        return ActionOut(ok=True, message=f"已设为{_MODE_TEXT.get(mode, mode)}")
+
+    def api_timer(self, payload: TimerIn) -> TimerOut:
+        """POST /timer —— {minutes} | {songs} | {cancel:true}，返回设置后的定时状态。"""
+        timer = self._timer()
+        if payload.cancel:
+            timer.cancel()
+            return self._timer_model("已取消定时停止")
+        if payload.songs:
+            device_id = str((self._target_device(payload.device_id)[0] or {}).get("device_id") or "")
+            timer.set_songs(int(payload.songs), device_id)
+        elif payload.minutes:
+            timer.set_minutes(int(payload.minutes))
+        else:
+            return self._timer_model("请给出 minutes 或 songs")
+        return self._timer_model()
+
+    def api_timer_status(self) -> TimerOut:
+        """GET /timer —— 当前定时停止状态。"""
+        return self._timer_model()
+
+    def api_favorites(self) -> FavoritesOut:
+        """GET /favorites —— 收藏列表（库里已经删掉的标 exists=false）。"""
+        return self._favorites_out()
+
+    def api_favorite(self, payload: FavoriteIn) -> FavoritesOut:
+        """POST /favorites —— {path?, remove}；不传 path 就作用于当前在播这一首。"""
+        path = (payload.path or "").strip() or self._current_path()
+        if not path:
+            return FavoritesOut(ok=False, message="没有指定曲目，现在也没有在播的歌")
+        ok, message = self._toggle_favorite(path, remove=payload.remove)
+        return self._favorites_out(ok=ok, message=message)
+
+    def api_library(self) -> LibraryOut:
+        """GET /library —— 曲库索引状态。"""
+        return self._library_model()
+
+    def api_library_refresh(self) -> LibraryOut:
+        """POST /library/refresh —— 立刻起一轮重扫（后台线程，不等结果）。"""
+        if not self._roots():
+            return self._library_model(ok=False, message="还没有配置「音乐库路径」")
+        started = self._library_rebuild(force=True)
+        return self._library_model(
+            message="已开始重建索引，稍后刷新查看" if started else "索引正在重建中，请稍后再试")
+
+    def api_playlists(self) -> PlaylistsOut:
+        """GET /playlists —— 目录歌单与 m3u 歌单列表。"""
+        rows = self._library().playlists()
+        return PlaylistsOut(ok=bool(rows),
+                            message="" if rows else "曲库里还没有可播的歌单（先重建索引）",
+                            items=[PlaylistOut(id=str(row.get("id")), name=str(row.get("name") or ""),
+                                               kind=str(row.get("kind") or ""),
+                                               path=str(row.get("path") or ""),
+                                               count=int(row.get("song_count") or 0))
+                                   for row in rows])
+
+    def api_playlist(self, playlist_id: int = 0) -> SongsOut:
+        """GET /playlist?playlist_id=<歌单号> —— 展开一个歌单的曲目路径。"""
+        playlist = self._library().get_playlist(int(playlist_id or 0))
+        if not playlist:
+            return SongsOut(ok=False, message="没有这个歌单，先 GET /playlists 看编号")
+        songs = self._library().playlist_songs(playlist)
+        return SongsOut(ok=bool(songs), message="" if songs else "这个歌单里没有可读到的音频",
+                        name=playlist.name, paths=[song.path for song in songs],
+                        items=[self._file_out(song) for song in songs[:500]])
+
+    def api_voice(self) -> VoiceOut:
+        """GET /voice —— 监听状态 + 小爱最近听到的话。"""
+        return self._voice_model(records=True)
+
+    def api_voice_test(self, payload: VoiceIn) -> VoiceOut:
+        """POST /voice/test —— {text, execute}：不接音箱也能看出一句话被判成了什么。"""
+        text = (payload.text or "").strip()[:200]
+        out = self._voice_model(records=True)
+        if not text:
+            return out.model_copy(update={"ok": False, "message": "请输入一句话"})
+        match = self._match_voice(text)
+        if match is None:
+            out.ok = False
+            out.message = "没有命中任何口令（口令表已关的先去「语音口令」打开，或配 AI 兜底）"
+            return out
+        out.ok = True
+        out.kind = match.kind
+        out.argument = match.argument
+        out.matched = match.keyword or match.kind
+        if payload.execute:
+            out.reply = self._run_intent(match, (payload.device_id or "").strip())
+        else:
+            out.message = "仅判定，未执行；带 execute=true 才会真的播"
+        return out
+
+    def api_commands(self) -> CommandsOut:
+        """GET /commands —— 口令表与每类的开关。"""
+        enabled = set(self._voice_commands())
+        rows: List[CommandOut] = []
+        seen: set = set()
+        for row in _voice.default_commands():
+            kind = str(row.get("kind"))
+            if kind in seen:
+                continue
+            seen.add(kind)
+            rows.append(CommandOut(kind=kind, label=_voice.COMMAND_LABELS.get(kind, kind),
+                                   enabled=kind in enabled,
+                                   keywords=[str(word) for word in (row.get("keywords") or [])][:6]))
+        return CommandsOut(items=rows)
+
+    def api_commands_save(self, payload: CommandsIn) -> CommandsOut:
+        """POST /commands —— {enabled:[类型…]}；enabled 省略或为 null 表示全部恢复。"""
+        known = {str(row[0]) for row in _voice.DEFAULT_COMMANDS}
+        if payload.enabled is None:
+            self.save_data(_KEY_COMMANDS, {})
+        else:
+            wanted = {str(item).strip() for item in payload.enabled} & known
+            self.save_data(_KEY_COMMANDS, {kind: (kind in wanted) for kind in known})
+        return self.api_commands()
+
+    def _file_out(self, song: Any) -> FileOut:
+        return FileOut(name=str(getattr(song, "name", "") or ""),
+                       path=str(getattr(song, "path", "") or ""),
+                       title=str(getattr(song, "title", "") or ""),
+                       size=int(getattr(song, "size", 0) or 0),
+                       mtime=int(getattr(song, "mtime", 0) or 0))
+
+    def _favorites_out(self, ok: bool = True, message: str = "") -> FavoritesOut:
+        index = self._library()
+        rows: List[FavoriteOut] = []
+        for path in self._favorites():
+            song = index.get(path)
+            rows.append(FavoriteOut(path=path,
+                                    title=str(getattr(song, "title", "") or "")
+                                          or _media.strip_index(Path(path).name),
+                                    exists=Path(path).is_file()))
+        return FavoritesOut(ok=ok, message=message, items=rows,
+                            queue=self._queue_out())
+
+    def _library_model(self, ok: bool = True, message: str = "") -> LibraryOut:
+        status = self._library_status()
+        return LibraryOut(
+            ok=ok, message=message,
+            ready=bool(status.get("ready")),
+            songs=int(status.get("songs") or 0),
+            playlists=int(status.get("playlists") or 0),
+            roots=[str(item) for item in status.get("roots") or []],
+            limit=int(status.get("limit") or 0),
+            refresh_minutes=int(status.get("refresh_minutes") or 0),
+            built_at=str(status.get("built_at") or ""),
+            skipped=int(status.get("skipped") or 0),
+            truncated=bool(status.get("truncated")),
+            error=str(status.get("error") or ""),
+        )
+
+    def _timer_model(self, message: str = "") -> TimerOut:
+        state = self._timer_state_out()
+        return TimerOut(active=bool(state.get("active")),
+                        stop_at=str(state.get("stop_at") or ""),
+                        stop_after_songs=int(state.get("stop_after_songs") or 0),
+                        remaining=str(state.get("remaining") or ""),
+                        message=message)
+
+    def _voice_model(self, records: bool = False) -> VoiceOut:
+        state = self._voice_state_out()
+        listener = self.__dict__.get("_speech_listener")
+        rows = listener.recent(20) if (records and isinstance(listener, _speech.SpeechListener)) else []
+        return VoiceOut(enabled=bool(state.get("enabled")),
+                        chat=bool(state.get("chat")),
+                        chat_active=bool(state.get("chat_active")),
+                        interval=int(self._voice_poll),
+                        handled=int(state.get("handled") or 0),
+                        devices=[str(item) for item in state.get("devices") or []],
+                        commands=self._voice_commands(),
+                        error=str(state.get("error") or ""),
+                        last_poll_at=str(state.get("last_poll_at") or ""),
+                        records=[VoiceRecordOut(device_id=str(row.get("device_id") or ""),
+                                                at=str(row.get("at") or ""),
+                                                text=str(row.get("text") or ""),
+                                                answer=str(row.get("answer") or ""))
+                                 for row in rows])
+
+    def api_groups(self) -> GroupsOut:
+        """GET /groups —— 设备分组列表。"""
+        return self._groups_out()
+
+    def api_group_save(self, payload: GroupIn) -> GroupsOut:
+        """POST /groups —— 建组/改组/删组；一台设备只属于一个组。"""
+        name = (payload.name or "").strip()[:40]
+        if not name:
+            return self._groups_out(ok=False, message="分组名字不能为空")
+        rows = self._groups()
+        if payload.remove:
+            kept = [row for row in rows if row["name"] != name]
+            if len(kept) == len(rows):
+                return self._groups_out(ok=False, message=f"没有名为「{name}」的分组")
+            self._save_groups(kept)
+            return self._groups_out(message=f"已删除分组「{name}」")
+        members = [str(item).strip() for item in (payload.device_ids or []) if str(item).strip()]
+        members = list(dict.fromkeys(members))
+        if len(members) < 2:
+            return self._groups_out(ok=False, message="分组至少要有两台音箱才有意义")
+        devices, _ = self._devices_cached(force=False)
+        known = {str(item.get("device_id") or "") for item in devices}
+        unknown = [item for item in members if item not in known]
+        if unknown:
+            return self._groups_out(ok=False,
+                                    message=f"这些设备不在当前账号的设备列表里：{'、'.join(unknown)}")
+        # 成员互斥：加入新组时从其它组里摘出去，免得同一台被两组各推一次
+        rows = [row for row in rows if row["name"] != name]
+        taken = set(members)
+        for row in rows:
+            row["device_ids"] = [item for item in row["device_ids"] if item not in taken]
+        rows = [row for row in rows if len(row["device_ids"]) >= 2]
+        rows.append({"name": name, "device_ids": members})
+        self._save_groups(rows)
+        return self._groups_out(message=f"分组「{name}」已保存，共 {len(members)} 台")
+
+    def api_tasks(self) -> TasksOut:
+        """GET /tasks —— 定时任务列表，每条附带人可读的触发规则。"""
+        return self._tasks_out()
+
+    def _task_row(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        action = str(task.get("action") or "")
+        return {**task,
+                "action_text": _TASK_ACTIONS.get(action, action),
+                "rule": self._schedule_text(task.get("schedule") or {})}
+
+    def _tasks_out(self, ok: bool = True, message: str = "") -> TasksOut:
+        return TasksOut(ok=ok, message=message,
+                        items=[self._task_row(task) for task in self._tasks()])
+
+    def api_task_save(self, payload: TaskIn) -> TasksOut:
+        """POST /tasks —— 新建/修改/删除一条定时任务。"""
+        rows = self._tasks()
+        task_id = str(payload.id or "").strip()
+        if payload.remove:
+            removed = next((item for item in rows if item["id"] == task_id), None)
+            if not removed:
+                return self._tasks_out(ok=False, message="没有这条定时任务")
+            self._save_tasks([item for item in rows if item["id"] != task_id])
+            return self._tasks_out(message=f"已删除定时任务「{removed['name']}」")
+        task = self._clean_task(payload.model_dump())
+        if not task:
+            return self._tasks_out(
+                ok=False,
+                message="任务不完整：要有名字、合法动作、HH:MM 的时间，weekly 勾星期几、monthly 勾几号")
+        if task["action"] in ("play_playlist", "play_playlist_from"):
+            params = task["params"]
+            pid = str(params.get("playlist_id") or "").strip()
+            if pid in ("", "0"):
+                pid = ""
+            if not pid and not str(params.get("playlist_name") or "").strip():
+                return self._tasks_out(ok=False, message="播放歌单的任务要先选中一个歌单")
+        if len(rows) >= _TASK_MAX and not any(item["id"] == task["id"] for item in rows):
+            return self._tasks_out(ok=False, message=f"定时任务最多 {_TASK_MAX} 条，先删掉几条")
+        existed = next((item for item in rows if item["id"] == task["id"]), None)
+        if existed:
+            task["created_at"] = existed["created_at"]
+            rows = [task if item["id"] == task["id"] else item for item in rows]
+        else:
+            rows.append(task)
+        self._save_tasks(rows)
+        verb = "已更新" if existed else "已创建"
+        return self._tasks_out(message=f"{verb}任务「{task['name']}」：{self._schedule_text(task['schedule'])}")
+
+    def api_task_run(self, payload: TaskRunIn) -> TaskLogsOut:
+        """POST /tasks/run —— 立刻跑一次某个任务（不等到点，用来验证它真能执行）。"""
+        task = next((item for item in self._tasks() if item["id"] == str(payload.id or "").strip()),
+                    None)
+        if not task:
+            return TaskLogsOut(ok=False, message="没有这条定时任务",
+                               items=self._task_logs(20)[::-1])
+        logs = self._run_task(task)
+        self._append_task_logs(logs)
+        return TaskLogsOut(ok=all(item["success"] for item in logs), message="", items=logs[::-1])
+
+    def api_task_logs(self) -> TaskLogsOut:
+        """GET /tasks/logs —— 最近的定时任务执行日志（新的在前）。"""
+        rows = self._task_logs(50)[::-1]
+        return TaskLogsOut(message="" if rows else "还没有执行记录", items=rows)
+
     def api_config(self, payload: ConfigIn) -> StatusOut:
         """POST /config —— 只改传上来的字段，密码留空表示保留原值。"""
         data = payload.model_dump(exclude_none=True)
         password = data.pop("password", None)
+        # 这两项决定语音任务是否存在与多久醒一次，改完要请宿主重建任务
+        affects_jobs = any(key in data for key in ("voice_enabled", "voice_poll"))
         with self._play_lock():
             if "music_dirs" in data:
                 self._music_dirs = str(data.pop("music_dirs") or "")
@@ -1357,7 +2948,39 @@ class XiaoaiSpeaker(_PluginBase):
                 if key in data:
                     value = data.pop(key)
                     setattr(self, attr, bool(value) if as_bool else str(value or "").strip())
+            for key in ("voice_enabled", "voice_interrupt", "voice_hint_tts",
+                        "voice_reply", "voice_memory", "ai_enabled", "ai_chat"):
+                if key in data:
+                    setattr(self, f"_{key}", bool(data.pop(key)))
+            for key in ("voice_devices", "voice_hint_text", "ai_api_url", "ai_model"):
+                if key in data:
+                    value = str(data.pop(key) or "").strip()
+                    if key == "ai_api_url":
+                        value = value.rstrip("/") or str(_DEFAULT_CONFIG["ai_api_url"])
+                    elif key == "voice_hint_text":
+                        value = value or str(_DEFAULT_CONFIG["voice_hint_text"])
+                    setattr(self, f"_{key}", value)
+            if data.get("ai_api_key") is not None:
+                api_key = str(data.pop("ai_api_key") or "").strip()
+                if api_key:
+                    self._ai_api_key = api_key
+            if "voice_poll" in data:
+                self._voice_poll = self._clamp_poll(data.pop("voice_poll"))
+            if "ai_timeout" in data:
+                self._ai_timeout = self._clamp_ai_timeout(data.pop("ai_timeout"))
+            if "library_limit" in data:
+                self._library_limit = _library.clamp_song_limit(data.pop("library_limit"))
+            if "library_refresh" in data:
+                self._library_refresh = self._clamp_library_refresh(data.pop("library_refresh"))
             self._save_config()
+        # 改过语音/设备就要重读配置：监听器的时间基线属于上一批设备，
+        # 留着会把旧设备已处理过的序号当成新设备的基线，漏掉第一批口令
+        listener = self.__dict__.get("_speech_listener")
+        if isinstance(listener, _speech.SpeechListener):
+            listener.configure(float(self._voice_poll))
+            listener.reset()
+        if affects_jobs:
+            self._refresh_jobs()
         return self._status(force_devices=True)
 
     def api_stream(self, request: Request):
@@ -1398,7 +3021,11 @@ class XiaoaiSpeaker(_PluginBase):
         return "vue", "dist/assets"
 
     def get_sidebar_nav(self) -> List[Dict[str, Any]]:
-        """主界面左侧导航入口（全页组件 ./AppPage）。"""
+        """主界面「发现」分组的全页入口（远程组件 ./AppPage）。
+
+        section/permission 跟宿主内置的豆瓣中心、PT监护室保持一致：发现分区
+        的插件都用 `discovery`，order 落在这两者附近，免得入口在分组里乱序。
+        """
         if not self.get_state() or not self._show_sidebar_nav:
             return []
         return [
@@ -1406,9 +3033,9 @@ class XiaoaiSpeaker(_PluginBase):
                 "nav_key": "main",
                 "title": "小爱音箱",
                 "icon": "mdi-speaker",
-                "section": "organize",
-                "permission": "manage",
-                "order": self.plugin_order,
+                "section": "discovery",
+                "permission": "discovery",
+                "order": 22,
             }
         ]
 
@@ -1515,22 +3142,37 @@ class XiaoaiSpeaker(_PluginBase):
     # ---------------- 服务 ----------------
 
     def get_service(self) -> List[Dict[str, Any]]:
-        """连播轮询：交宿主调度器托管，插件不自建 scheduler。"""
-        if not self._enabled or not self._auto_next:
+        """巡检与语音轮询：交宿主调度器托管，插件不自建 scheduler。"""
+        if not self._enabled:
             return []
-        return [
+        services = [
             {
-                "id": "XiaoaiSpeaker.AutoNext",
-                "name": "小爱音箱队列连播",
+                "id": "XiaoaiSpeaker.Tick",
+                "name": "小爱音箱播放台巡检",
                 "trigger": IntervalTrigger(seconds=_ADVANCE_TICK_SECONDS),
                 "func": self._tick,
                 "kwargs": {},
             }
         ]
+        if self._voice_enabled:
+            services.append(
+                {
+                    "id": "XiaoaiSpeaker.Voice",
+                    "name": "小爱音箱语音口令",
+                    "trigger": IntervalTrigger(seconds=max(int(self._voice_poll or 2), 1)),
+                    "func": self._voice_tick,
+                    "kwargs": {},
+                }
+            )
+        return services
 
     def stop_service(self) -> None:
-        """停用：投递停止信号并取消本插件登记的一次性任务。"""
+        """停用：投递停止信号、取消本插件登记的一次性任务、丢掉监听器的时间基线。"""
         self._stop_event().set()
+        listener = self.__dict__.get("_speech_listener")
+        if isinstance(listener, _speech.SpeechListener):
+            listener.reset()
+        self._chat_reset()
         try:
             remove = getattr(scheduler_sdk, "remove_plugin_once_job", None) if scheduler_sdk else None
             if remove:

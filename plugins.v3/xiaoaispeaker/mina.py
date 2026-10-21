@@ -74,6 +74,19 @@ PLAY_STATUS_STOPPED = 0
 PLAY_STATUS_PLAYING = 1
 PLAY_STATUS_PAUSED = 2
 
+# 语音识别记录（"小爱同学听到的话"）走的是 userprofile 域名而不是 api2.mina：
+# %s=hardware（型号代号）、%d=毫秒时间戳、%d=条数上限。时间戳要取请求当刻的值，
+# 小米按它做分页游标，写死一个会让记录永远停在第一批。
+CONVERSATION_API = (
+    "https://userprofile.mina.mi.com/device_profile/v2/conversation"
+    "?source=dialogu&hardware=%s&timestamp=%d&limit=%d"
+)
+# 不认 userprofile 接口的型号（miot GET_ASK_BY_MINA）：这些设备只能退到 ubus 的
+# nlp_result_get，那条路径拿不到 record.time，得自己维护时间基线
+MINA_ASK_HARDWARE: Tuple[str, ...] = ("M01",)
+# 每轮取几条。语音一来就播歌，5 条足够覆盖"连着说两句"且不把响应体撑大
+CONVERSATION_LIMIT = 5
+
 LOGIN_SUCCESS = "success"
 LOGIN_NEED_CAPTCHA = "need_captcha"
 LOGIN_NEED_VERIFY = "need_verify"
@@ -111,6 +124,14 @@ def _client_sign(nonce: Any, ssecurity: str) -> str:
 
 def _strip_prefix(text: str) -> str:
     return (text or "").replace(JSON_PREFIX, "").strip()
+
+
+def _as_int(value: Any) -> int:
+    """把云端给的时间戳（数字或数字串）转成 int，转不了就是 0（调用方据此丢弃该条）。"""
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _parse_json(text: str) -> Optional[Dict[str, Any]]:
@@ -630,6 +651,143 @@ class XiaoaiClient:
         result = self._ubus(device_id, "player_play_operation", "mediaplayer",
                             {"action": action, "media": "app_ios"})
         return self._device_result(result, "player_play_operation")
+
+    def interrupt(self, device_id: str) -> Dict[str, Any]:
+        """抢在小米自己的回答之前把声音停掉：先 pause 再 stop。
+
+        只发 stop 不够 —— 部分型号忽略裸 stop，仍在放云端 TTS 的尾巴（上游同一条注释）。
+        这一步是"用户体验"级的：不中断就会听到"我帮你找找看"和小提琴同时响。
+        """
+        paused = self.play_operation(device_id, "pause")
+        stopped = self.play_operation(device_id, "stop")
+        return {"ok": bool(stopped.get("ok")), "pause_ok": bool(paused.get("ok")),
+                "api": "player_play_operation", "error": str(stopped.get("error") or "")}
+
+    # ---------------- 语音识别记录 ----------------
+
+    def get_latest_ask(self, device_id: str, hardware: str = "",
+                       limit: int = CONVERSATION_LIMIT) -> Optional[List[Dict[str, Any]]]:
+        """取最近的对话记录（用户对小爱说的话）。
+
+        返回值区分三种情况，调用方的去重基线依赖这个区分：
+        - None  = 这一轮没取到（网络/鉴权/解析失败）。基线**不能**被它推进，
+          否则一次网络抖动会让那段时间说的话永久丢失。
+        - []    = 取到了，确实没有记录。可以把基线推到服务端给的最新时间。
+        - [...] = 记录，按时间升序，元素为 {request_id, timestamp_ms, question, answer}。
+        """
+        if hardware in MINA_ASK_HARDWARE:
+            return self._get_ask_by_ubus(device_id)
+        return self._get_ask_by_userprofile(device_id, hardware, limit)
+
+    def _get_ask_by_userprofile(self, device_id: str, hardware: str,
+                                limit: int) -> Optional[List[Dict[str, Any]]]:
+        hardware = (hardware or "").strip()
+        if not hardware:
+            return None
+        url = CONVERSATION_API % (hardware, int(time.time() * 1000), max(1, int(limit)))
+        try:
+            response = RequestUtils(headers={"User-Agent": self.user_agent},
+                                    cookies={**self._cookies(), "deviceId": device_id},
+                                    timeout=HTTP_TIMEOUT).get_res(
+                url, allow_redirects=True, raise_exception=False)
+        except Exception:
+            return None
+        if response is None:
+            return None
+        if response.status_code in (401, 403):
+            raise MinaAuthError(f"读取对话记录鉴权失效（HTTP {response.status_code}）")
+        if response.status_code != 200:
+            return None
+        try:
+            payload = json.loads(response.text or "")
+        except (TypeError, ValueError):
+            return None
+        raw = payload.get("data")
+        if isinstance(raw, dict):
+            records = raw.get("records") or []
+        elif isinstance(raw, str) and raw:
+            try:
+                records = (json.loads(raw) or {}).get("records") or []
+            except (TypeError, ValueError):
+                return None
+        else:
+            return []
+        rows: List[Dict[str, Any]] = []
+        for record in records if isinstance(records, list) else []:
+            if not isinstance(record, dict):
+                continue
+            timestamp = _as_int(record.get("time"))
+            if not timestamp:
+                # 时间戳拿不到就不能参与去重：兜底成 0 会让这条永远小于基线，
+                # 被静默吞掉且没有任何日志（上游踩过并专门写了注释）
+                continue
+            answer = ""
+            for item in record.get("answers") or []:
+                if isinstance(item, dict) and item.get("type") == "TTS":
+                    answer = str(((item.get("tts") or {}).get("text")) or "")
+                    break
+            rows.append({
+                "request_id": "",
+                "timestamp_ms": timestamp,
+                "question": str(record.get("query") or ""),
+                "answer": answer,
+            })
+        rows.sort(key=lambda row: row["timestamp_ms"])
+        return rows
+
+    def _get_ask_by_ubus(self, device_id: str) -> Optional[List[Dict[str, Any]]]:
+        """M01 这类不认 userprofile 的型号：走 ubus nlp_result_get。"""
+        try:
+            result = self._ubus(device_id, "nlp_result_get", "mibrain", {})
+        except MinaError:
+            raise
+        except Exception:
+            return None
+        if not isinstance(result, dict) or not result.get("data"):
+            return None
+        data = result.get("data")
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except (TypeError, ValueError):
+                return None
+        if not isinstance(data, dict) or int(data.get("code") or 0) != 0:
+            # 设备侧报错是"取不到"，不是"没有对话"
+            return None
+        info = data.get("info")
+        if not info:
+            return []
+        try:
+            parsed = json.loads(info) if isinstance(info, str) else info
+        except (TypeError, ValueError):
+            return None
+        rows: List[Dict[str, Any]] = []
+        for item in (parsed or {}).get("result") or []:
+            nlp = item.get("nlp") if isinstance(item, dict) else None
+            if not nlp:
+                continue
+            try:
+                detail = json.loads(nlp) if isinstance(nlp, str) else nlp
+            except (TypeError, ValueError):
+                continue
+            meta = detail.get("meta") or {}
+            timestamp = _as_int(meta.get("timestamp"))
+            if not timestamp:
+                continue
+            answers = ((detail.get("response") or {}).get("answer")) or []
+            first = answers[0] if answers and isinstance(answers[0], dict) else {}
+            intention = first.get("intention") or {}
+            content = first.get("content") or {}
+            rows.append({
+                "request_id": str(meta.get("request_id") or ""),
+                "timestamp_ms": timestamp,
+                "question": str(intention.get("query") or ""),
+                "answer": str(content.get("to_speak") or ""),
+                "domain": str(first.get("domain") or ""),
+                "action": str(first.get("action") or ""),
+            })
+        rows.sort(key=lambda row: row["timestamp_ms"])
+        return rows
 
     def set_volume(self, device_id: str, volume: int) -> Dict[str, Any]:
         value = max(0, min(100, int(volume)))

@@ -71,6 +71,7 @@ class QueueOut(BaseModel):
     items: List[QueueItemOut] = Field(default_factory=list)
     auto_next: bool = False
     source: str = ""
+    mode: str = "order"
 
 
 class FileOut(BaseModel):
@@ -162,6 +163,22 @@ class ConfigOut(BaseModel):
     auto_next: bool = True
     keep_light: bool = False
     tts_announce: bool = False
+    voice_enabled: bool = False
+    voice_devices: str = ""
+    voice_poll: int = 2
+    voice_interrupt: bool = True
+    voice_hint_tts: bool = False
+    voice_hint_text: str = "正在搜索，请稍候"
+    voice_reply: bool = True
+    voice_memory: bool = True
+    ai_enabled: bool = False
+    ai_chat: bool = False
+    ai_api_url: str = ""
+    ai_key_set: bool = False
+    ai_model: str = ""
+    ai_timeout: int = 6
+    library_limit: int = 10000
+    library_refresh: int = 60
 
 
 class ConfigIn(BaseModel):
@@ -184,6 +201,22 @@ class ConfigIn(BaseModel):
     auto_next: Optional[bool] = None
     keep_light: Optional[bool] = None
     tts_announce: Optional[bool] = None
+    voice_enabled: Optional[bool] = None
+    voice_devices: Optional[str] = None
+    voice_poll: Optional[int] = None
+    voice_interrupt: Optional[bool] = None
+    voice_hint_tts: Optional[bool] = None
+    voice_hint_text: Optional[str] = None
+    voice_reply: Optional[bool] = None
+    voice_memory: Optional[bool] = None
+    ai_enabled: Optional[bool] = None
+    ai_chat: Optional[bool] = None
+    ai_api_url: Optional[str] = None
+    ai_api_key: Optional[str] = None
+    ai_model: Optional[str] = None
+    ai_timeout: Optional[int] = None
+    library_limit: Optional[int] = None
+    library_refresh: Optional[int] = None
 
 
 class LoginIn(BaseModel):
@@ -238,6 +271,244 @@ class DeviceSelectIn(BaseModel):
     """选择默认音箱。"""
 
     device_id: str = ""
+
+
+class ModeIn(BaseModel):
+    """播放方式请求。"""
+
+    mode: str = "order"
+
+
+class TimerIn(BaseModel):
+    """睡眠定时请求：minutes/songs 二选一设置，cancel=true 取消。"""
+
+    minutes: Optional[int] = None
+    songs: Optional[int] = None
+    device_id: Optional[str] = None
+    cancel: bool = False
+
+
+class TimerOut(BaseModel):
+    """睡眠定时状态。"""
+
+    active: bool = False
+    stop_at: str = ""
+    stop_after_songs: int = 0
+    remaining: str = ""
+    message: str = ""
+
+
+class FavoriteIn(BaseModel):
+    """收藏请求：path 为空时对队列里当前这首操作。"""
+
+    path: Optional[str] = None
+    remove: bool = False
+
+
+class FavoriteOut(BaseModel):
+    """一首收藏曲目。"""
+
+    path: str
+    title: str = ""
+    exists: bool = True
+
+
+class FavoritesOut(BaseModel):
+    """收藏列表。"""
+
+    ok: bool = True
+    message: str = ""
+    items: List[FavoriteOut] = Field(default_factory=list)
+    playing: Optional[PlayingOut] = None
+    queue: Optional[QueueOut] = None
+
+
+class PlaylistOut(BaseModel):
+    """一个歌单。"""
+
+    id: str = ""
+    name: str = ""
+    kind: str = ""
+    path: str = ""
+    count: int = 0
+
+
+class PlaylistsOut(BaseModel):
+    """歌单列表。"""
+
+    ok: bool = True
+    message: str = ""
+    items: List[PlaylistOut] = Field(default_factory=list)
+
+
+class SongsOut(BaseModel):
+    """一组曲目（歌单展开 / 随机一批）。"""
+
+    ok: bool = True
+    message: str = ""
+    name: str = ""
+    paths: List[str] = Field(default_factory=list)
+    items: List[FileOut] = Field(default_factory=list)
+
+
+class LibraryOut(BaseModel):
+    """曲库索引状态。"""
+
+    ok: bool = True
+    message: str = ""
+    ready: bool = False
+    songs: int = 0
+    playlists: int = 0
+    roots: List[str] = Field(default_factory=list)
+    limit: int = 0
+    refresh_minutes: int = 0
+    built_at: str = ""
+    skipped: int = 0
+    truncated: bool = False
+    error: str = ""
+
+
+class VoiceIn(BaseModel):
+    """语音口令测试请求。"""
+
+    text: str = ""
+    device_id: Optional[str] = None
+    execute: bool = False
+
+
+class VoiceRecordOut(BaseModel):
+    """小爱最近听到的一句话。"""
+
+    device_id: str = ""
+    at: str = ""
+    text: str = ""
+    answer: str = ""
+
+
+class VoiceOut(BaseModel):
+    """语音监听状态 + 一次口令测试的结果。"""
+
+    ok: bool = True
+    message: str = ""
+    enabled: bool = False
+    chat: bool = False
+    chat_active: bool = False
+    interval: int = 0
+    handled: int = 0
+    devices: List[str] = Field(default_factory=list)
+    commands: List[str] = Field(default_factory=list)
+    error: str = ""
+    last_poll_at: str = ""
+    records: List[VoiceRecordOut] = Field(default_factory=list)
+    matched: str = ""
+    kind: str = ""
+    argument: str = ""
+    reply: str = ""
+
+
+class CommandsIn(BaseModel):
+    """口令开关：enabled 为要启用的口令类型列表，缺省（null）表示全开。"""
+
+    enabled: Optional[List[str]] = None
+
+
+class CommandOut(BaseModel):
+    """一类口令。"""
+
+    kind: str
+    label: str = ""
+    enabled: bool = True
+    keywords: List[str] = Field(default_factory=list)
+
+
+class CommandsOut(BaseModel):
+    """口令表。"""
+
+    ok: bool = True
+    message: str = ""
+    items: List[CommandOut] = Field(default_factory=list)
+
+
+class LyricLineOut(BaseModel):
+    """歌词的一行：time 为 -1 表示这一句没有时间戳。"""
+
+    time: float = -1.0
+    text: str = ""
+
+
+class LyricOut(BaseModel):
+    """一首曲目的歌词（侧车 .lrc 或内嵌标签）。"""
+
+    ok: bool = True
+    message: str = ""
+    path: str = ""
+    name: str = ""
+    source: str = ""
+    has_time: bool = False
+    lines: List[LyricLineOut] = Field(default_factory=list)
+
+
+class GroupOut(BaseModel):
+    """一个设备分组：组内任一音箱收到指令，全组一起动。"""
+
+    name: str
+    device_ids: List[str] = Field(default_factory=list)
+    devices: List[str] = Field(default_factory=list)
+
+
+class GroupsOut(BaseModel):
+    """分组列表。"""
+
+    ok: bool = True
+    message: str = ""
+    items: List[GroupOut] = Field(default_factory=list)
+
+
+class GroupIn(BaseModel):
+    """分组写入：name 必填；remove=true 删除该组；device_ids 至少要两台。"""
+
+    name: str = ""
+    device_ids: Optional[List[str]] = None
+    remove: bool = False
+
+
+class TaskIn(BaseModel):
+    """定时任务写入：整条定义原样传上来，删除只给 id + remove。
+
+    schedule/target/params 的内部形状由插件的 _clean_task 判定（时间格式、周几范围、
+    动作需要的参数），这里只保证传进来的是字典，免得前端多带一个字段就被 422 掉。
+    """
+
+    id: Optional[str] = None
+    name: str = ""
+    enabled: bool = True
+    action: str = "play_playlist"
+    schedule: dict[str, Any] = Field(default_factory=dict)
+    target: dict[str, Any] = Field(default_factory=dict)
+    params: dict[str, Any] = Field(default_factory=dict)
+    remove: bool = False
+
+
+class TasksOut(BaseModel):
+    """定时任务列表。"""
+
+    ok: bool = True
+    message: str = ""
+    items: List[dict[str, Any]] = Field(default_factory=list)
+
+
+class TaskRunIn(BaseModel):
+    """立刻跑一次某个任务：不等到点就能验出它到底能不能执行。"""
+
+    id: str = ""
+
+
+class TaskLogsOut(BaseModel):
+    """定时任务执行日志。"""
+
+    ok: bool = True
+    message: str = ""
+    items: List[dict[str, Any]] = Field(default_factory=list)
 
 
 class StatusOut(BaseModel):

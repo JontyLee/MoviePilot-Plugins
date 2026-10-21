@@ -1,0 +1,89 @@
+
+/* 仅插件内局部样式；不得写全局 v- 或 mdi- 类规则（构建有 postcss 门禁）。 */
+.xai-page[data-v-bd8d9f58] { width: 100%;
+}
+.xai-head[data-v-bd8d9f58] { display: flex; align-items: center; gap: 8px; padding: 12px 16px;
+}
+.xai-head-text[data-v-bd8d9f58] { min-width: 0;
+}
+.xai-body[data-v-bd8d9f58] { display: flex; min-height: 440px;
+}
+.xai-nav[data-v-bd8d9f58] {
+  flex: 0 0 168px;
+  border-right: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+  background: rgba(var(--v-theme-on-surface), .02);
+}
+.xai-nav-item[data-v-bd8d9f58] { margin: 2px 8px;
+}
+.xai-content[data-v-bd8d9f58] { flex: 1 1 auto; min-width: 0; overflow-y: auto;
+}
+.xai-pane[data-v-bd8d9f58] { padding: 12px 16px;
+}
+.xai-pane-config[data-v-bd8d9f58] { padding: 0;
+}
+.xai-pane-title[data-v-bd8d9f58] { font-size: 12px; color: rgba(var(--v-theme-on-surface), .6); margin-bottom: 10px;
+}
+.xai-block[data-v-bd8d9f58] { margin-top: 16px;
+}
+.xai-block-title[data-v-bd8d9f58] { font-size: 13px; font-weight: 600; margin-bottom: 6px; opacity: .8;
+}
+.xai-queue[data-v-bd8d9f58] { padding: 4px 6px; max-height: 320px; overflow-y: auto;
+}
+.xai-queue-row[data-v-bd8d9f58] {
+  display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 6px; cursor: pointer;
+}
+.xai-queue-row[data-v-bd8d9f58]:hover { background: rgba(var(--v-theme-on-surface), .05);
+}
+.xai-queue-current[data-v-bd8d9f58] { background: rgba(var(--v-theme-primary), .12);
+}
+.xai-queue-index[data-v-bd8d9f58] { flex: 0 0 22px; font-size: 12px; color: rgba(var(--v-theme-on-surface), .6);
+}
+.xai-queue-name[data-v-bd8d9f58] { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px;
+}
+.xai-dir[data-v-bd8d9f58] { display: flex; align-items: center; padding: 3px 6px; border-radius: 6px; cursor: pointer; font-size: 13px;
+}
+.xai-dir[data-v-bd8d9f58]:hover { background: rgba(var(--v-theme-on-surface), .05);
+}
+.xai-lyric[data-v-bd8d9f58] { max-height: 260px; overflow-y: auto; padding: 4px 8px;
+}
+.xai-lyric-line[data-v-bd8d9f58] {
+  display: flex; gap: 8px; padding: 3px 6px; border-radius: 6px; font-size: 13px;
+  color: rgba(var(--v-theme-on-surface), .72);
+}
+.xai-lyric-active[data-v-bd8d9f58] { background: rgba(var(--v-theme-primary), .12); color: rgba(var(--v-theme-on-surface), 1); font-weight: 600;
+}
+.xai-lyric-time[data-v-bd8d9f58] { flex: 0 0 42px; font-size: 11px; color: rgba(var(--v-theme-on-surface), .5);
+}
+.xai-logs[data-v-bd8d9f58] { padding: 4px 8px; max-height: 260px; overflow-y: auto;
+}
+.xai-log[data-v-bd8d9f58] { display: flex; align-items: center; gap: 8px; padding: 3px 0; flex-wrap: wrap;
+}
+.xai-log-message[data-v-bd8d9f58] { flex: 1 1 200px; min-width: 0; opacity: .8;
+}
+.xai-table[data-v-bd8d9f58] { font-size: 13px;
+}
+.xai-table .text-truncate[data-v-bd8d9f58] { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.xai-modes[data-v-bd8d9f58] { gap: 2px; flex-wrap: wrap;
+}
+.xai-cmd[data-v-bd8d9f58] { display: flex; align-items: center; gap: 10px; padding: 2px 6px;
+}
+.xai-cmd-keywords[data-v-bd8d9f58] { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.xai-record[data-v-bd8d9f58] { display: flex; align-items: baseline; gap: 8px; padding: 3px 6px; font-size: 13px;
+}
+.xai-record-at[data-v-bd8d9f58] { flex: 0 0 74px;
+}
+.xai-record-text[data-v-bd8d9f58] { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cursor-pointer[data-v-bd8d9f58] { cursor: pointer;
+}
+@media (max-width: 760px) {
+.xai-body[data-v-bd8d9f58] { flex-direction: column;
+}
+.xai-nav[data-v-bd8d9f58] {
+    flex: 0 0 auto;
+    border-right: none;
+    border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+}
+}

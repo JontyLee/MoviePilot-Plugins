@@ -2,14 +2,14 @@ const currentImports = {};
       const exportSet = new Set(['Module', '__esModule', 'default', '_export_sfc']);
       let moduleMap = {
 "./AppPage":()=>{
-      dynamicLoadingCss(["__federation_expose_AppPage-CIJSuWTH.css","ConfigForm-fHJ1QfA_.css"], false, './AppPage');
-      return __federation_import('./__federation_expose_AppPage-DS8HP1tw.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
+      dynamicLoadingCss(["__federation_expose_AppPage-CXguC4Ji.css","ConfigForm-BUxBh2pV.css"], false, './AppPage');
+      return __federation_import('./__federation_expose_AppPage-CtXLq8rP.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
 "./Page":()=>{
       dynamicLoadingCss(["__federation_expose_Page-JFHTEydg.css"], false, './Page');
-      return __federation_import('./__federation_expose_Page-k8IK-FSp.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
+      return __federation_import('./__federation_expose_Page-CzeHamjn.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
 "./Config":()=>{
-      dynamicLoadingCss(["__federation_expose_Config-Dq17ifpZ.css","ConfigForm-fHJ1QfA_.css"], false, './Config');
-      return __federation_import('./__federation_expose_Config-B9A7awUF.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},};
+      dynamicLoadingCss(["__federation_expose_Config-Dq17ifpZ.css","ConfigForm-BUxBh2pV.css"], false, './Config');
+      return __federation_import('./__federation_expose_Config-2Wj9Yegn.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},};
       const seen = {};
       const dynamicLoadingCss = (cssFilePaths, dontAppendStylesToHead, exposeItemName) => {
         const metaUrl = import.meta.url;
