@@ -422,6 +422,7 @@ class IncrementalScanTest(unittest.TestCase):
         self.assertNotIn("mtw_password", status["config"])
         self.assertTrue(status["config"]["has_username"])
         self.assertEqual(status["counts"]["done"], 1)
+        self.assertIn("deficient", status["counts"])
 
     def test_status_groups_failures_by_reason(self):
         """失败按原因聚合：调阈值是"这一类有几个、这类里最高几分"的决定，逐行 reason
@@ -761,7 +762,7 @@ class ContractTest(unittest.TestCase):
     def test_api_declares_bear_auth(self):
         p = self._plugin()
         apis = p.get_api()
-        self.assertEqual({a["path"] for a in apis}, {"/status", "/files", "/retry", "/scan"})
+        self.assertEqual({a["path"] for a in apis}, {"/status", "/files", "/retry", "/scan", "/edit"})
         self.assertTrue(all(a["auth"] == "bear" for a in apis))
 
     def test_data_page_translates_footer_and_status(self):
@@ -1058,7 +1059,11 @@ class MatchTest(unittest.TestCase):
     def test_read_music_tags_never_raises(self):
         out = mls._read_music_tags(Path("/nonexistent/dir/01 - x.flac"))
         self.assertEqual(
-            out, {"title": "", "artist": "", "album": "", "duration": None, "has_cover": False}
+            out,
+            {
+                "title": "", "artist": "", "album": "", "year": "", "tracknumber": "",
+                "duration": None, "has_cover": False, "has_lyrics": False,
+            },
         )
 
     def test_cover_detected_through_id3_repeated_frame(self):

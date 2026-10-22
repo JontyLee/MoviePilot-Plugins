@@ -25,7 +25,9 @@ const DEFAULTS = {
   mtw_username: '',
   mtw_password: '',
   mtw_resource: [] as string[],
-  min_score: 3
+  min_score: 3,
+  // 缺失时主动去内置识别源拉歌词回填，默认关闭；关闭时歌词仍由宿主 lrclib / AMLL 取
+  fill_lyrics: false
 }
 
 // v0.2.x 的库里存的是单字符串，多选控件需要数组。
@@ -291,6 +293,15 @@ onMounted(() => {
             </v-col>
           </v-row>
 
+          <v-switch
+            v-model="config.fill_lyrics"
+            label="缺失时主动抓取歌词回填（仅内置源 netease / qmusic）"
+            hide-details
+            color="primary"
+            inset
+            class="mt-1"
+          />
+
           <v-select
             v-model="config.mtw_resource"
             :items="resourceItems"
@@ -316,7 +327,8 @@ onMounted(() => {
               这条会把库内完整路径作为参考一起发给 MTW，所以 MTW 与 MP 必须挂同一份库。
             </div>
             <div class="text-caption text-grey">
-              两种来源都不请求歌词：歌词由宿主刮削链自己取（lrclib / AMLL）。
+              歌词回填开关默认关闭：歌词仍由宿主刮削链自己取（lrclib / AMLL）。
+              打开后只在内置源模式下生效 —— 选中候选缺歌词时，插件主动从 netease / qmusic 抓歌词回填（MTW 模式无此能力）。
               qq / spotify / acoustid / all 实测恒返回空候选，两种来源都没有列进来。
             </div>
           </div>

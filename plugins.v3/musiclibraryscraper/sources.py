@@ -8,8 +8,8 @@
 候选一律折叠成 MTW fetch_id3_by_title 的形状，打分与写入那条链路因此完全不用改。
 
 刻意不做的事：
-- 不取歌词。宿主的 LyricsChain 已内置 lrclib / AMLL 两个提供方，插件再自己调一遍平台
-  歌词接口只会多打一批请求，还要抢宿主选定的歌词策略。
+- 不替宿主决定歌词要不要覆盖。歌词按 fill_lyrics 开关取一份挂回候选的 lyrics，最终写不写、
+  覆盖谁仍交给宿主的 LyricsChain；插件只把候选那一段补上，让那条链路看得见歌词。
 - 不做酷我。实测 r.s 检索接口对曲名索引恒不返回命中，www 接口要带签名与 token，
   复杂度与收益不成比例；需要酷我的继续用 MTW 模式。
 - 不做 MusicBrainz 封面。检索响应里不带封面字段，为封面再追一次 coverartarchive
@@ -22,6 +22,7 @@ applications/task/services/*.so 里，本文件没有复制它的实现代码；
 在同等条款下引用与再分发没有障碍。MusicBrainz 只取核心数据（官方许可 CC0）。
 """
 
+import base64
 from typing import Any, Dict, List, Optional, Tuple
 
 # 源顺序即查询顺序，与 MTW 模式的默认顺序保持一致（除开插件没实现的酷我）：
@@ -321,7 +322,7 @@ def _musicbrainz_request(keyword: str, limit: int) -> Dict[str, Any]:
         "url": "https://musicbrainz.org/ws/2/recording",
         # MusicBrainz 的使用条款要求调用方自报身份，没有 From 容易被限流。
         "headers": {"user-agent": _USER_AGENT,
-                    "from": "MoviePilot-MusicLibraryScraper/0.4 (local music library scraper)"},
+                    "from": "MoviePilot-MusicLibraryScraper/0.5 (local music library scraper)"},
         "params": {"query": keyword, "fmt": "json", "limit": str(limit)},
     }
 
@@ -391,3 +392,85 @@ def parse_candidates(resource: str, payload: Any) -> Tuple[List[Dict[str, Any]],
 
 def is_known(resource: str) -> bool:
     return resource in _SPECS
+
+
+# ---------------- 歌词 ----------------
+
+# 歌词只在 fill_lyrics 打开时才取，且只取网易云与 QQ 两个源：其它源的歌曲标识拿不到可用的
+# 歌词接口，而宿主 LyricsChain 已有 lrclib / AMLL 兜底。这一层照旧不碰网络 —— 只回答
+# "这个源的歌词该怎么问、答复里的哪一段是歌词"，取回之后挂回候选的 lyrics，
+# 最终写不写、覆盖谁，仍由宿主 LyricsChain 判定。
+
+def _netease_lyric_request(song_id: str) -> Dict[str, Any]:
+    return {
+        "url": "https://music.163.com/api/song/lyric",
+        "headers": {"user-agent": _USER_AGENT, "referer": "https://music.163.com/"},
+        "params": {"id": song_id, "lv": "1", "cv": "1"},
+    }
+
+def _netease_lyric(payload: Any) -> Optional[str]:
+    lrc = payload.get("lrc") if isinstance(payload, dict) else None
+    lyric = str((lrc or {}).get("lyric") or "").strip()
+    return _usable_lyric(lyric)
+
+def _qmusic_lyric_request(song_id: str) -> Dict[str, Any]:
+    # GetPlayLyricInfo 用 mid 或数字 id 都能查，检索候选里存的是哪一个不确定，两个键一起带上。
+    param: Dict[str, Any] = {"crypt": 0, "ct": 11, "cv": 0}
+    if song_id.isdigit():
+        param["songId"] = song_id
+    else:
+        param["songmid"] = song_id
+    return {
+        "url": "https://u.y.qq.com/cgi-bin/musicu.fcg",
+        "headers": {"user-agent": _USER_AGENT, "referer": "https://y.qq.com/"},
+        "json": {
+            "req_0": {
+                "module": "music.musichallSong.PlayLyricInfo",
+                "method": "GetPlayLyricInfo",
+                "param": param,
+            },
+            "comm": {"ct": 11, "cv": 0},
+        },
+    }
+
+def _qmusic_lyric(payload: Any) -> Optional[str]:
+    req0 = payload.get("req_0") if isinstance(payload, dict) else None
+    lyric = str(((req0 or {}).get("data") or {}).get("lyric") or "").strip()
+    return _usable_lyric(_decode_qmusic_lyric(lyric))
+
+def _decode_qmusic_lyric(raw: str) -> str:
+    """QQ 在 crypt=1 时把歌词编码成 base64(UTF-16LE)。crypt=0 本应给明文，仍留一层解码，
+    解不出来就原样返回，交给 _usable_lyric 判定是不是 LRC。"""
+    if not raw or "[" in raw[:200]:
+        return raw
+    try:
+        decoded = base64.b64decode(raw).decode("utf-16-le")
+    except (ValueError, UnicodeError):
+        return raw
+    return decoded.lstrip("\n").strip()
+
+def _usable_lyric(lyric: str) -> Optional[str]:
+    """空串、平台占位的"未找到歌词"都不算拿到。"""
+    lyric = (lyric or "").strip()
+    if not lyric or lyric.startswith("未找到"):
+        return None
+    return lyric
+
+_LYRIC_SPECS = {
+    "netease": (_netease_lyric_request, _netease_lyric),
+    "qmusic": (_qmusic_lyric_request, _qmusic_lyric),
+}
+
+def supports_lyrics(resource: str) -> bool:
+    return resource in _LYRIC_SPECS
+
+def build_lyric_request(resource: str, song_id: Any) -> Optional[Dict[str, Any]]:
+    """返回该源歌词的请求描述；源不支持或标识为空返回 None。"""
+    song_id = str(song_id or "").strip()
+    spec = _LYRIC_SPECS.get(resource)
+    return spec[0](song_id) if (spec and song_id) else None
+
+def parse_lyric(resource: str, payload: Any) -> Optional[str]:
+    """把歌词答复取成 LRC 文本；取不到返回 None，调用方据此保持候选不带歌词。"""
+    spec = _LYRIC_SPECS.get(resource)
+    return spec[1](payload) if spec else None

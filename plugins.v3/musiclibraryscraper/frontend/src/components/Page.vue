@@ -29,7 +29,7 @@ const snackbar = ref({ show: false, text: '', color: 'info' })
 const status = ref<any>({ runs: {}, counts: {}, config: {}, recent_failed: [] })
 const rows = ref<any[]>([])
 const total = ref(0)
-type Bucket = 'done' | 'failed' | 'pending'
+type Bucket = 'done' | 'failed' | 'pending' | 'deficient'
 type View = 'overview' | Bucket
 const view = ref<View>('overview')
 const bucket = ref<Bucket>('failed')
@@ -42,7 +42,8 @@ let searchTimer: ReturnType<typeof setTimeout> | null = null
 const buckets: { key: Bucket; label: string; icon: string; hint: string }[] = [
   { key: 'done', label: '已处理', icon: 'mdi-check-circle-outline', hint: '已经写好标签的文件（本轮与往轮累计）' },
   { key: 'failed', label: '失败待重试', icon: 'mdi-alert-circle-outline', hint: '没查到或没达阈值，下一轮还会再试' },
-  { key: 'pending', label: '待处理', icon: 'mdi-progress-clock', hint: '账本里没有、下一轮要问的文件' }
+  { key: 'pending', label: '待处理', icon: 'mdi-progress-clock', hint: '账本里没有、下一轮要问的文件' },
+  { key: 'deficient', label: '有缺项', icon: 'mdi-file-document-alert-outline', hint: '已处理但封面/歌词等仍缺失，可单项编辑补齐' }
 ]
 
 // 表格是分页取回的（items 只有当前页），所以：
@@ -60,7 +61,8 @@ const pageText = computed(() => {
 const STATUS_TEXT: Record<string, string> = {
   done: '已处理',
   failed: '失败',
-  pending: '待处理'
+  pending: '待处理',
+  deficient: '有缺项'
 }
 
 const SOURCE_TEXT: Record<string, string> = {
@@ -232,6 +234,62 @@ async function scanNow(force: boolean) {
   }
 }
 
+const editDialog = ref(false)
+const editRow = ref<any>(null)
+const editForm = ref({ title: '', artist: '', album: '', year: '', tracknumber: '', lyrics: '' })
+
+function openEdit(row: any) {
+  editRow.value = row
+  editForm.value = {
+    title: row.title ?? '',
+    artist: row.artist ?? '',
+    album: row.album ?? '',
+    year: row.year ?? '',
+    tracknumber: row.tracknumber ?? '',
+    lyrics: row.lyrics ?? ''
+  }
+  editDialog.value = true
+}
+
+async function submitEdit() {
+  if (!editRow.value) return
+  const fields: Record<string, string> = {}
+  for (const [key, value] of Object.entries(editForm.value)) {
+    const text = String(value ?? '').trim()
+    if (text) fields[key] = text
+  }
+  if (!Object.keys(fields).length) {
+    notify('没有可写入的字段', 'warning')
+    return
+  }
+  busy.value = true
+  try {
+    const res = await (props.api as MoviePilotApi).post(`${base.value}/edit`, {
+      path: editRow.value.path,
+      fields
+    })
+    if (res?.accepted) {
+      notify('已保存并清除缺项标记', 'success')
+      editDialog.value = false
+      await refresh()
+    } else if (res?.reason === 'out_of_library') {
+      notify('该文件不在媒体库内，无法写入', 'warning')
+    } else if (res?.reason === 'invalid_fields') {
+      notify('字段不合法或为空', 'warning')
+    } else if (res?.reason === 'write_failed') {
+      notify('写标签失败，检查文件权限', 'error')
+    } else if (res?.reason === 'no_path') {
+      notify('缺少文件路径', 'warning')
+    } else {
+      notify('保存失败', 'error')
+    }
+  } catch (e: any) {
+    notify(`保存失败：${e?.message || e}`, 'error')
+  } finally {
+    busy.value = false
+  }
+}
+
 function onPage(nextPage: number) {
   page.value = Math.max(1, nextPage)
   offset.value = (page.value - 1) * limit.value
@@ -300,9 +358,10 @@ const navItems = computed(() => [
     key: b.key as View,
     title: b.label,
     icon: b.icon,
+    // 有缺项也挂数字：这一桶要人逐个进来补，不标数量就看不出还剩多少没处理。
     badge: b.key === 'failed'
       ? Number(counts.value.failed ?? 0)
-      : (b.key === 'done' ? Number(counts.value.done ?? 0) : 0)
+      : (b.key === 'deficient' ? Number(counts.value.deficient ?? 0) : (b.key === 'done' ? Number(counts.value.done ?? 0) : 0))
   }))
 ])
 
@@ -360,7 +419,7 @@ onMounted(() => {
             <v-list-item-title>{{ item.title }}</v-list-item-title>
             <template #append>
               <v-chip v-if="item.badge" size="x-small" variant="tonal"
-                      :color="item.key === 'failed' ? 'warning' : 'grey'">{{ item.badge }}</v-chip>
+                      :color="item.key === 'failed' ? 'warning' : item.key === 'deficient' ? 'info' : 'grey'">{{ item.badge }}</v-chip>
             </template>
           </v-list-item>
         </v-list>
@@ -532,7 +591,7 @@ onMounted(() => {
               { title: '重试', key: 'retries', width: 70, sortable: false },
               { title: '大小', key: 'size', width: 90, sortable: false },
               { title: '修改时间', key: 'mtime', width: 180, sortable: false },
-              { title: '操作', key: 'actions', sortable: false, width: 90 }
+              { title: '操作', key: 'actions', sortable: false, width: 140 }
             ]"
             :items="rows"
             :items-length="total"
@@ -555,7 +614,7 @@ onMounted(() => {
               <v-chip
                 size="x-small"
                 variant="tonal"
-                :color="item.status === 'done' ? 'success' : item.status === 'failed' ? 'error' : 'grey'"
+                :color="item.status === 'done' ? 'success' : item.status === 'failed' ? 'error' : item.status === 'deficient' ? 'info' : 'grey'"
               >{{ statusText(item.status) }}</v-chip>
             </template>
             <template #item.reason="{ item }">
@@ -567,7 +626,8 @@ onMounted(() => {
             <template #item.mtime="{ item }">{{ fmtTime(item.mtime) }}</template>
             <template #item.size="{ item }">{{ fmtSize(item.size) }}</template>
             <template #item.actions="{ item }">
-              <v-btn size="x-small" variant="text" color="primary" :loading="busy" @click="retryRow(item)">重试</v-btn>
+              <v-btn v-if="item.status === 'deficient'" size="x-small" variant="text" color="primary" :loading="busy" @click="openEdit(item)">编辑</v-btn>
+              <v-btn v-else size="x-small" variant="text" color="primary" :loading="busy" @click="retryRow(item)">重试</v-btn>
             </template>
             <template #no-data>
               <div class="text-center pa-6 text-grey">该桶暂无数据</div>
@@ -580,6 +640,26 @@ onMounted(() => {
     <v-snackbar v-model="snackbar.show" :color="snackbar.color" timeout="3000" location="bottom">
       {{ snackbar.text }}
     </v-snackbar>
+
+    <v-dialog v-model="editDialog" max-width="560px">
+      <v-card>
+        <v-card-title class="text-h6">补齐缺项</v-card-title>
+        <v-card-subtitle class="text-truncate">{{ editRow?.name }}</v-card-subtitle>
+        <v-card-text>
+          <v-text-field v-model="editForm.title" label="曲名" density="compact" class="mb-1" />
+          <v-text-field v-model="editForm.artist" label="艺人" density="compact" class="mb-1" />
+          <v-text-field v-model="editForm.album" label="专辑" density="compact" class="mb-1" />
+          <v-text-field v-model="editForm.year" label="年份" density="compact" class="mb-1" />
+          <v-text-field v-model="editForm.tracknumber" label="音轨号" density="compact" class="mb-1" />
+          <v-textarea v-model="editForm.lyrics" label="歌词" density="compact" rows="4" auto-grow />
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" class="text-none" @click="editDialog = false">取消</v-btn>
+          <v-btn variant="flat" color="primary" class="text-none" :loading="busy" @click="submitEdit">保存</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
   </v-card>
 </template>
 

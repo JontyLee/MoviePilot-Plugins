@@ -168,3 +168,6 @@ yarn.lock
 .DS_Store
 # 前端工程的原始构建输出（需要的产物已精选到插件的 dist/assets/）
 plugins.v3/*/frontend/dist/
+
+# CodeGraph 本地索引产物（工具生成，不入库）
+.codegraph/

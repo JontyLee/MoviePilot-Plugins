@@ -111,6 +111,18 @@ v0.3.3（第二轮复盘）：
   会递归进软链目录，库内一个回环软链能让枚举永不返回、互斥槽被永久占住。
   /files?bucket=pending 的 30s TTL 缓存同时覆盖数据页搜索框每停顿一次的重算。
 
+v0.5.0（有缺项从只读标记变成可操作的补齐入口）：
+- 扫描循环逐项统计 deficient 并随 summary 落盘，状态接口 counts.deficient 供前端挂数。
+  计数复用循环里已读出的 tags，不另调 _missing_fields：那会重复解析一遍标签，还要
+  为封面落盘多摸一轮文件系统。
+- 侧栏「有缺项」挂数字徽章，导航与状态列统一 info 配色：这一桶要人逐个进来补，
+  不标数量就看不出还剩多少没处理；和失败桶的 warning 拉开，避免误读成需要重跑。
+- 有缺项行的操作列由「重试」改为「编辑」，弹「补齐缺项」对话框按 _EDIT_FIELDS 补
+  曲名/艺人/专辑/年份/音轨号/歌词，走 POST /edit 单文件写回：这类文件不缺重扫，缺
+  的是某一项人工信息，整目录重跑并不会把它补出来。
+- /edit 只接受媒体库内路径，空白字段跳过不写，保存成功即失效 deficient 缓存、前端
+  刷新后该行摘掉缺项标记：识别源对不上的条目以人工判定为准，插件不再猜第二遍。
+
 v0.4.0（把识别源接进插件，使用者不必再为刮削部署 Music Tag Web）：
 - 内置识别源 sources.py：网易云 / QQ 音乐 / 酷狗 / 咪咕 / MusicBrainz 五个平台的公开检索接口
   由插件自己直连。MTW 那几个源的真正客户端编译在 .so 里，抄不出来也不该抄 —— 它转调的就是
@@ -390,11 +402,17 @@ _TAG_KEYS = {
     "title": ("TIT2", "\u00a9nam", "title", "TITLE"),
     "artist": ("TPE1", "\u00a9ART", "artist", "ARTIST"),
     "album": ("TALB", "\u00a9alb", "album", "ALBUM"),
+    "year": ("TDRC", "\u00a9day", "date", "YEAR"),
+    "tracknumber": ("TRCK", "trkn", "tracknumber", "TRACK"),
 }
 # 内嵌封面的 key 形状（各容器读法不同，见 _has_embedded_cover）：
 # MP4 atom / Vorbis 注释按全名匹配，ID3 的 APIC 帧与 APEv2 的 Cover Art 按前缀匹配。
 _COVER_KEYS = ("covr", "picture", "metadata_block_picture")
 _COVER_KEY_PREFIXES = ("apic", "cover art")
+# 内嵌歌词的 key 形状（各容器读法不同，见 _has_embedded_lyrics）：
+# MP4 atom / Vorbis 注释按全名匹配，ID3 的 USLT 帧与 APEv2 的 Lyrics 按前缀匹配。
+_LYRIC_KEYS = ("lyrics", "\u00a9lyr")
+_LYRIC_KEY_PREFIXES = ("uslt", "lyrics")
 # 常见 “NN - 曲名” / “NN. 曲名” 前缀。
 _TRACK_PREFIX_RE = re.compile(r"^\s*\d{1,3}\s*[-._)]\s*")
 # 目录名尾部的 “ (2017)” / “ [2017]” 年份。
@@ -703,6 +721,44 @@ def _has_embedded_cover(audio: Any, tags: Any) -> bool:
     return False
 
 
+def _has_embedded_lyrics(audio: Any, tags: Any) -> bool:
+    """容器里是否已经内嵌歌词。
+
+    判据口径同 _has_embedded_cover：ID3 的 USLT 是可重复帧，只能 getall("USLT")。
+    侧车 .lrc 不算内嵌，歌词是否缺失的合并判定放在缺陷清单层做。
+    """
+    try:
+        if tags.getall("USLT"):
+            return True
+    except Exception:
+        pass
+    try:
+        keys = list(tags.keys())
+    except Exception:
+        return False
+    for key in keys:
+        name = str(key).lower()
+        if not (name.startswith(_LYRIC_KEY_PREFIXES) or name in _LYRIC_KEYS):
+            continue
+        try:
+            if tags.get(key):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _candidate_has_lyric(c: dict) -> bool:
+    """候选是否已带可用歌词，判据口径同 _candidate_to_musicinfo。"""
+    raw = c.get("lyrics") or c.get("lyric") or c.get("lrc")
+    return bool(isinstance(raw, str) and raw.strip() and not raw.startswith("未找到"))
+
+
+def _is_persistable_lyric(raw: Any) -> bool:
+    """能否把这份歌词文本写进文件 tag，判据口径同 _candidate_has_lyric。"""
+    return bool(isinstance(raw, str) and raw.strip() and not raw.startswith("未找到"))
+
+
 def _read_music_tags(path: Path) -> Dict[str, Any]:
     """读取本地音乐 tag。
 
@@ -710,7 +766,8 @@ def _read_music_tags(path: Path) -> Dict[str, Any]:
     因此这里直接用 mutagen。失败时返回空值，由调用方按“缺 tag”处理。
     """
     out: Dict[str, Any] = {
-        "title": "", "artist": "", "album": "", "duration": None, "has_cover": False,
+        "title": "", "artist": "", "album": "", "year": "", "tracknumber": "",
+        "duration": None, "has_cover": False, "has_lyrics": False,
     }
     try:
         from mutagen import File as MutagenFile
@@ -735,6 +792,7 @@ def _read_music_tags(path: Path) -> Dict[str, Any]:
                 except Exception:
                     pass
         out["has_cover"] = _has_embedded_cover(audio, tags)
+        out["has_lyrics"] = _has_embedded_lyrics(audio, tags)
     try:
         info = getattr(audio, "info", None)
         length = getattr(info, "length", None) if info else None
@@ -743,6 +801,122 @@ def _read_music_tags(path: Path) -> Dict[str, Any]:
     except Exception:
         pass
     return out
+
+
+_EDIT_FIELDS = ("title", "artist", "album", "year", "tracknumber", "lyrics")
+
+
+def _edit_payload_fields(raw: Any) -> Tuple[Dict[str, str], bool]:
+    """单项编辑字段收口：只认白名单，值一律转成去空白字符串。
+
+    编辑是精确写文件的操作，静默丢掉一个字段比拒收更容易把人误导到
+    「改成功了但没生效」上，所以未知字段与不合法歌词整体判 invalid；
+    空值按「不改」跳过，清空不在本版能力里。
+    """
+    if not isinstance(raw, dict):
+        return {}, True
+    out: Dict[str, str] = {}
+    for key, value in raw.items():
+        field = str(key).strip().lower()
+        if field not in _EDIT_FIELDS:
+            return {}, True
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            return {}, True
+        text = str(value).strip()
+        if not text:
+            continue
+        if field == "lyrics" and not _is_persistable_lyric(text):
+            return {}, True
+        out[field] = text
+    return out, False
+
+
+def _write_music_tags(path: Path, fields: Dict[str, str]) -> bool:
+    """按用户明确给出的字段写 tag，只改传入的字段，绝不碰封面。
+
+    同 _read_music_tags 的口径直接用 mutagen：宿主的元数据链路是整包覆盖，
+    单项编辑要的是一次只动一个字段。失败返回 False，由调用方报 write_failed，
+    不把半写入状态说成成功。
+    """
+    try:
+        from mutagen import File as MutagenFile
+
+        audio = MutagenFile(str(path))
+        if audio is None:
+            return False
+        if audio.tags is None:
+            try:
+                audio.add_tags()
+            except Exception:
+                return False
+        tags = audio.tags
+        from mutagen.id3 import ID3
+        if isinstance(tags, ID3):
+            _write_id3_tags(tags, fields)
+        else:
+            from mutagen.mp4 import MP4
+            if isinstance(audio, MP4):
+                _write_mp4_tags(tags, fields)
+            else:
+                try:
+                    from mutagen.apev2 import APEv2
+                    is_ape = isinstance(tags, APEv2)
+                except Exception:
+                    is_ape = False
+                if is_ape:
+                    _write_ape_tags(tags, fields)
+                else:
+                    _write_vcomment_tags(tags, fields)
+        audio.save()
+        return True
+    except Exception:
+        return False
+
+
+def _write_id3_tags(tags, fields: Dict[str, str]) -> None:
+    from mutagen.id3 import TALB, TDRC, TIT2, TPE1, TRCK, USLT
+
+    frames = {"title": TIT2, "artist": TPE1, "album": TALB,
+              "year": TDRC, "tracknumber": TRCK}
+    for field, cls in frames.items():
+        if field in fields:
+            tags.setall(cls(encoding=3, text=fields[field]))
+    if "lyrics" in fields:
+        tags.setall(USLT(encoding=3, lang="XXX", desc="", text=fields["lyrics"]))
+
+
+def _write_mp4_tags(tags, fields: Dict[str, str]) -> None:
+    atoms = {"title": "©nam", "artist": "©ART", "album": "©alb", "year": "©day"}
+    for field, atom in atoms.items():
+        if field in fields:
+            tags[atom] = [fields[field]]
+    if "tracknumber" in fields:
+        head = fields["tracknumber"].split("/")[0].strip()
+        try:
+            total = int(tags.get("trkn", [(0, 0)])[0][1])
+        except (TypeError, ValueError, IndexError):
+            total = 0
+        tags["trkn"] = [(min(65535, max(0, int(head))), total)]
+    if "lyrics" in fields:
+        tags["©lyr"] = [fields["lyrics"]]
+
+
+def _write_vcomment_tags(tags, fields: Dict[str, str]) -> None:
+    keys = {"title": "TITLE", "artist": "ARTIST", "album": "ALBUM",
+            "year": "DATE", "tracknumber": "TRACKNUMBER", "lyrics": "LYRICS"}
+    for field, key in keys.items():
+        if field in fields:
+            tags[key] = fields[field]
+
+
+def _write_ape_tags(tags, fields: Dict[str, str]) -> None:
+    keys = {"title": "Title", "artist": "Artist", "album": "Album",
+            "year": "Year", "tracknumber": "Track", "lyrics": "Lyrics"}
+    for field, key in keys.items():
+        if field in fields:
+            tags[key] = fields[key]
 
 
 def _path_identity(path: Path, roots: Sequence[Path] = ()) -> Dict[str, str]:
@@ -829,7 +1003,7 @@ class MusicLibraryScraper(_PluginBase):
         "也可切回 MTW 由它代为检索；再沿用 MP 原生音乐刮削链路写入标签与封面。"
     )
     plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/avator.webp"
-    plugin_version = "0.4.0"
+    plugin_version = "0.5.0"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "musiclibraryscraper_"
@@ -853,6 +1027,8 @@ class MusicLibraryScraper(_PluginBase):
     _source_backend: str = "auto"
     _backend: str = "builtin"
     _min_score: int = 3
+    # 是否允许在本地已有/候选自带的歌词之外，主动去识别源拉歌词回填
+    _fill_lyrics: bool = False
 
     # MTW 令牌缓存
     _token: Optional[str] = None
@@ -869,6 +1045,7 @@ class MusicLibraryScraper(_PluginBase):
         self.__dict__.setdefault("_scan_running", False)
         self.__dict__.setdefault("_stop_flag", threading.Event())
         self.__dict__.setdefault("_pending_cache", None)
+        self.__dict__.setdefault("_deficient_cache", None)
 
         if config:
             previous_mtw = (self._mtw_base_url, self._mtw_username, self._mtw_password)
@@ -898,6 +1075,7 @@ class MusicLibraryScraper(_PluginBase):
                     "本轮每个文件都会记成 MTW 不可达并很快熔断，请填地址或把识别来源改成内置源"
                 )
             self._min_score = self._clamp_min_score(config.get("min_score"))
+            self._fill_lyrics = bool(config.get("fill_lyrics"))
             if (self._mtw_base_url, self._mtw_username, self._mtw_password) != previous_mtw:
                 # 换地址/换账号后手里那个令牌是上一个实例签发的：
                 # 继续带它请求既会白吃一次 401，也算把凭据发到新的地址上。
@@ -926,6 +1104,7 @@ class MusicLibraryScraper(_PluginBase):
                 "mtw_resource": self._mtw_resources,
                 "source_backend": self._source_backend,
                 "min_score": self._min_score,
+                "fill_lyrics": self._fill_lyrics,
             })
             self._kick_scan()
 
@@ -1122,7 +1301,7 @@ class MusicLibraryScraper(_PluginBase):
                 "endpoint": self.api_files,
                 "methods": ["GET"],
                 "auth": "bear",
-                "summary": "按桶分页查询文件（done/failed/pending）",
+                "summary": "按桶分页查询文件（done/failed/pending/deficient）",
             },
             {
                 "path": "/retry",
@@ -1130,6 +1309,13 @@ class MusicLibraryScraper(_PluginBase):
                 "methods": ["POST"],
                 "auth": "bear",
                 "summary": "重试指定路径或全部失败项",
+            },
+            {
+                "path": "/edit",
+                "endpoint": self.api_edit,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "编辑单个文件的元数据字段",
             },
             {
                 "path": "/scan",
@@ -1145,7 +1331,7 @@ class MusicLibraryScraper(_PluginBase):
         return self._build_status()
 
     def api_files(self, request: Request) -> Dict[str, Any]:
-        """GET /files —— bucket=done|failed|pending&limit&offset&search 分页查询。"""
+        """GET /files —— bucket=done|failed|pending|deficient&limit&offset&search 分页查询。"""
         qp = request.query_params
         try:
             limit = max(1, min(int(qp.get("limit") or 50), 500))
@@ -1156,7 +1342,7 @@ class MusicLibraryScraper(_PluginBase):
         except (TypeError, ValueError):
             offset = 0
         bucket = (qp.get("bucket") or "done").lower()
-        if bucket not in ("done", "failed", "pending"):
+        if bucket not in ("done", "failed", "pending", "deficient"):
             # 不认识的桶名不能悄悄落到 done 那一档：回显的还是请求的那个名字，
             # 调用方拿到一批"已处理"的行却以为是自己传的桶，看着像筛选坏了。
             return {
@@ -1204,6 +1390,29 @@ class MusicLibraryScraper(_PluginBase):
             "running": self._is_running(),
             "reason": None if started else "busy",
         }
+
+    async def api_edit(self, request: Request) -> Dict[str, Any]:
+        """POST /edit —— body {path:"...",fields:{...}} 单项编辑库内文件的元数据。"""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        path = str(body.get("path") or "").strip() if isinstance(body, dict) else ""
+        if not path:
+            return {"accepted": False, "reason": "no_path"}
+        # 只接受库内的音频文件：调用方传什么就改什么是把插件当成了任意文件写接口，
+        # 换个 token 就能改到音乐库之外的文件。
+        if not self._is_library_path(path):
+            return {"accepted": False, "reason": "out_of_library"}
+        fields, invalid = _edit_payload_fields(body.get("fields"))
+        if invalid or not fields:
+            return {"accepted": False, "reason": "invalid_fields"}
+        if not _write_music_tags(Path(path), fields):
+            return {"accepted": False, "reason": "write_failed"}
+        # tag 刚被改过，两份缓存必须作废：否则缺陷清单还会按编辑前的状态报缺项。
+        self.__dict__["_pending_cache"] = None
+        self.__dict__["_deficient_cache"] = None
+        return {"accepted": True, "updated": sorted(fields)}
 
     async def api_scan(self, request: Request) -> Dict[str, Any]:
         """POST /scan —— body {force?:bool}，触发一次（增量或全量）扫描。"""
@@ -1387,6 +1596,9 @@ class MusicLibraryScraper(_PluginBase):
             # 预填会让两个配置页长得不一样，也和说明文案对不上。
             "mtw_resource": [],
             "min_score": 3,
+            # writeback 一定会带这个键（onlyonce 回写里就有），defaults 不声明它，
+            # 回写后就成了「表单没定义却在配置里存在」的野键，整体替换的护栏也拦不住。
+            "fill_lyrics": False,
         }
 
     # ---------------- 状态账 ----------------
@@ -1722,6 +1934,7 @@ class MusicLibraryScraper(_PluginBase):
         started = time.time()
         # 账本要变了，pending 桶的缓存立刻作废（它靠 done/failed 做差集）
         self.__dict__["_pending_cache"] = None
+        self.__dict__["_deficient_cache"] = None
         done = self._load_done()
         failed = self._load_failed()
         targeted = bool(target_paths)
@@ -1731,7 +1944,7 @@ class MusicLibraryScraper(_PluginBase):
         else:
             files = self._enumerate_files()
 
-        scanned = from_cache = skipped_tagged = ok = failed_n = exhausted = 0
+        scanned = from_cache = skipped_tagged = ok = failed_n = exhausted = deficient = 0
         transport = errors = aborted = 0
         now_iso = self._now_iso()
         effective_force = force or (self._force_all and not targeted)
@@ -1785,6 +1998,14 @@ class MusicLibraryScraper(_PluginBase):
 
                 # 每个文件的 tag 只解析一次：补空判定与匹配身份共用这份读取结果
                 tags = _read_music_tags(fp)
+
+                # "有缺项"：核心项齐了、但次级字段还缺的文件。照 _missing_fields 的口径
+                # 就地判这份已读的 tags，不再调函数（它每次会重解析 + 落盘扫封面）。
+                # 放在 __is_complete 的 continue 之前，否则补空判够格就跳过了永远数不到。
+                if tags.get("title") and tags.get("artist") and tags.get("album") \
+                        and (not tags.get("year") or not tags.get("tracknumber")
+                             or not tags.get("has_cover") or not tags.get("has_lyrics")):
+                    deficient += 1
 
                 # 补空模式：tag 与封面都齐了才跳过。
                 if not effective_force and self.__is_complete(fp, tags):
@@ -1892,6 +2113,7 @@ class MusicLibraryScraper(_PluginBase):
             "error": errors,
             "aborted": aborted,
             "pending": pending,
+            "deficient": deficient,
             "force": effective_force,
             "targeted": targeted,
             "cron": self._normalize_dow((self._cron or "").strip()) or _DEFAULT_CRON,
@@ -1903,6 +2125,7 @@ class MusicLibraryScraper(_PluginBase):
         # 数据页看起来就像整库已经扫完了。它单独记在 last_targeted。
         self.save_data(_KEY_TARGETED_RUNS if targeted else _KEY_RUNS, summary)
         self.__dict__["_pending_cache"] = None
+        self.__dict__["_deficient_cache"] = None
         logger.info(
             f"[music-scraper] {'定向重试' if targeted else '扫描'}完成："
             f"命中缓存 {from_cache}，已有tag {skipped_tagged}，"
@@ -1949,6 +2172,10 @@ class MusicLibraryScraper(_PluginBase):
             detail = f"未达阈值（最低匹配分数 {self._min_score}）"
             return False, f"{detail}：{miss}" if miss else detail, score, ""
         source = str(picked.get("resource") or "").strip()
+        if self._fill_lyrics and self._backend == "builtin" and not _candidate_has_lyric(picked):
+            lyric = self._builtin_fetch_lyric(source, picked)
+            if lyric:
+                picked["lyrics"] = lyric
         info = self._candidate_to_musicinfo(picked, path)
         if not info:
             return False, "候选信息不完整，无法转换", score, source
@@ -2026,6 +2253,7 @@ class MusicLibraryScraper(_PluginBase):
                 "retryable": retryable,
                 "exhausted": exhausted,
                 "pending_unknown": runs.get("pending", 0),
+                "deficient": runs.get("deficient", 0),
             },
             "failure_reasons": failure_reasons,
             "config": {
@@ -2091,6 +2319,28 @@ class MusicLibraryScraper(_PluginBase):
             # 待处理 = 全盘遍历做差集，是这几个接口里最贵的一档。数据页翻页、搜索、
             # 刷新都会再打一次，短时间缓存一份，扫描开始/结束时主动作废。
             self.__dict__["_pending_cache"] = {"ts": time.time(), "rows": list(rows)}
+        elif bucket == "deficient":
+            cached = self.__dict__.get("_deficient_cache")
+            if cached and time.time() - cached["ts"] < _PENDING_TTL:
+                return list(cached["rows"])
+            for fp in self._enumerate_files():
+                missing = self._missing_fields(fp)
+                if not missing:
+                    continue
+                key = str(fp)
+                try:
+                    st = fp.stat()
+                    mtime, size = int(st.st_mtime), st.st_size
+                except OSError:
+                    mtime, size = None, None
+                rows.append({
+                    "path": key, "name": fp.name,
+                    "mtime": mtime, "size": size,
+                    "status": "deficient", "reason": ",".join(missing),
+                    "retries": None, "score": None, "ts": None,
+                    "missing": missing,
+                })
+            self.__dict__["_deficient_cache"] = {"ts": time.time(), "rows": list(rows)}
         else:  # done
             done = self._load_done()
             for path, v in done.items():
@@ -2103,6 +2353,17 @@ class MusicLibraryScraper(_PluginBase):
                     "ts": v.get("ts"), "source": v.get("source"),
                 })
         return rows
+
+    def _missing_fields(self, path: Path) -> List[str]:
+        """该文件缺哪些元数据项，返回缺项名列表；齐全则返回空。"""
+        tags = _read_music_tags(path)
+        missing = [f for f in ("title", "artist", "album", "year", "tracknumber")
+                   if not str(tags.get(f) or "").strip()]
+        if not tags.get("has_cover"):
+            missing.append("cover")
+        if not tags.get("has_lyrics") and not path.with_suffix(".lrc").exists():
+            missing.append("lyrics")
+        return missing
 
     # ---------------- MTW HTTP 客户端 ----------------
 
@@ -2414,6 +2675,20 @@ class MusicLibraryScraper(_PluginBase):
         """MTW utils.match_song 简化版：title / artist / album 各 0/1。"""
         hits = MusicLibraryScraper._field_hits(c, want)
         return sum(1 for state in hits.values() if state == _HIT)
+
+    def _builtin_fetch_lyric(self, source: str, picked: dict) -> Optional[str]:
+        if not _sources.supports_lyrics(source):
+            return None
+        song_id = str(picked.get("id") or picked.get("song_id") or picked.get("mid") or "").strip()
+        if not song_id:
+            return None
+        spec = _sources.build_lyric_request(source, song_id)
+        if not spec:
+            return None
+        payload, err = self._builtin_request(spec)
+        if err or not payload:
+            return None
+        return _sources.parse_lyric(source, payload)
 
     def _candidate_to_musicinfo(self, c: dict, path: Path) -> Optional[MusicInfo]:
         """把 MTW 候选折叠成 MP MusicInfo。
