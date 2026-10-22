@@ -6,7 +6,7 @@ xiaoaispeaker — MoviePilot v3 插件（插件名：小爱音箱）
 定时任务、歌词，以及一组远程命令。播放走「插件签发一条带签名与有效期的 HTTP 直链，音箱自己经
 云端拉流」这条路，不依赖 Emby/Jellyfin，也不需要额外部署 Music Tag Web。
 
-v0.2.0 的边界（有意为之，不是遗漏）：
+v0.3.0 的边界（有意为之，不是遗漏）：
 - 只支持小米云端 Mina 接口（登录 → serviceToken → /remote/ubus），不做 MiIO 本地 RPC：
   局域网直连要额外拿 token 与 miio 密钥、按型号试 siid/piid，收益不抵复杂度。
 - 歌词只在本页面上显示（同目录 .lrc/.txt 与音频内嵌标签）：触屏音箱的本机歌词要那块的
@@ -18,6 +18,10 @@ v0.2.0 的边界（有意为之，不是遗漏）：
 - 队列连播靠轮询 player_get_play_status 判「播完」，不是音箱侧的真实播放列表。
 - /stream 必须匿名可达（音箱不会带上 MP 的登录态），因此用「路径 + 过期时间」的 HMAC 签名
   收敛成「只能取配置目录内、在有效期内的音频文件」，签名不匹配或路径越库一律 403。
+- AI 兜底与自由对话不自备第二份密钥与端点：借主程序「设定 → AI 大模型」配好的那个助手，
+  宿主没配就在配置页写明缺哪一项并退回到只用口令表，插件这里不留 key。
+- 「启用插件」「显示侧栏入口」只能在插件自己的配置页改：宿主投影侧栏入口前先调 get_state()，
+  而插件管理页那个开关写的是宿主自己的实例记录，插不进这一项。
 
 出处与许可：小米云端的登录三步流程、clientSign 算法、ubus 请求体、需要走 play_music 的
 型号白名单，移植自 Songloft 的「智能音箱」插件 songloft-plugin-miot
@@ -174,9 +178,7 @@ _CHAT_WINDOW_SECONDS = 120.0
 # 带给模型的历史条数（一问一答算两条）
 _CHAT_TURNS = 8
 
-# AI 兜底默认打到阿里云的 OpenAI 兼容端点（与上游一致）；换别的网关就改这三项
-_DEFAULT_AI_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-_DEFAULT_AI_MODEL = "qwen-flash"
+# AI 兜底没有自己的端点与密钥：读宿主「设定 → AI 大模型」，见 intents.Assistant
 
 _DEFAULT_CONFIG: Dict[str, Any] = {
     "enabled": False,
@@ -204,9 +206,6 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
     "voice_memory": True,
     "ai_enabled": False,
     "ai_chat": False,
-    "ai_api_url": _DEFAULT_AI_URL,
-    "ai_api_key": "",
-    "ai_model": _DEFAULT_AI_MODEL,
     "ai_timeout": 6,
     "library_limit": _library.DEFAULT_SONG_LIMIT,
     "library_refresh": 60,
@@ -240,7 +239,7 @@ class XiaoaiSpeaker(_PluginBase):
         "库内目录浏览与搜索、远程命令；播放直链由插件签名限时，不依赖媒体服务器。"
     )
     plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/xiaoai.svg"
-    plugin_version = "0.2.0"
+    plugin_version = "0.3.0"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "xiaoaispeaker_"
@@ -273,9 +272,6 @@ class XiaoaiSpeaker(_PluginBase):
     _voice_memory: bool = True
     _ai_enabled: bool = False
     _ai_chat: bool = False
-    _ai_api_url: str = _DEFAULT_AI_URL
-    _ai_api_key: str = ""
-    _ai_model: str = _DEFAULT_AI_MODEL
     _ai_timeout: int = 6
     _library_limit: int = _library.DEFAULT_SONG_LIMIT
     _library_refresh: int = 60
@@ -296,6 +292,9 @@ class XiaoaiSpeaker(_PluginBase):
         self.__dict__.setdefault("_stop_flag", threading.Event())
         self.__dict__.setdefault("_library_index", _library.LibraryIndex())
         self.__dict__.setdefault("_speech_listener", None)
+        # 每次重跑都丢掉助手缓存：宿主设定里换了 provider/模型或补上 key，状态面板
+        # 得立刻反映新的，不能继续报上一次读到的那一家
+        self.__dict__.pop("_assistant_cache", None)
         self.__dict__.setdefault("_library_error", "")
 
         if config:
@@ -324,9 +323,6 @@ class XiaoaiSpeaker(_PluginBase):
             self._voice_memory = bool(config.get("voice_memory", True))
             self._ai_enabled = bool(config.get("ai_enabled"))
             self._ai_chat = bool(config.get("ai_chat"))
-            self._ai_api_url = str(config.get("ai_api_url") or _DEFAULT_AI_URL).strip().rstrip("/")
-            self._ai_api_key = str(config.get("ai_api_key") or "").strip()
-            self._ai_model = str(config.get("ai_model") or _DEFAULT_AI_MODEL).strip()
             self._ai_timeout = self._clamp_ai_timeout(config.get("ai_timeout"))
             self._library_limit = _library.clamp_song_limit(config.get("library_limit"))
             self._library_refresh = self._clamp_library_refresh(config.get("library_refresh"))
@@ -389,6 +385,12 @@ class XiaoaiSpeaker(_PluginBase):
         return min(max(value, 0), 1440)
 
     def get_state(self) -> bool:
+        """宿主眼里的「插件已启用」：侧栏入口、周期任务、远程命令都按这一项准入。
+
+        宿主在投影 `get_sidebar_nav` / `get_service` 之前先调 `get_state()`，而插件管理页
+        那个开关写的是宿主自己的实例记录，碰不到这里的 `enabled` —— 所以这一项必须在插件
+        自己的配置页给出开关，否则「装好了但永远不会出现侧栏」是死结。
+        """
         return bool(self._enabled)
 
     # ---------------- 配置与库范围 ----------------
@@ -467,9 +469,6 @@ class XiaoaiSpeaker(_PluginBase):
             "voice_memory": self._voice_memory,
             "ai_enabled": self._ai_enabled,
             "ai_chat": self._ai_chat,
-            "ai_api_url": self._ai_api_url,
-            "ai_api_key": self._ai_api_key,
-            "ai_model": self._ai_model,
             "ai_timeout": self._ai_timeout,
             "library_limit": self._library_limit,
             "library_refresh": self._library_refresh,
@@ -1160,16 +1159,26 @@ class XiaoaiSpeaker(_PluginBase):
         return sorted({str(row[0]) for row in _voice.DEFAULT_COMMANDS
                        if raw.get(str(row[0]), True)})
 
-    def _ai_available(self) -> bool:
-        return bool(self._ai_enabled and self._ai_api_key)
+    def _assistant(self) -> _intents.Assistant:
+        """MoviePilot 配置里的那个智能助手：每次新建都重读一遍宿主配置。
 
-    def _ai_config(self) -> Dict[str, Any]:
-        return {"api_url": self._ai_api_url, "api_key": self._ai_api_key,
-                "model": self._ai_model, "timeout": self._ai_timeout}
+        插件不再自备 api_key/base_url/model —— 主程序设定里配了哪家就用哪家，
+        没配就当 AI 兜底不可用，并能在状态里说清是哪一项没配。
+        """
+        cached = self.__dict__.get("_assistant_cache")
+        if isinstance(cached, _intents.Assistant):
+            return cached
+        assistant = _intents.Assistant(self._ai_timeout)
+        self.__dict__["_assistant_cache"] = assistant
+        return assistant
+
+    def _ai_available(self) -> bool:
+        return bool(self._ai_enabled and self._assistant().available)
 
     def _analyzer(self) -> _intents.AIAnalyzer:
-        """AI 兜底与对话用的分析器：每轮按当前配置新建，改配置立刻生效。"""
-        return _intents.AIAnalyzer(self._ai_config())
+        """AI 兜底与对话用的分析器：跟着宿主配置与插件开关走，改完即生效。"""
+        return _intents.AIAnalyzer({"assistant": self._assistant(),
+                                    "timeout": self._ai_timeout})
 
     def _chat_active(self) -> bool:
         """对话窗口还开着就按满速轮询：追问隔 5 秒才读到很出戏。"""
@@ -2096,10 +2105,8 @@ class XiaoaiSpeaker(_PluginBase):
                 voice_memory=self._voice_memory,
                 ai_enabled=self._ai_enabled,
                 ai_chat=self._ai_chat,
-                ai_api_url=self._ai_api_url,
-                ai_key_set=bool(self._ai_api_key),
-                ai_model=self._ai_model,
                 ai_timeout=self._ai_timeout,
+                **self._assistant().describe(),
                 library_limit=self._library_limit,
                 library_refresh=self._library_refresh,
             ),
@@ -2916,8 +2923,9 @@ class XiaoaiSpeaker(_PluginBase):
         """POST /config —— 只改传上来的字段，密码留空表示保留原值。"""
         data = payload.model_dump(exclude_none=True)
         password = data.pop("password", None)
-        # 这两项决定语音任务是否存在与多久醒一次，改完要请宿主重建任务
-        affects_jobs = any(key in data for key in ("voice_enabled", "voice_poll"))
+        # enabled 决定宿主要不要登记本插件的侧栏与周期任务，voice_* 决定语音任务
+        # 是否存在与多久醒一次：改过这些都要请宿主重建
+        affects_jobs = any(key in data for key in ("enabled", "voice_enabled", "voice_poll"))
         with self._play_lock():
             if "music_dirs" in data:
                 self._music_dirs = str(data.pop("music_dirs") or "")
@@ -2941,6 +2949,13 @@ class XiaoaiSpeaker(_PluginBase):
                     self.__dict__["_auth_state"] = ""
             if password:
                 self._password = str(password)
+            # enabled / show_sidebar_nav 与那些开关一样是布尔，但属性名不遵循 _<键名>，
+            # 单列一行：改 enabled 就是改宿主眼里的插件状态（get_state），侧栏与周期
+            # 任务都卡在这一项上
+            if "enabled" in data:
+                self._enabled = bool(data.pop("enabled"))
+            if "show_sidebar_nav" in data:
+                self._show_sidebar_nav = bool(data.pop("show_sidebar_nav"))
             for key, attr, as_bool in (("auto_next", "_auto_next", True),
                                        ("keep_light", "_keep_light", True),
                                        ("tts_announce", "_tts_announce", True),
@@ -2952,18 +2967,11 @@ class XiaoaiSpeaker(_PluginBase):
                         "voice_reply", "voice_memory", "ai_enabled", "ai_chat"):
                 if key in data:
                     setattr(self, f"_{key}", bool(data.pop(key)))
-            for key in ("voice_devices", "voice_hint_text", "ai_api_url", "ai_model"):
-                if key in data:
-                    value = str(data.pop(key) or "").strip()
-                    if key == "ai_api_url":
-                        value = value.rstrip("/") or str(_DEFAULT_CONFIG["ai_api_url"])
-                    elif key == "voice_hint_text":
-                        value = value or str(_DEFAULT_CONFIG["voice_hint_text"])
-                    setattr(self, f"_{key}", value)
-            if data.get("ai_api_key") is not None:
-                api_key = str(data.pop("ai_api_key") or "").strip()
-                if api_key:
-                    self._ai_api_key = api_key
+            if "voice_hint_text" in data:
+                self._voice_hint_text = (str(data.pop("voice_hint_text") or "").strip()
+                                         or str(_DEFAULT_CONFIG["voice_hint_text"]))
+            if "voice_devices" in data:
+                self._voice_devices = str(data.pop("voice_devices") or "").strip()
             if "voice_poll" in data:
                 self._voice_poll = self._clamp_poll(data.pop("voice_poll"))
             if "ai_timeout" in data:

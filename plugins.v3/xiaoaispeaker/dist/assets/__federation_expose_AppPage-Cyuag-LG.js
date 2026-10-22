@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { C as ConfigForm } from './ConfigForm-DbT4l0-v.js';
+import { C as ConfigForm } from './ConfigForm-CwKrlHej.js';
 import { a as activeLine, s as statusColor, f as fmtSeconds, M as MODE_ITEMS, m as modeText, b as fmtSize, c as fmtTime, t as taskNeedsPlaylist, T as TASK_ACTIONS, W as WEEK_DAYS, q as query } from './types-DlEniWcp.js';
 import { _ as _export_sfc } from './_plugin-vue_export-helper-pcqpp-6-.js';
 
@@ -242,65 +242,78 @@ const _hoisted_114 = { class: "xai-record-text" };
 const _hoisted_115 = ["title"];
 const _hoisted_116 = { class: "text-caption text-grey mt-1" };
 const _hoisted_117 = { class: "xai-pane" };
-const _hoisted_118 = {
+const _hoisted_118 = { class: "xai-block-title" };
+const _hoisted_119 = {
   key: 0,
-  class: "d-flex align-center",
+  class: "d-flex align-center mb-3",
   style: { "gap": "8px", "flex-wrap": "wrap" }
 };
-const _hoisted_119 = {
+const _hoisted_120 = {
   class: "text-body-2",
   style: { "flex": "1 1 220px" }
 };
-const _hoisted_120 = { class: "text-caption text-grey" };
-const _hoisted_121 = {
+const _hoisted_121 = { class: "text-caption text-grey" };
+const _hoisted_122 = {
   class: "d-flex",
   style: { "gap": "8px", "flex-wrap": "wrap" }
-};
-const _hoisted_122 = {
-  key: 0,
-  class: "mt-3"
 };
 const _hoisted_123 = {
+  key: 1,
+  class: "mt-3"
+};
+const _hoisted_124 = { class: "text-body-2" };
+const _hoisted_125 = { class: "text-caption" };
+const _hoisted_126 = {
+  key: 0,
+  class: "text-caption"
+};
+const _hoisted_127 = {
+  key: 2,
+  class: "mt-3"
+};
+const _hoisted_128 = {
   class: "d-flex",
   style: { "gap": "8px", "flex-wrap": "wrap" }
 };
-const _hoisted_124 = {
-  key: 1,
-  class: "text-caption text-grey mt-2"
-};
-const _hoisted_125 = {
+const _hoisted_129 = {
   key: 0,
   class: "mt-3"
 };
-const _hoisted_126 = {
+const _hoisted_130 = {
   class: "d-flex mt-1",
   style: { "gap": "8px" }
 };
-const _hoisted_127 = { class: "text-caption text-grey mt-2" };
-const _hoisted_128 = { class: "xai-block-title" };
-const _hoisted_129 = { class: "text-caption text-grey ml-2" };
-const _hoisted_130 = {
+const _hoisted_131 = { class: "text-caption text-grey mt-2" };
+const _hoisted_132 = { class: "xai-block-title" };
+const _hoisted_133 = { class: "text-caption text-grey ml-2" };
+const _hoisted_134 = { style: { "min-width": "0", "flex": "1 1 200px" } };
+const _hoisted_135 = { class: "text-body-2" };
+const _hoisted_136 = { class: "text-caption text-grey" };
+const _hoisted_137 = { class: "text-caption text-grey mt-1" };
+const _hoisted_138 = { class: "xai-block-title" };
+const _hoisted_139 = { class: "text-caption text-grey ml-2" };
+const _hoisted_140 = {
   class: "d-flex align-center",
   style: { "gap": "10px", "flex-wrap": "wrap" }
 };
-const _hoisted_131 = { style: { "min-width": "0", "flex": "1 1 200px" } };
-const _hoisted_132 = { class: "text-body-2" };
-const _hoisted_133 = { class: "text-caption text-grey" };
-const _hoisted_134 = { class: "xai-block" };
-const _hoisted_135 = { class: "xai-block-title" };
-const _hoisted_136 = { class: "text-caption text-grey ml-2" };
-const _hoisted_137 = {
+const _hoisted_141 = { style: { "min-width": "0", "flex": "1 1 200px" } };
+const _hoisted_142 = { class: "text-body-2" };
+const _hoisted_143 = { class: "text-caption text-grey" };
+const _hoisted_144 = { class: "xai-block" };
+const _hoisted_145 = { class: "xai-block-title" };
+const _hoisted_146 = { class: "text-caption text-grey ml-2" };
+const _hoisted_147 = {
   class: "d-flex align-center",
   style: { "gap": "10px", "flex-wrap": "wrap" }
 };
-const _hoisted_138 = { style: { "min-width": "0", "flex": "1 1 200px" } };
-const _hoisted_139 = { class: "text-body-2" };
-const _hoisted_140 = { class: "text-caption text-grey" };
-const _hoisted_141 = {
+const _hoisted_148 = { style: { "min-width": "0", "flex": "1 1 200px" } };
+const _hoisted_149 = { class: "text-body-2" };
+const _hoisted_150 = { class: "text-caption text-grey" };
+const _hoisted_151 = {
   class: "d-flex align-center",
   style: { "gap": "8px", "flex-wrap": "wrap" }
 };
-const _hoisted_142 = {
+const _hoisted_152 = {
   key: 0,
   class: "xai-pane xai-pane-config"
 };
@@ -385,10 +398,11 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
         voice_memory: true,
         ai_enabled: false,
         ai_chat: false,
-        ai_api_url: "",
-        ai_key_set: false,
-        ai_model: "",
         ai_timeout: 6,
+        ai_ready: false,
+        ai_provider: "",
+        ai_model: "",
+        ai_message: "",
         library_limit: 1e4,
         library_refresh: 60
       },
@@ -853,10 +867,18 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
     const verifyCode = ref("");
     const manualToken = ref("");
     const showManual = ref(false);
-    const loginPending = computed(() => {
-      const state = loginResult.value?.state;
-      return state === "need_captcha" || state === "need_verify";
-    });
+    const picker = ref(false);
+    const pickerDevices = computed(() => devices.value.slice().sort((a, b) => {
+      const rank = (d) => d.is_default ? 0 : d.presence === "online" ? 1 : 2;
+      return rank(a) - rank(b);
+    }));
+    const loginStates = {
+      success: { color: "success", text: "登录成功" },
+      need_captcha: { color: "warning", text: "卡在图形验证码：照上面的图填验证码提交" },
+      need_verify: { color: "warning", text: "卡在二次校验：把小米发到手机/邮箱的验证码填进来提交" },
+      failed: { color: "error", text: "登录失败" }
+    };
+    const loginState = computed(() => loginStates[loginResult.value?.state || ""] || null);
     async function startLogin() {
       busy.value = "登录";
       try {
@@ -906,7 +928,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
         busy.value = "";
       }
     }
-    function afterLogin(res) {
+    async function afterLogin(res) {
       loginResult.value = res || null;
       verifyCode.value = "";
       if (res?.state === "success") {
@@ -914,7 +936,9 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
         loginForm.value.password = "";
         showManual.value = false;
         manualToken.value = "";
-        loadStatus(false);
+        await loadStatus(false);
+        if (devices.value.length) picker.value = true;
+        else notify("登录成功，但这个账号下没取到音箱设备", "warning");
         return;
       }
       if (res?.state === "need_captcha" || res?.state === "need_verify") {
@@ -923,10 +947,15 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       }
       notify(res?.message || "登录失败", "error");
     }
+    function pickDevice(device) {
+      picker.value = false;
+      return selectDevice(device);
+    }
     async function doLogout() {
       const res = await post("/logout", {}, "退出登录");
       if (res) {
         loginResult.value = null;
+        picker.value = false;
         loginForm.value = { username: loginForm.value.username, password: "" };
       }
     }
@@ -1166,7 +1195,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               _: 1
             }),
             _createElementVNode("div", _hoisted_2, [
-              _cache[45] || (_cache[45] = _createElementVNode("div", { class: "text-h6" }, "小爱音箱", -1)),
+              _cache[47] || (_cache[47] = _createElementVNode("div", { class: "text-h6" }, "小爱音箱", -1)),
               _createElementVNode("div", _hoisted_3, " 库内音频直链推送到小爱音箱 · v" + _toDisplayString(status.value.version || "-"), 1)
             ]),
             _createVNode(_component_v_spacer),
@@ -1202,7 +1231,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               "prepend-icon": "mdi-refresh",
               onClick: _cache[0] || (_cache[0] = ($event) => loadStatus())
             }, {
-              default: _withCtx(() => [..._cache[46] || (_cache[46] = [
+              default: _withCtx(() => [..._cache[48] || (_cache[48] = [
                 _createTextVNode("刷新", -1)
               ])]),
               _: 1
@@ -1336,7 +1365,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                         loading: busy.value === "播放控制",
                         onClick: _cache[1] || (_cache[1] = ($event) => control("prev"))
                       }, {
-                        default: _withCtx(() => [..._cache[47] || (_cache[47] = [
+                        default: _withCtx(() => [..._cache[49] || (_cache[49] = [
                           _createTextVNode("上一首", -1)
                         ])]),
                         _: 1
@@ -1356,7 +1385,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                         loading: busy.value === "播放控制",
                         onClick: _cache[3] || (_cache[3] = ($event) => control("next"))
                       }, {
-                        default: _withCtx(() => [..._cache[48] || (_cache[48] = [
+                        default: _withCtx(() => [..._cache[50] || (_cache[50] = [
                           _createTextVNode("下一首", -1)
                         ])]),
                         _: 1
@@ -1369,13 +1398,13 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                         loading: busy.value === "播放控制",
                         onClick: _cache[4] || (_cache[4] = ($event) => control("stop"))
                       }, {
-                        default: _withCtx(() => [..._cache[49] || (_cache[49] = [
+                        default: _withCtx(() => [..._cache[51] || (_cache[51] = [
                           _createTextVNode("停止", -1)
                         ])]),
                         _: 1
                       }, 8, ["loading"]),
                       _createVNode(_component_v_spacer),
-                      _cache[50] || (_cache[50] = _createElementVNode("span", { class: "text-caption text-grey" }, "音量", -1)),
+                      _cache[52] || (_cache[52] = _createElementVNode("span", { class: "text-caption text-grey" }, "音量", -1)),
                       _createVNode(_component_v_slider, {
                         modelValue: volume.value,
                         "onUpdate:modelValue": [
@@ -1402,7 +1431,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       }, 8, ["loading"])
                     ]),
                     _createElementVNode("div", _hoisted_17, [
-                      _cache[51] || (_cache[51] = _createElementVNode("span", { class: "text-caption text-grey mr-1" }, "播放方式", -1)),
+                      _cache[53] || (_cache[53] = _createElementVNode("span", { class: "text-caption text-grey mr-1" }, "播放方式", -1)),
                       (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(_unref(modeItems), (item) => {
                         return _openBlock(), _createBlock(_component_v_btn, {
                           key: item.value,
@@ -1436,13 +1465,13 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                         _: 1
                       }, 8, ["color", "prepend-icon", "loading"])
                     ]),
-                    _cache[52] || (_cache[52] = _createElementVNode("div", { class: "text-caption text-grey mt-1" }, " 播放方式作用于插件队列：顺序/列表循环/随机/单曲循环决定「下一首」从哪来， 「只播这一首」不接下一首。音箱本机的小米播放方式改不了。 ", -1))
+                    _cache[54] || (_cache[54] = _createElementVNode("div", { class: "text-caption text-grey mt-1" }, " 播放方式作用于插件队列：顺序/列表循环/随机/单曲循环决定「下一首」从哪来， 「只播这一首」不接下一首。音箱本机的小米播放方式改不了。 ", -1))
                   ]),
                   _: 1
                 }),
                 _createElementVNode("div", _hoisted_18, [
                   _createElementVNode("div", _hoisted_19, [
-                    _cache[53] || (_cache[53] = _createTextVNode(" 播放队列 ", -1)),
+                    _cache[55] || (_cache[55] = _createTextVNode(" 播放队列 ", -1)),
                     _createVNode(_component_v_chip, {
                       size: "x-small",
                       variant: "tonal",
@@ -1475,7 +1504,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     density: "compact",
                     class: "mb-2"
                   }, {
-                    default: _withCtx(() => [..._cache[54] || (_cache[54] = [
+                    default: _withCtx(() => [..._cache[56] || (_cache[56] = [
                       _createTextVNode(" 配置里的「队列自动连播」是关的，音箱播完当前这首不会自己接下一首（这里的手动「下一首」仍然有效）。 ", -1)
                     ])]),
                     _: 1
@@ -1511,7 +1540,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   })) : (_openBlock(), _createElementBlock("div", _hoisted_25, " 队列为空。到「音乐库」里点一首的「播放」或「加入队列」，也可以整目录入队。 "))
                 ]),
                 _createElementVNode("div", _hoisted_26, [
-                  _cache[57] || (_cache[57] = _createElementVNode("div", { class: "xai-block-title" }, "播报与外部直链", -1)),
+                  _cache[59] || (_cache[59] = _createElementVNode("div", { class: "xai-block-title" }, "播报与外部直链", -1)),
                   _createElementVNode("div", _hoisted_27, [
                     _createVNode(_component_v_text_field, {
                       modelValue: ttsText.value,
@@ -1530,7 +1559,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       loading: busy.value === "播报",
                       onClick: speak
                     }, {
-                      default: _withCtx(() => [..._cache[55] || (_cache[55] = [
+                      default: _withCtx(() => [..._cache[57] || (_cache[57] = [
                         _createTextVNode("播报", -1)
                       ])]),
                       _: 1
@@ -1553,17 +1582,17 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       loading: busy.value === "播放直链",
                       onClick: playUrl
                     }, {
-                      default: _withCtx(() => [..._cache[56] || (_cache[56] = [
+                      default: _withCtx(() => [..._cache[58] || (_cache[58] = [
                         _createTextVNode("放这条", -1)
                       ])]),
                       _: 1
                     }, 8, ["loading"])
                   ]),
-                  _cache[58] || (_cache[58] = _createElementVNode("div", { class: "text-caption text-grey mt-1" }, " 库内文件走的是插件签发的限时直链；外部直链由音箱自己访问，插件不转发内容。 播报失败时音箱可能已经播了（小米的 TTS 接口对同一句会返回 3012）。 ", -1))
+                  _cache[60] || (_cache[60] = _createElementVNode("div", { class: "text-caption text-grey mt-1" }, " 库内文件走的是插件签发的限时直链；外部直链由音箱自己访问，插件不转发内容。 播报失败时音箱可能已经播了（小米的 TTS 接口对同一句会返回 3012）。 ", -1))
                 ]),
                 _createElementVNode("div", _hoisted_29, [
                   _createElementVNode("div", _hoisted_30, [
-                    _cache[60] || (_cache[60] = _createTextVNode(" 歌词 ", -1)),
+                    _cache[62] || (_cache[62] = _createTextVNode(" 歌词 ", -1)),
                     _createVNode(_component_v_chip, {
                       size: "x-small",
                       variant: "text",
@@ -1585,7 +1614,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       loading: lyricBusy.value,
                       onClick: _cache[10] || (_cache[10] = ($event) => loadLyric(lyricTrack.value))
                     }, {
-                      default: _withCtx(() => [..._cache[59] || (_cache[59] = [
+                      default: _withCtx(() => [..._cache[61] || (_cache[61] = [
                         _createTextVNode("重新读取", -1)
                       ])]),
                       _: 1
@@ -1624,7 +1653,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                 ]),
                 _createElementVNode("div", _hoisted_37, [
                   _createElementVNode("div", _hoisted_38, [
-                    _cache[62] || (_cache[62] = _createTextVNode(" 定时停止 ", -1)),
+                    _cache[64] || (_cache[64] = _createTextVNode(" 定时停止 ", -1)),
                     timerState.value.active ? (_openBlock(), _createBlock(_component_v_chip, {
                       key: 0,
                       size: "x-small",
@@ -1643,7 +1672,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       color: "grey",
                       class: "ml-2"
                     }, {
-                      default: _withCtx(() => [..._cache[61] || (_cache[61] = [
+                      default: _withCtx(() => [..._cache[63] || (_cache[63] = [
                         _createTextVNode("未设置", -1)
                       ])]),
                       _: 1
@@ -1668,7 +1697,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       loading: busy.value === "设置定时停止",
                       onClick: _cache[12] || (_cache[12] = ($event) => applyTimer("minutes"))
                     }, {
-                      default: _withCtx(() => [..._cache[63] || (_cache[63] = [
+                      default: _withCtx(() => [..._cache[65] || (_cache[65] = [
                         _createTextVNode("按时间", -1)
                       ])]),
                       _: 1
@@ -1691,7 +1720,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       loading: busy.value === "设置定时停止",
                       onClick: _cache[14] || (_cache[14] = ($event) => applyTimer("songs"))
                     }, {
-                      default: _withCtx(() => [..._cache[64] || (_cache[64] = [
+                      default: _withCtx(() => [..._cache[66] || (_cache[66] = [
                         _createTextVNode("按首数", -1)
                       ])]),
                       _: 1
@@ -1704,7 +1733,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       loading: busy.value === "取消定时停止",
                       onClick: cancelTimer
                     }, {
-                      default: _withCtx(() => [..._cache[65] || (_cache[65] = [
+                      default: _withCtx(() => [..._cache[67] || (_cache[67] = [
                         _createTextVNode("取消定时", -1)
                       ])]),
                       _: 1
@@ -1732,7 +1761,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                         color: library.value.ready ? "success" : "grey",
                         size: "20"
                       }, null, 8, ["icon", "color"]),
-                      _cache[67] || (_cache[67] = _createElementVNode("span", { class: "text-body-2" }, "语音点歌用的曲库索引", -1)),
+                      _cache[69] || (_cache[69] = _createElementVNode("span", { class: "text-body-2" }, "语音点歌用的曲库索引", -1)),
                       _createVNode(_component_v_chip, {
                         size: "x-small",
                         variant: "tonal",
@@ -1752,7 +1781,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                         loading: busy.value === "重建曲库索引",
                         onClick: refreshLibrary
                       }, {
-                        default: _withCtx(() => [..._cache[66] || (_cache[66] = [
+                        default: _withCtx(() => [..._cache[68] || (_cache[68] = [
                           _createTextVNode("重建索引", -1)
                         ])]),
                         _: 1
@@ -1775,7 +1804,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       ], 64)) : _createCommentVNode("", true)
                     ]),
                     library.value.error ? (_openBlock(), _createElementBlock("div", _hoisted_44, _toDisplayString(library.value.error), 1)) : _createCommentVNode("", true),
-                    _cache[68] || (_cache[68] = _createElementVNode("div", { class: "text-caption text-grey mt-1" }, " 这个索引是给「语音控制」选曲用的（读标签与目录名，不搬运文件）。下面这个浏览列表是实时扫目录，两者互不影响。 ", -1))
+                    _cache[70] || (_cache[70] = _createElementVNode("div", { class: "text-caption text-grey mt-1" }, " 这个索引是给「语音控制」选曲用的（读标签与目录名，不搬运文件）。下面这个浏览列表是实时扫目录，两者互不影响。 ", -1))
                   ]),
                   _: 1
                 }),
@@ -1796,7 +1825,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                         variant: "text",
                         "prepend-icon": "mdi-folder-outline"
                       }, {
-                        default: _withCtx(() => [..._cache[69] || (_cache[69] = [
+                        default: _withCtx(() => [..._cache[71] || (_cache[71] = [
                           _createTextVNode("浏览", -1)
                         ])]),
                         _: 1
@@ -1807,7 +1836,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                         variant: "text",
                         "prepend-icon": "mdi-magnify"
                       }, {
-                        default: _withCtx(() => [..._cache[70] || (_cache[70] = [
+                        default: _withCtx(() => [..._cache[72] || (_cache[72] = [
                           _createTextVNode("搜索", -1)
                         ])]),
                         _: 1
@@ -1868,7 +1897,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       "prepend-icon": "mdi-arrow-up",
                       onClick: _cache[18] || (_cache[18] = ($event) => loadBrowse(browse.value.parent))
                     }, {
-                      default: _withCtx(() => [..._cache[71] || (_cache[71] = [
+                      default: _withCtx(() => [..._cache[73] || (_cache[73] = [
                         _createTextVNode("上级", -1)
                       ])]),
                       _: 1
@@ -1906,7 +1935,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     density: "compact",
                     class: "mb-2"
                   }, {
-                    default: _withCtx(() => [..._cache[72] || (_cache[72] = [
+                    default: _withCtx(() => [..._cache[74] || (_cache[74] = [
                       _createTextVNode(" 这个目录里的条目太多，只列出了前面一部分。 ", -1)
                     ])]),
                     _: 1
@@ -1918,7 +1947,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   class: "xai-table"
                 }, {
                   default: _withCtx(() => [
-                    _cache[75] || (_cache[75] = _createElementVNode("thead", null, [
+                    _cache[77] || (_cache[77] = _createElementVNode("thead", null, [
                       _createElementVNode("tr", null, [
                         _createElementVNode("th", { style: { "width": "38%" } }, "文件名"),
                         _createElementVNode("th", null, "大小"),
@@ -1948,7 +1977,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                               loading: busy.value === "播放",
                               onClick: ($event) => playFile(row)
                             }, {
-                              default: _withCtx(() => [..._cache[73] || (_cache[73] = [
+                              default: _withCtx(() => [..._cache[75] || (_cache[75] = [
                                 _createTextVNode("播放", -1)
                               ])]),
                               _: 1
@@ -1959,7 +1988,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                               loading: busy.value === "加入队列",
                               onClick: ($event) => enqueue(row.path)
                             }, {
-                              default: _withCtx(() => [..._cache[74] || (_cache[74] = [
+                              default: _withCtx(() => [..._cache[76] || (_cache[76] = [
                                 _createTextVNode("加入队列", -1)
                               ])]),
                               _: 1
@@ -1971,13 +2000,13 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   ]),
                   _: 1
                 })) : (_openBlock(), _createElementBlock("div", _hoisted_54, _toDisplayString(mode.value === "search" ? search.value.reason ? SEARCH_REASON[search.value.reason] || search.value.reason : "输入关键词后，在库内文件名里搜索。" : browseReasonText.value || "这个目录里没有可播放的音频。"), 1)),
-                _cache[76] || (_cache[76] = _createElementVNode("div", { class: "text-caption text-grey mt-2" }, " 只有配置在「音乐库路径」里的目录会被列出；播放走插件本机读文件 + 签名限时直链， 不需要音箱登录任何音乐服务。 ", -1))
+                _cache[78] || (_cache[78] = _createElementVNode("div", { class: "text-caption text-grey mt-2" }, " 只有配置在「音乐库路径」里的目录会被列出；播放走插件本机读文件 + 签名限时直链， 不需要音箱登录任何音乐服务。 ", -1))
               ], 512), [
                 [_vShow, pane.value === "library"]
               ]),
               _withDirectives(_createElementVNode("div", _hoisted_55, [
                 _createElementVNode("div", _hoisted_56, [
-                  _cache[78] || (_cache[78] = _createTextVNode(" 收藏 ", -1)),
+                  _cache[80] || (_cache[80] = _createTextVNode(" 收藏 ", -1)),
                   _createElementVNode("span", _hoisted_57, _toDisplayString(favorites.value.length) + " 首", 1),
                   _createVNode(_component_v_btn, {
                     size: "x-small",
@@ -1986,7 +2015,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     "prepend-icon": "mdi-refresh",
                     onClick: loadFavorites
                   }, {
-                    default: _withCtx(() => [..._cache[77] || (_cache[77] = [
+                    default: _withCtx(() => [..._cache[79] || (_cache[79] = [
                       _createTextVNode("重新读取", -1)
                     ])]),
                     _: 1
@@ -2002,12 +2031,12 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     "prepend-icon": "mdi-heart",
                     onClick: playFavorites
                   }, {
-                    default: _withCtx(() => [..._cache[79] || (_cache[79] = [
+                    default: _withCtx(() => [..._cache[81] || (_cache[81] = [
                       _createTextVNode(" 播放我的收藏 ", -1)
                     ])]),
                     _: 1
                   }, 8, ["disabled", "loading"]),
-                  _cache[80] || (_cache[80] = _createElementVNode("span", { class: "text-caption text-grey" }, " 收藏按加入顺序整本入队；语音里说「播放我的收藏」走的是同一份列表。 ", -1))
+                  _cache[82] || (_cache[82] = _createElementVNode("span", { class: "text-caption text-grey" }, " 收藏按加入顺序整本入队；语音里说「播放我的收藏」走的是同一份列表。 ", -1))
                 ]),
                 favorites.value.length ? (_openBlock(), _createBlock(_component_v_card, {
                   key: 0,
@@ -2035,7 +2064,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                           variant: "tonal",
                           color: "warning"
                         }, {
-                          default: _withCtx(() => [..._cache[81] || (_cache[81] = [
+                          default: _withCtx(() => [..._cache[83] || (_cache[83] = [
                             _createTextVNode("文件已不在", -1)
                           ])]),
                           _: 1
@@ -2047,7 +2076,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                           loading: busy.value === "播放",
                           onClick: ($event) => playPath(row.path)
                         }, {
-                          default: _withCtx(() => [..._cache[82] || (_cache[82] = [
+                          default: _withCtx(() => [..._cache[84] || (_cache[84] = [
                             _createTextVNode("播放", -1)
                           ])]),
                           _: 1
@@ -2058,7 +2087,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                           loading: busy.value === "取消收藏",
                           onClick: ($event) => removeFavorite(row)
                         }, {
-                          default: _withCtx(() => [..._cache[83] || (_cache[83] = [
+                          default: _withCtx(() => [..._cache[85] || (_cache[85] = [
                             _createTextVNode("移除", -1)
                           ])]),
                           _: 1
@@ -2070,7 +2099,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                 })) : (_openBlock(), _createElementBlock("div", _hoisted_60, _toDisplayString(favoriteReason.value || "还没有收藏。在播放台点「收藏」，或对正在播的这首说「收藏这首歌」。"), 1)),
                 _createElementVNode("div", _hoisted_61, [
                   _createElementVNode("div", _hoisted_62, [
-                    _cache[85] || (_cache[85] = _createTextVNode(" 歌单 ", -1)),
+                    _cache[87] || (_cache[87] = _createTextVNode(" 歌单 ", -1)),
                     _createElementVNode("span", _hoisted_63, _toDisplayString(playlists.value.length) + " 个", 1),
                     _createVNode(_component_v_btn, {
                       size: "x-small",
@@ -2079,7 +2108,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       "prepend-icon": "mdi-refresh",
                       onClick: loadPlaylists
                     }, {
-                      default: _withCtx(() => [..._cache[84] || (_cache[84] = [
+                      default: _withCtx(() => [..._cache[86] || (_cache[86] = [
                         _createTextVNode("重新读取", -1)
                       ])]),
                       _: 1
@@ -2123,7 +2152,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                             loading: busy.value === "播放歌单",
                             onClick: _withModifiers(($event) => playPlaylist(row), ["stop"])
                           }, {
-                            default: _withCtx(() => [..._cache[86] || (_cache[86] = [
+                            default: _withCtx(() => [..._cache[88] || (_cache[88] = [
                               _createTextVNode("播放", -1)
                             ])]),
                             _: 1
@@ -2155,7 +2184,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                         "prepend-icon": "mdi-plus-circle-outline",
                         onClick: queuePlaylistSongs
                       }, {
-                        default: _withCtx(() => [..._cache[87] || (_cache[87] = [
+                        default: _withCtx(() => [..._cache[89] || (_cache[89] = [
                           _createTextVNode("整本入队并播放", -1)
                         ])]),
                         _: 1
@@ -2167,7 +2196,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       class: "xai-table mt-2"
                     }, {
                       default: _withCtx(() => [
-                        _cache[90] || (_cache[90] = _createElementVNode("thead", null, [
+                        _cache[92] || (_cache[92] = _createElementVNode("thead", null, [
                           _createElementVNode("tr", null, [
                             _createElementVNode("th", { style: { "width": "45%" } }, "曲目"),
                             _createElementVNode("th", null, "大小"),
@@ -2194,7 +2223,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                                   loading: busy.value === "播放",
                                   onClick: ($event) => playFile(row)
                                 }, {
-                                  default: _withCtx(() => [..._cache[88] || (_cache[88] = [
+                                  default: _withCtx(() => [..._cache[90] || (_cache[90] = [
                                     _createTextVNode("播放", -1)
                                   ])]),
                                   _: 1
@@ -2205,7 +2234,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                                   loading: busy.value === "加入队列",
                                   onClick: ($event) => enqueue(row.path)
                                 }, {
-                                  default: _withCtx(() => [..._cache[89] || (_cache[89] = [
+                                  default: _withCtx(() => [..._cache[91] || (_cache[91] = [
                                     _createTextVNode("队列", -1)
                                   ])]),
                                   _: 1
@@ -2217,7 +2246,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       ]),
                       _: 1
                     })) : _createCommentVNode("", true),
-                    _cache[91] || (_cache[91] = _createElementVNode("div", { class: "text-caption text-grey mt-1" }, " 曲目多于 500 首时只列出前面一部分，「整本入队并播放」仍然是整本。 ", -1))
+                    _cache[93] || (_cache[93] = _createElementVNode("div", { class: "text-caption text-grey mt-1" }, " 曲目多于 500 首时只列出前面一部分，「整本入队并播放」仍然是整本。 ", -1))
                   ])) : _createCommentVNode("", true)
                 ])
               ], 512), [
@@ -2225,7 +2254,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               ]),
               _withDirectives(_createElementVNode("div", _hoisted_73, [
                 _createElementVNode("div", _hoisted_74, [
-                  _cache[92] || (_cache[92] = _createTextVNode(" 已有任务 ", -1)),
+                  _cache[94] || (_cache[94] = _createTextVNode(" 已有任务 ", -1)),
                   _createElementVNode("span", _hoisted_75, _toDisplayString(tasks.value.length) + " 条", 1)
                 ]),
                 !tasks.value.length ? (_openBlock(), _createElementBlock("div", _hoisted_76, " 还没有任务。下面建一条：到点由插件的周期巡检触发（20 秒一次，同一分钟只跑一次）。 ")) : _createCommentVNode("", true),
@@ -2273,7 +2302,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                           loading: busy.value === "立即执行",
                           onClick: ($event) => runTask(row)
                         }, {
-                          default: _withCtx(() => [..._cache[93] || (_cache[93] = [
+                          default: _withCtx(() => [..._cache[95] || (_cache[95] = [
                             _createTextVNode("立即执行", -1)
                           ])]),
                           _: 1
@@ -2283,7 +2312,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                           variant: "text",
                           onClick: ($event) => editTask(row)
                         }, {
-                          default: _withCtx(() => [..._cache[94] || (_cache[94] = [
+                          default: _withCtx(() => [..._cache[96] || (_cache[96] = [
                             _createTextVNode("编辑", -1)
                           ])]),
                           _: 1
@@ -2295,7 +2324,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                           loading: busy.value === "删除定时任务",
                           onClick: ($event) => removeTask(row)
                         }, {
-                          default: _withCtx(() => [..._cache[95] || (_cache[95] = [
+                          default: _withCtx(() => [..._cache[97] || (_cache[97] = [
                             _createTextVNode("删除", -1)
                           ])]),
                           _: 1
@@ -2352,7 +2381,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                             size: "small",
                             variant: "text"
                           }, {
-                            default: _withCtx(() => [..._cache[96] || (_cache[96] = [
+                            default: _withCtx(() => [..._cache[98] || (_cache[98] = [
                               _createTextVNode("按星期", -1)
                             ])]),
                             _: 1
@@ -2362,7 +2391,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                             size: "small",
                             variant: "text"
                           }, {
-                            default: _withCtx(() => [..._cache[97] || (_cache[97] = [
+                            default: _withCtx(() => [..._cache[99] || (_cache[99] = [
                               _createTextVNode("按几号", -1)
                             ])]),
                             _: 1
@@ -2522,19 +2551,19 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                         variant: "text",
                         onClick: newTask
                       }, {
-                        default: _withCtx(() => [..._cache[98] || (_cache[98] = [
+                        default: _withCtx(() => [..._cache[100] || (_cache[100] = [
                           _createTextVNode("清空", -1)
                         ])]),
                         _: 1
                       })
                     ]),
-                    _cache[99] || (_cache[99] = _createElementVNode("div", { class: "text-caption text-grey mt-1" }, " 播放类任务要音箱在线、且配置了「外部访问地址」；法定节假日的调休判定没有做（上游把假期表 编在插件产物里，插件装在宿主容器里没有那份数据），要「只工作日 / 只周末」就分建两条任务勾不同的周几。 ", -1))
+                    _cache[101] || (_cache[101] = _createElementVNode("div", { class: "text-caption text-grey mt-1" }, " 播放类任务要音箱在线、且配置了「外部访问地址」；法定节假日的调休判定没有做（上游把假期表 编在插件产物里，插件装在宿主容器里没有那份数据），要「只工作日 / 只周末」就分建两条任务勾不同的周几。 ", -1))
                   ]),
                   _: 1
                 }),
                 _createElementVNode("div", _hoisted_88, [
                   _createElementVNode("div", _hoisted_89, [
-                    _cache[100] || (_cache[100] = _createTextVNode(" 执行日志 ", -1)),
+                    _cache[102] || (_cache[102] = _createTextVNode(" 执行日志 ", -1)),
                     _createElementVNode("span", _hoisted_90, "最近 " + _toDisplayString(taskLogs.value.length) + " 条", 1)
                   ]),
                   !taskLogs.value.length ? (_openBlock(), _createElementBlock("div", _hoisted_91, "还没有执行记录。")) : (_openBlock(), _createBlock(_component_v_card, {
@@ -2579,7 +2608,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                         color: voice.value.enabled ? "success" : "grey"
                       }, null, 8, ["color"]),
                       _createElementVNode("div", _hoisted_98, [
-                        _cache[101] || (_cache[101] = _createElementVNode("div", { class: "text-subtitle-1" }, "对话监听", -1)),
+                        _cache[103] || (_cache[103] = _createElementVNode("div", { class: "text-subtitle-1" }, "对话监听", -1)),
                         _createElementVNode("div", _hoisted_99, _toDisplayString(voice.value.enabled ? `每 ${voice.value.interval} 秒读一轮 · 已处理 ${voice.value.handled} 句 · 上次轮询 ${voice.value.last_poll_at || "-"}` : "未开启：插件不读小米的对话记录接口"), 1)
                       ]),
                       voice.value.chat ? (_openBlock(), _createBlock(_component_v_chip, {
@@ -2612,7 +2641,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   _: 1
                 }),
                 _createElementVNode("div", _hoisted_102, [
-                  _cache[103] || (_cache[103] = _createElementVNode("div", { class: "xai-block-title" }, "试一句话", -1)),
+                  _cache[105] || (_cache[105] = _createElementVNode("div", { class: "xai-block-title" }, "试一句话", -1)),
                   _createElementVNode("div", _hoisted_103, [
                     _createVNode(_component_v_text_field, {
                       modelValue: testText.value,
@@ -2640,7 +2669,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       loading: busy.value === "试口令",
                       onClick: runVoiceTest
                     }, {
-                      default: _withCtx(() => [..._cache[102] || (_cache[102] = [
+                      default: _withCtx(() => [..._cache[104] || (_cache[104] = [
                         _createTextVNode("判定", -1)
                       ])]),
                       _: 1
@@ -2663,7 +2692,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                 ]),
                 _createElementVNode("div", _hoisted_107, [
                   _createElementVNode("div", _hoisted_108, [
-                    _cache[105] || (_cache[105] = _createElementVNode("div", { class: "xai-block-title" }, "口令表", -1)),
+                    _cache[107] || (_cache[107] = _createElementVNode("div", { class: "xai-block-title" }, "口令表", -1)),
                     _createVNode(_component_v_spacer),
                     _createVNode(_component_v_btn, {
                       size: "x-small",
@@ -2673,13 +2702,13 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       loading: busy.value === "保存口令开关",
                       onClick: saveCommands
                     }, {
-                      default: _withCtx(() => [..._cache[104] || (_cache[104] = [
+                      default: _withCtx(() => [..._cache[106] || (_cache[106] = [
                         _createTextVNode("保存开关", -1)
                       ])]),
                       _: 1
                     }, 8, ["loading"])
                   ]),
-                  _cache[106] || (_cache[106] = _createElementVNode("div", { class: "text-caption text-grey mb-2" }, " 关掉某一类，那句话就不会被接手（会留给小爱自己的回答）。「停止播放」这类保底口令不受这里影响。 ", -1)),
+                  _cache[108] || (_cache[108] = _createElementVNode("div", { class: "text-caption text-grey mb-2" }, " 关掉某一类，那句话就不会被接手（会留给小爱自己的回答）。「停止播放」这类保底口令不受这里影响。 ", -1)),
                   _createVNode(_component_v_card, {
                     variant: "outlined",
                     class: "pa-2"
@@ -2710,7 +2739,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                 ]),
                 _createElementVNode("div", _hoisted_111, [
                   _createElementVNode("div", _hoisted_112, [
-                    _cache[108] || (_cache[108] = _createElementVNode("div", { class: "xai-block-title" }, "小爱最近听到的话", -1)),
+                    _cache[110] || (_cache[110] = _createElementVNode("div", { class: "xai-block-title" }, "小爱最近听到的话", -1)),
                     _createVNode(_component_v_spacer),
                     _createVNode(_component_v_btn, {
                       size: "x-small",
@@ -2719,7 +2748,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       "prepend-icon": "mdi-refresh",
                       onClick: loadVoiceDetail
                     }, {
-                      default: _withCtx(() => [..._cache[107] || (_cache[107] = [
+                      default: _withCtx(() => [..._cache[109] || (_cache[109] = [
                         _createTextVNode("重新读取", -1)
                       ])]),
                       _: 1
@@ -2769,11 +2798,25 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   class: "pa-4 mb-3"
                 }, {
                   default: _withCtx(() => [
-                    _cache[118] || (_cache[118] = _createElementVNode("div", { class: "xai-block-title" }, "小米账号", -1)),
-                    status.value.logged_in ? (_openBlock(), _createElementBlock("div", _hoisted_118, [
-                      _createElementVNode("div", _hoisted_119, [
+                    _createElementVNode("div", _hoisted_118, [
+                      _cache[111] || (_cache[111] = _createTextVNode(" 小米账号 ", -1)),
+                      _createVNode(_component_v_chip, {
+                        size: "x-small",
+                        variant: "tonal",
+                        class: "ml-2",
+                        color: status.value.logged_in ? "success" : "grey",
+                        "prepend-icon": status.value.logged_in ? "mdi-check-circle-outline" : "mdi-help-circle-outline"
+                      }, {
+                        default: _withCtx(() => [
+                          _createTextVNode(_toDisplayString(status.value.logged_in ? "已登录" : "未登录"), 1)
+                        ]),
+                        _: 1
+                      }, 8, ["color", "prepend-icon"])
+                    ]),
+                    status.value.logged_in ? (_openBlock(), _createElementBlock("div", _hoisted_119, [
+                      _createElementVNode("div", _hoisted_120, [
                         _createTextVNode(_toDisplayString(cfg.value.username || "（未记录账号名）") + " ", 1),
-                        _createElementVNode("div", _hoisted_120, [
+                        _createElementVNode("div", _hoisted_121, [
                           _createTextVNode(" 票据保存于 " + _toDisplayString(status.value.token_saved_at || "-") + " ", 1),
                           status.value.manual_token ? (_openBlock(), _createElementBlock(_Fragment, { key: 0 }, [
                             _createTextVNode("｜手工粘贴的 cookie")
@@ -2786,11 +2829,22 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       _createVNode(_component_v_btn, {
                         size: "small",
                         variant: "tonal",
+                        "prepend-icon": "mdi-speaker-multiple",
+                        onClick: _cache[35] || (_cache[35] = ($event) => picker.value = true)
+                      }, {
+                        default: _withCtx(() => [..._cache[112] || (_cache[112] = [
+                          _createTextVNode("选择音箱", -1)
+                        ])]),
+                        _: 1
+                      }),
+                      _createVNode(_component_v_btn, {
+                        size: "small",
+                        variant: "tonal",
                         loading: busy.value === "刷新设备",
                         "prepend-icon": "mdi-refresh",
                         onClick: refreshDevices
                       }, {
-                        default: _withCtx(() => [..._cache[109] || (_cache[109] = [
+                        default: _withCtx(() => [..._cache[113] || (_cache[113] = [
                           _createTextVNode("刷新设备", -1)
                         ])]),
                         _: 1
@@ -2803,150 +2857,251 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                         "prepend-icon": "mdi-logout",
                         onClick: doLogout
                       }, {
-                        default: _withCtx(() => [..._cache[110] || (_cache[110] = [
+                        default: _withCtx(() => [..._cache[114] || (_cache[114] = [
                           _createTextVNode("退出登录", -1)
                         ])]),
                         _: 1
                       }, 8, ["loading"])
-                    ])) : (_openBlock(), _createElementBlock(_Fragment, { key: 1 }, [
-                      _createElementVNode("div", _hoisted_121, [
+                    ])) : _createCommentVNode("", true),
+                    _createElementVNode("div", _hoisted_122, [
+                      _createVNode(_component_v_text_field, {
+                        modelValue: loginForm.value.username,
+                        "onUpdate:modelValue": _cache[36] || (_cache[36] = ($event) => loginForm.value.username = $event),
+                        density: "compact",
+                        "hide-details": "",
+                        clearable: "",
+                        label: "小米账号（手机号 / 邮箱 / 账号ID）",
+                        placeholder: cfg.value.username,
+                        style: { "min-width": "220px", "flex": "1 1 220px" },
+                        onKeyup: _withKeys(startLogin, ["enter"])
+                      }, null, 8, ["modelValue", "placeholder"]),
+                      _createVNode(_component_v_text_field, {
+                        modelValue: loginForm.value.password,
+                        "onUpdate:modelValue": _cache[37] || (_cache[37] = ($event) => loginForm.value.password = $event),
+                        density: "compact",
+                        "hide-details": "",
+                        type: loginForm.value.password ? "text" : "password",
+                        label: cfg.value.password_set ? "密码（留空则用已保存的）" : "密码",
+                        style: { "min-width": "180px", "flex": "1 1 180px" },
+                        onKeyup: _withKeys(startLogin, ["enter"])
+                      }, null, 8, ["modelValue", "type", "label"]),
+                      _createVNode(_component_v_btn, {
+                        color: "primary",
+                        variant: "flat",
+                        class: "text-none",
+                        loading: busy.value === "登录",
+                        "prepend-icon": "mdi-login",
+                        onClick: startLogin
+                      }, {
+                        default: _withCtx(() => [..._cache[115] || (_cache[115] = [
+                          _createTextVNode("登录", -1)
+                        ])]),
+                        _: 1
+                      }, 8, ["loading"])
+                    ]),
+                    loginResult.value ? (_openBlock(), _createElementBlock("div", _hoisted_123, [
+                      _createVNode(_component_v_alert, {
+                        type: loginState.value?.color || "info",
+                        variant: "tonal",
+                        density: "compact",
+                        icon: loginState.value ? void 0 : "mdi-information-outline"
+                      }, {
+                        default: _withCtx(() => [
+                          _createElementVNode("div", _hoisted_124, _toDisplayString(loginState.value?.text || loginResult.value.state), 1),
+                          _createElementVNode("div", _hoisted_125, _toDisplayString(loginResult.value.message), 1),
+                          loginResult.value.state === "success" ? (_openBlock(), _createElementBlock("div", _hoisted_126, [
+                            _createTextVNode(" 取到 " + _toDisplayString(loginResult.value.device_count) + " 台音箱 ", 1),
+                            loginResult.value.device_count ? (_openBlock(), _createElementBlock(_Fragment, { key: 0 }, [
+                              _createTextVNode("｜已在上面弹出音箱列表，点一下即设为默认")
+                            ], 64)) : _createCommentVNode("", true)
+                          ])) : _createCommentVNode("", true)
+                        ]),
+                        _: 1
+                      }, 8, ["type", "icon"])
+                    ])) : _createCommentVNode("", true),
+                    loginState.value?.color === "warning" ? (_openBlock(), _createElementBlock("div", _hoisted_127, [
+                      loginResult.value?.captcha_image ? (_openBlock(), _createBlock(_component_v_img, {
+                        key: 0,
+                        src: loginResult.value.captcha_image,
+                        "max-height": "120",
+                        class: "rounded mb-2",
+                        style: { "max-width": "240px" },
+                        contain: ""
+                      }, null, 8, ["src"])) : _createCommentVNode("", true),
+                      _createElementVNode("div", _hoisted_128, [
                         _createVNode(_component_v_text_field, {
-                          modelValue: loginForm.value.username,
-                          "onUpdate:modelValue": _cache[35] || (_cache[35] = ($event) => loginForm.value.username = $event),
+                          modelValue: verifyCode.value,
+                          "onUpdate:modelValue": _cache[38] || (_cache[38] = ($event) => verifyCode.value = $event),
                           density: "compact",
                           "hide-details": "",
-                          clearable: "",
-                          label: "小米账号（手机号 / 邮箱 / 账号ID）",
-                          placeholder: cfg.value.username,
-                          style: { "min-width": "220px", "flex": "1 1 220px" }
-                        }, null, 8, ["modelValue", "placeholder"]),
-                        _createVNode(_component_v_text_field, {
-                          modelValue: loginForm.value.password,
-                          "onUpdate:modelValue": _cache[36] || (_cache[36] = ($event) => loginForm.value.password = $event),
-                          density: "compact",
-                          "hide-details": "",
-                          type: loginForm.value.password ? "text" : "password",
-                          label: cfg.value.password_set ? "密码（留空则用已保存的）" : "密码",
-                          style: { "min-width": "180px", "flex": "1 1 180px" },
-                          onKeyup: _withKeys(startLogin, ["enter"])
-                        }, null, 8, ["modelValue", "type", "label"]),
+                          label: loginResult.value?.state === "need_verify" ? "邮箱/短信验证码" : "图形验证码",
+                          style: { "max-width": "220px" },
+                          onKeyup: _withKeys(submitVerify, ["enter"])
+                        }, null, 8, ["modelValue", "label"]),
                         _createVNode(_component_v_btn, {
-                          color: "primary",
-                          variant: "flat",
-                          class: "text-none",
-                          loading: busy.value === "登录",
-                          "prepend-icon": "mdi-login",
-                          onClick: startLogin
+                          size: "small",
+                          variant: "tonal",
+                          color: "info",
+                          loading: busy.value === "提交验证码",
+                          onClick: submitVerify
                         }, {
-                          default: _withCtx(() => [..._cache[111] || (_cache[111] = [
-                            _createTextVNode("登录", -1)
+                          default: _withCtx(() => [..._cache[116] || (_cache[116] = [
+                            _createTextVNode("提交", -1)
                           ])]),
                           _: 1
-                        }, 8, ["loading"])
-                      ]),
-                      loginPending.value ? (_openBlock(), _createElementBlock("div", _hoisted_122, [
-                        loginResult.value?.captcha_image ? (_openBlock(), _createBlock(_component_v_img, {
-                          key: 0,
-                          src: loginResult.value.captcha_image,
-                          "max-height": "120",
-                          class: "rounded mb-2",
-                          style: { "max-width": "240px" },
-                          contain: ""
-                        }, null, 8, ["src"])) : _createCommentVNode("", true),
-                        _createElementVNode("div", _hoisted_123, [
-                          _createVNode(_component_v_text_field, {
-                            modelValue: verifyCode.value,
-                            "onUpdate:modelValue": _cache[37] || (_cache[37] = ($event) => verifyCode.value = $event),
+                        }, 8, ["loading"]),
+                        _createVNode(_component_v_btn, {
+                          size: "small",
+                          variant: "text",
+                          onClick: startLogin
+                        }, {
+                          default: _withCtx(() => [..._cache[117] || (_cache[117] = [
+                            _createTextVNode("重新发起登录", -1)
+                          ])]),
+                          _: 1
+                        })
+                      ])
+                    ])) : _createCommentVNode("", true),
+                    _createVNode(_component_v_expand_transition, null, {
+                      default: _withCtx(() => [
+                        showManual.value ? (_openBlock(), _createElementBlock("div", _hoisted_129, [
+                          _createVNode(_component_v_textarea, {
+                            modelValue: manualToken.value,
+                            "onUpdate:modelValue": _cache[39] || (_cache[39] = ($event) => manualToken.value = $event),
+                            rows: 3,
                             density: "compact",
                             "hide-details": "",
-                            label: loginResult.value?.state === "need_verify" ? "邮箱/短信验证码" : "图形验证码",
-                            style: { "max-width": "220px" },
-                            onKeyup: _withKeys(submitVerify, ["enter"])
-                          }, null, 8, ["modelValue", "label"]),
+                            placeholder: "userId=…; serviceToken=…; 把浏览器里 i.api.xiaomi.com 登录后的整串 cookie 粘进来"
+                          }, null, 8, ["modelValue"]),
+                          _createElementVNode("div", _hoisted_130, [
+                            _createVNode(_component_v_btn, {
+                              size: "small",
+                              variant: "tonal",
+                              loading: busy.value === "校验票据",
+                              onClick: submitManual
+                            }, {
+                              default: _withCtx(() => [..._cache[118] || (_cache[118] = [
+                                _createTextVNode("校验并使用", -1)
+                              ])]),
+                              _: 1
+                            }, 8, ["loading"]),
+                            _createVNode(_component_v_btn, {
+                              size: "small",
+                              variant: "text",
+                              onClick: _cache[40] || (_cache[40] = ($event) => showManual.value = false)
+                            }, {
+                              default: _withCtx(() => [..._cache[119] || (_cache[119] = [
+                                _createTextVNode("取消", -1)
+                              ])]),
+                              _: 1
+                            })
+                          ])
+                        ])) : _createCommentVNode("", true)
+                      ]),
+                      _: 1
+                    }),
+                    _createElementVNode("div", _hoisted_131, [
+                      _cache[121] || (_cache[121] = _createTextVNode(" 账密登不上（小米风控、二次校验过不去）时可以在高级里直接粘贴 cookie 票据； 票据只存在本机插件数据里，配置页不回显明文。 ", -1)),
+                      _createVNode(_component_v_btn, {
+                        size: "x-small",
+                        variant: "text",
+                        class: "text-none ml-1",
+                        "prepend-icon": showManual.value ? "mdi-chevron-up" : "mdi-chevron-down",
+                        onClick: _cache[41] || (_cache[41] = ($event) => showManual.value = !showManual.value)
+                      }, {
+                        default: _withCtx(() => [..._cache[120] || (_cache[120] = [
+                          _createTextVNode("高级", -1)
+                        ])]),
+                        _: 1
+                      }, 8, ["prepend-icon"])
+                    ])
+                  ]),
+                  _: 1
+                }),
+                _createVNode(_component_v_expand_transition, null, {
+                  default: _withCtx(() => [
+                    picker.value && devices.value.length ? (_openBlock(), _createBlock(_component_v_card, {
+                      key: 0,
+                      variant: "outlined",
+                      color: "primary",
+                      class: "pa-4 mb-3"
+                    }, {
+                      default: _withCtx(() => [
+                        _createElementVNode("div", _hoisted_132, [
+                          _cache[122] || (_cache[122] = _createTextVNode(" 选一台当默认音箱 ", -1)),
+                          _createElementVNode("span", _hoisted_133, _toDisplayString(devices.value.length) + " 台可选", 1)
+                        ]),
+                        (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(pickerDevices.value, (device) => {
+                          return _openBlock(), _createElementBlock("div", {
+                            key: device.device_id,
+                            class: "d-flex align-center",
+                            style: { "gap": "10px", "flex-wrap": "wrap", "padding": "4px 0" }
+                          }, [
+                            _createVNode(_component_v_icon, {
+                              icon: device.presence === "online" ? "mdi-speaker" : "mdi-speaker-off",
+                              color: device.is_default ? "primary" : device.presence === "online" ? "success" : "grey"
+                            }, null, 8, ["icon", "color"]),
+                            _createElementVNode("div", _hoisted_134, [
+                              _createElementVNode("div", _hoisted_135, [
+                                _createTextVNode(_toDisplayString(device.name || device.alias || device.device_id) + " ", 1),
+                                device.is_default ? (_openBlock(), _createBlock(_component_v_chip, {
+                                  key: 0,
+                                  size: "x-small",
+                                  variant: "flat",
+                                  color: "primary",
+                                  class: "ml-1"
+                                }, {
+                                  default: _withCtx(() => [..._cache[123] || (_cache[123] = [
+                                    _createTextVNode("当前默认", -1)
+                                  ])]),
+                                  _: 1
+                                })) : _createCommentVNode("", true)
+                              ]),
+                              _createElementVNode("div", _hoisted_136, [
+                                _createTextVNode(_toDisplayString(device.model || device.hardware || "未知型号") + "｜" + _toDisplayString(device.presence === "online" ? "在线" : "离线") + " ", 1),
+                                device.needs_music_api ? (_openBlock(), _createElementBlock(_Fragment, { key: 0 }, [
+                                  _createTextVNode("｜需走 play_music")
+                                ], 64)) : _createCommentVNode("", true)
+                              ])
+                            ]),
+                            _createVNode(_component_v_btn, {
+                              size: "small",
+                              variant: "text",
+                              color: "primary",
+                              disabled: device.is_default,
+                              loading: busy.value === "设为默认",
+                              onClick: ($event) => pickDevice(device)
+                            }, {
+                              default: _withCtx(() => [
+                                _createTextVNode(_toDisplayString(device.is_default ? "已是默认" : "选它"), 1)
+                              ]),
+                              _: 2
+                            }, 1032, ["disabled", "loading", "onClick"])
+                          ]);
+                        }), 128)),
+                        _createElementVNode("div", _hoisted_137, [
+                          _cache[125] || (_cache[125] = _createTextVNode(" 在线的放前面，离线也能选（音箱上线后照样能用）。不选就落在第一台在线设备上。 ", -1)),
                           _createVNode(_component_v_btn, {
-                            size: "small",
-                            variant: "tonal",
-                            color: "info",
-                            loading: busy.value === "提交验证码",
-                            onClick: submitVerify
-                          }, {
-                            default: _withCtx(() => [..._cache[112] || (_cache[112] = [
-                              _createTextVNode("提交", -1)
-                            ])]),
-                            _: 1
-                          }, 8, ["loading"]),
-                          _createVNode(_component_v_btn, {
-                            size: "small",
+                            size: "x-small",
                             variant: "text",
-                            onClick: startLogin
+                            class: "text-none ml-1",
+                            onClick: _cache[42] || (_cache[42] = ($event) => picker.value = false)
                           }, {
-                            default: _withCtx(() => [..._cache[113] || (_cache[113] = [
-                              _createTextVNode("重新发起登录", -1)
+                            default: _withCtx(() => [..._cache[124] || (_cache[124] = [
+                              _createTextVNode("收起", -1)
                             ])]),
                             _: 1
                           })
                         ])
-                      ])) : loginResult.value ? (_openBlock(), _createElementBlock("div", _hoisted_124, _toDisplayString(loginResult.value.message), 1)) : _createCommentVNode("", true),
-                      _createVNode(_component_v_expand_transition, null, {
-                        default: _withCtx(() => [
-                          showManual.value ? (_openBlock(), _createElementBlock("div", _hoisted_125, [
-                            _createVNode(_component_v_textarea, {
-                              modelValue: manualToken.value,
-                              "onUpdate:modelValue": _cache[38] || (_cache[38] = ($event) => manualToken.value = $event),
-                              rows: 3,
-                              density: "compact",
-                              "hide-details": "",
-                              placeholder: "userId=…; serviceToken=…; 把浏览器里 i.api.xiaomi.com 登录后的整串 cookie 粘进来"
-                            }, null, 8, ["modelValue"]),
-                            _createElementVNode("div", _hoisted_126, [
-                              _createVNode(_component_v_btn, {
-                                size: "small",
-                                variant: "tonal",
-                                loading: busy.value === "校验票据",
-                                onClick: submitManual
-                              }, {
-                                default: _withCtx(() => [..._cache[114] || (_cache[114] = [
-                                  _createTextVNode("校验并使用", -1)
-                                ])]),
-                                _: 1
-                              }, 8, ["loading"]),
-                              _createVNode(_component_v_btn, {
-                                size: "small",
-                                variant: "text",
-                                onClick: _cache[39] || (_cache[39] = ($event) => showManual.value = false)
-                              }, {
-                                default: _withCtx(() => [..._cache[115] || (_cache[115] = [
-                                  _createTextVNode("取消", -1)
-                                ])]),
-                                _: 1
-                              })
-                            ])
-                          ])) : _createCommentVNode("", true)
-                        ]),
-                        _: 1
-                      }),
-                      _createElementVNode("div", _hoisted_127, [
-                        _cache[117] || (_cache[117] = _createTextVNode(" 账密登不上（小米风控、二次校验过不去）时可以在高级里直接粘贴 cookie 票据； 票据只存在本机插件数据里，配置页不回显明文。 ", -1)),
-                        _createVNode(_component_v_btn, {
-                          size: "x-small",
-                          variant: "text",
-                          class: "text-none ml-1",
-                          "prepend-icon": showManual.value ? "mdi-chevron-up" : "mdi-chevron-down",
-                          onClick: _cache[40] || (_cache[40] = ($event) => showManual.value = !showManual.value)
-                        }, {
-                          default: _withCtx(() => [..._cache[116] || (_cache[116] = [
-                            _createTextVNode("高级", -1)
-                          ])]),
-                          _: 1
-                        }, 8, ["prepend-icon"])
-                      ])
-                    ], 64))
+                      ]),
+                      _: 1
+                    })) : _createCommentVNode("", true)
                   ]),
                   _: 1
                 }),
-                _createElementVNode("div", _hoisted_128, [
-                  _cache[119] || (_cache[119] = _createTextVNode(" 音箱设备 ", -1)),
-                  _createElementVNode("span", _hoisted_129, _toDisplayString(devices.value.length) + " 台", 1)
+                _createElementVNode("div", _hoisted_138, [
+                  _cache[126] || (_cache[126] = _createTextVNode(" 音箱设备 ", -1)),
+                  _createElementVNode("span", _hoisted_139, _toDisplayString(devices.value.length) + " 台", 1)
                 ]),
                 !devices.value.length ? (_openBlock(), _createBlock(_component_v_alert, {
                   key: 0,
@@ -2966,13 +3121,13 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     class: "pa-3 mb-2"
                   }, {
                     default: _withCtx(() => [
-                      _createElementVNode("div", _hoisted_130, [
+                      _createElementVNode("div", _hoisted_140, [
                         _createVNode(_component_v_icon, {
                           icon: device.presence === "online" ? "mdi-speaker" : "mdi-speaker-off",
                           color: device.presence === "online" ? "success" : "grey"
                         }, null, 8, ["icon", "color"]),
-                        _createElementVNode("div", _hoisted_131, [
-                          _createElementVNode("div", _hoisted_132, [
+                        _createElementVNode("div", _hoisted_141, [
+                          _createElementVNode("div", _hoisted_142, [
                             _createTextVNode(_toDisplayString(device.name || device.alias || device.device_id) + " ", 1),
                             device.is_default ? (_openBlock(), _createBlock(_component_v_chip, {
                               key: 0,
@@ -2981,7 +3136,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                               color: "primary",
                               class: "ml-1"
                             }, {
-                              default: _withCtx(() => [..._cache[120] || (_cache[120] = [
+                              default: _withCtx(() => [..._cache[127] || (_cache[127] = [
                                 _createTextVNode("默认", -1)
                               ])]),
                               _: 1
@@ -2998,7 +3153,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                               _: 2
                             }, 1024)) : _createCommentVNode("", true)
                           ]),
-                          _createElementVNode("div", _hoisted_133, [
+                          _createElementVNode("div", _hoisted_143, [
                             _createTextVNode(_toDisplayString(device.model || device.hardware || "未知型号") + "｜" + _toDisplayString(device.presence === "online" ? "在线" : "离线") + " ", 1),
                             device.needs_music_api ? (_openBlock(), _createElementBlock(_Fragment, { key: 0 }, [
                               _createTextVNode("｜该型号需走 play_music，直链可能被当成电台播放")
@@ -3013,7 +3168,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                           loading: busy.value === "设为默认",
                           onClick: ($event) => selectDevice(device)
                         }, {
-                          default: _withCtx(() => [..._cache[121] || (_cache[121] = [
+                          default: _withCtx(() => [..._cache[128] || (_cache[128] = [
                             _createTextVNode("设为默认", -1)
                           ])]),
                           _: 1
@@ -3025,7 +3180,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                           loading: busy.value === "取消默认",
                           onClick: clearDefault
                         }, {
-                          default: _withCtx(() => [..._cache[122] || (_cache[122] = [
+                          default: _withCtx(() => [..._cache[129] || (_cache[129] = [
                             _createTextVNode("取消默认", -1)
                           ])]),
                           _: 1
@@ -3035,11 +3190,11 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     _: 2
                   }, 1024);
                 }), 128)),
-                _cache[130] || (_cache[130] = _createElementVNode("div", { class: "text-caption text-grey" }, " 没设默认音箱时，操作落在第一台在线设备上；都不在线就落在列表第一台。 设备列表由插件缓存 5 分钟，改动账号或新增音箱后点「刷新设备」。 ", -1)),
-                _createElementVNode("div", _hoisted_134, [
-                  _createElementVNode("div", _hoisted_135, [
-                    _cache[123] || (_cache[123] = _createTextVNode(" 设备分组 ", -1)),
-                    _createElementVNode("span", _hoisted_136, _toDisplayString(groups.value.length) + " 组", 1)
+                _cache[137] || (_cache[137] = _createElementVNode("div", { class: "text-caption text-grey" }, " 没设默认音箱时，操作落在第一台在线设备上；都不在线就落在列表第一台。 设备列表由插件缓存 5 分钟，改动账号或新增音箱后点「刷新设备」。 ", -1)),
+                _createElementVNode("div", _hoisted_144, [
+                  _createElementVNode("div", _hoisted_145, [
+                    _cache[130] || (_cache[130] = _createTextVNode(" 设备分组 ", -1)),
+                    _createElementVNode("span", _hoisted_146, _toDisplayString(groups.value.length) + " 组", 1)
                   ]),
                   (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(groups.value, (row) => {
                     return _openBlock(), _createBlock(_component_v_card, {
@@ -3048,13 +3203,13 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       class: "pa-3 mb-2"
                     }, {
                       default: _withCtx(() => [
-                        _createElementVNode("div", _hoisted_137, [
+                        _createElementVNode("div", _hoisted_147, [
                           _createVNode(_component_v_icon, {
                             icon: "mdi-home-group-outline",
                             color: "primary"
                           }),
-                          _createElementVNode("div", _hoisted_138, [
-                            _createElementVNode("div", _hoisted_139, [
+                          _createElementVNode("div", _hoisted_148, [
+                            _createElementVNode("div", _hoisted_149, [
                               _createTextVNode(_toDisplayString(row.name) + " ", 1),
                               defaultGroup.value === row.name ? (_openBlock(), _createBlock(_component_v_chip, {
                                 key: 0,
@@ -3063,13 +3218,13 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                                 color: "primary",
                                 class: "ml-1"
                               }, {
-                                default: _withCtx(() => [..._cache[124] || (_cache[124] = [
+                                default: _withCtx(() => [..._cache[131] || (_cache[131] = [
                                   _createTextVNode(" 默认音箱所在组 ", -1)
                                 ])]),
                                 _: 1
                               })) : _createCommentVNode("", true)
                             ]),
-                            _createElementVNode("div", _hoisted_140, _toDisplayString(row.devices.join("、") || row.device_ids.join("、")), 1)
+                            _createElementVNode("div", _hoisted_150, _toDisplayString(row.devices.join("、") || row.device_ids.join("、")), 1)
                           ]),
                           _createVNode(_component_v_btn, {
                             size: "x-small",
@@ -3077,7 +3232,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                             loading: busy.value === "保存分组",
                             onClick: ($event) => editGroup(row)
                           }, {
-                            default: _withCtx(() => [..._cache[125] || (_cache[125] = [
+                            default: _withCtx(() => [..._cache[132] || (_cache[132] = [
                               _createTextVNode("编辑", -1)
                             ])]),
                             _: 1
@@ -3089,7 +3244,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                             loading: busy.value === "删除分组",
                             onClick: ($event) => removeGroup(row.name)
                           }, {
-                            default: _withCtx(() => [..._cache[126] || (_cache[126] = [
+                            default: _withCtx(() => [..._cache[133] || (_cache[133] = [
                               _createTextVNode("删除", -1)
                             ])]),
                             _: 1
@@ -3104,10 +3259,10 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     class: "pa-3"
                   }, {
                     default: _withCtx(() => [
-                      _createElementVNode("div", _hoisted_141, [
+                      _createElementVNode("div", _hoisted_151, [
                         _createVNode(_component_v_text_field, {
                           modelValue: groupForm.value.name,
-                          "onUpdate:modelValue": _cache[41] || (_cache[41] = ($event) => groupForm.value.name = $event),
+                          "onUpdate:modelValue": _cache[43] || (_cache[43] = ($event) => groupForm.value.name = $event),
                           density: "compact",
                           "hide-details": "",
                           clearable: "",
@@ -3117,7 +3272,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                         }, null, 8, ["modelValue", "label"]),
                         _createVNode(_component_v_combobox, {
                           modelValue: groupForm.value.device_ids,
-                          "onUpdate:modelValue": _cache[42] || (_cache[42] = ($event) => groupForm.value.device_ids = $event),
+                          "onUpdate:modelValue": _cache[44] || (_cache[44] = ($event) => groupForm.value.device_ids = $event),
                           items: groupDeviceItems.value,
                           "item-title": "title",
                           "item-value": "value",
@@ -3136,7 +3291,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                           loading: busy.value === "保存分组",
                           onClick: saveGroup
                         }, {
-                          default: _withCtx(() => [..._cache[127] || (_cache[127] = [
+                          default: _withCtx(() => [..._cache[134] || (_cache[134] = [
                             _createTextVNode("保存", -1)
                           ])]),
                           _: 1
@@ -3146,13 +3301,13 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                           variant: "text",
                           onClick: newGroup
                         }, {
-                          default: _withCtx(() => [..._cache[128] || (_cache[128] = [
+                          default: _withCtx(() => [..._cache[135] || (_cache[135] = [
                             _createTextVNode("清空", -1)
                           ])]),
                           _: 1
                         })
                       ]),
-                      _cache[129] || (_cache[129] = _createElementVNode("div", { class: "text-caption text-grey mt-1" }, " 分组里的音箱共用同一份队列、播放方式与定时，播放/切曲/音量/播报都会同步过去； 一台设备只属于一个组，选中别组已有的音箱时会自动从原组里挪过来， 原组不足两台就随之解散。默认音箱所在的那一组即「全屋广播」的落点。 ", -1))
+                      _cache[136] || (_cache[136] = _createElementVNode("div", { class: "text-caption text-grey mt-1" }, " 分组里的音箱共用同一份队列、播放方式与定时，播放/切曲/音量/播报都会同步过去； 一台设备只属于一个组，选中别组已有的音箱时会自动从原组里挪过来， 原组不足两台就随之解散。默认音箱所在的那一组即「全屋广播」的落点。 ", -1))
                     ]),
                     _: 1
                   })
@@ -3160,19 +3315,19 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               ], 512), [
                 [_vShow, pane.value === "account"]
               ]),
-              pane.value === "config" ? (_openBlock(), _createElementBlock("div", _hoisted_142, [
+              pane.value === "config" ? (_openBlock(), _createElementBlock("div", _hoisted_152, [
                 _createVNode(ConfigForm, {
                   api: props.api,
                   "plugin-id": props.pluginId,
                   "source-plugin-id": props.sourcePluginId,
-                  onSaved: _cache[43] || (_cache[43] = ($event) => loadStatus())
+                  onSaved: _cache[45] || (_cache[45] = ($event) => loadStatus())
                 }, null, 8, ["api", "plugin-id", "source-plugin-id"])
               ])) : _createCommentVNode("", true)
             ])
           ]),
           _createVNode(_component_v_snackbar, {
             modelValue: snackbar.value.show,
-            "onUpdate:modelValue": _cache[44] || (_cache[44] = ($event) => snackbar.value.show = $event),
+            "onUpdate:modelValue": _cache[46] || (_cache[46] = ($event) => snackbar.value.show = $event),
             color: snackbar.value.color,
             timeout: "3500",
             location: "bottom"
@@ -3189,6 +3344,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const AppPage = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-bd8d9f58"]]);
+const AppPage = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-20397424"]]);
 
 export { AppPage as default };

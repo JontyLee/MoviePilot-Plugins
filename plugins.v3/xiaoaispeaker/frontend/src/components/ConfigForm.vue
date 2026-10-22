@@ -29,6 +29,8 @@ const loaded = ref(false)
 // /config 只改传上来的字段、密码留空表示保留，所以草稿要按「服务端当前值」起头：
 // 直接用宿主存的配置会把已存的密码位置当成空，保存时一起写没。
 const form = ref<Record<string, any>>({
+  enabled: false,
+  show_sidebar_nav: true,
   username: '',
   password: '',
   default_device_id: '',
@@ -52,9 +54,6 @@ const form = ref<Record<string, any>>({
   voice_memory: true,
   ai_enabled: false,
   ai_chat: false,
-  ai_api_url: '',
-  ai_api_key: '',
-  ai_model: '',
   ai_timeout: 6,
   library_limit: 10000,
   library_refresh: 60
@@ -79,9 +78,10 @@ const deviceItems = computed(() => [
   }))
 ])
 
-const enabledText = computed(() => {
+const navText = computed(() => {
   if (!loaded.value) return '读取中'
-  return cfg.value?.enabled ? '已启用' : '已停用（在插件管理页打开）'
+  if (!form.value.enabled) return '未启用：侧栏与巡检都不会跑'
+  return form.value.show_sidebar_nav ? '侧栏入口已出现' : '已启用，只是不收进侧栏'
 })
 
 // 「监听哪些音箱」后端收的是逗号/空格分隔的 device_id，这里用多选组件来回转，
@@ -113,6 +113,8 @@ function fillFromStatus(data: Status) {
   const c = (data?.config || {}) as any
   form.value = {
     ...form.value,
+    enabled: !!c.enabled,
+    show_sidebar_nav: c.show_sidebar_nav !== false,
     username: c.username || '',
     // 密码永不回显：留空即「不改动」，由服务端的 if password 判掉
     password: '',
@@ -137,9 +139,6 @@ function fillFromStatus(data: Status) {
     voice_memory: c.voice_memory !== false,
     ai_enabled: !!c.ai_enabled,
     ai_chat: !!c.ai_chat,
-    ai_api_url: c.ai_api_url || '',
-    ai_api_key: '',
-    ai_model: c.ai_model || '',
     ai_timeout: c.ai_timeout ?? 6,
     library_limit: c.library_limit ?? 10000,
     library_refresh: c.library_refresh ?? 60
@@ -159,9 +158,8 @@ async function save() {
   saving.value = true
   try {
     const body: Record<string, any> = { ...form.value }
-    // 密码与 AI key 都是「留空即不改动」：服务端按 if xxx 判掉空串，这里先删掉免得写成空
+    // 密码是「留空即不改动」：服务端按 if password 判掉空串，这里先删掉免得写成空
     if (!body.password) delete body.password
-    if (!body.ai_api_key) delete body.ai_api_key
     fillFromStatus(await (props.api as MoviePilotApi).post(`${base.value}/config`, body))
     notify('配置已保存', 'success')
     emit('saved')
@@ -180,15 +178,23 @@ defineExpose({ loadConfig, save })
 <template>
   <div class="xcf">
     <div class="xcf-top">
-      <v-chip size="small" variant="tonal" :color="cfg?.enabled ? 'success' : 'grey'">
-        {{ enabledText }}
-      </v-chip>
-      <span class="text-caption text-grey">
-        侧栏入口与启用开关在「插件管理 → 小爱音箱」里改，这里改了不会让侧栏立刻出现或消失
-      </span>
+      <div class="d-flex" style="gap: 16px; flex-wrap: wrap">
+        <v-switch v-model="form.enabled" color="success" hide-details inset label="启用插件" />
+        <v-switch v-model="form.show_sidebar_nav" :disabled="!form.enabled" color="success"
+                  hide-details inset label="在「发现」显示侧栏入口" />
+      </div>
       <v-spacer />
+      <v-chip size="small" variant="tonal"
+              :color="form.enabled ? (form.show_sidebar_nav ? 'success' : 'info') : 'grey'">
+        {{ navText }}
+      </v-chip>
       <v-btn size="small" variant="text" class="text-none" prepend-icon="mdi-refresh"
              @click="loadConfig">重新读取</v-btn>
+    </div>
+    <div class="xcf-note">
+      这两个开关就是宿主眼里的「插件已启用」：发现侧栏的入口、播放台巡检、语音轮询都按
+      <b>启用插件</b>这一项准入 —— <b>插件管理页那个开关改的是宿主自己的实例记录，碰不到这里</b>，
+      所以只装好插件不在这里打开的话，侧栏永远不会出现。保存后立刻生效，不用重启主程序。
     </div>
 
     <div class="xcf-body">
@@ -312,29 +318,24 @@ defineExpose({ loadConfig, save })
           <v-switch v-model="form.ai_enabled" color="success" hide-details inset label="口令表没命中时交给 AI 判定" />
           <v-switch v-model="form.ai_chat" color="success" hide-details inset label="没命中的话当成聊天（说完 2 分钟内可追问）" />
         </div>
-        <v-row dense class="mt-3">
-          <v-col cols="12" md="6">
-            <v-text-field v-model="form.ai_api_url" hide-details
-                          label="OpenAI 兼容接口地址（不含 /chat/completions）" />
-          </v-col>
-          <v-col cols="12" md="6">
-            <v-text-field v-model="form.ai_api_key" :type="form.ai_api_key ? 'text' : 'password'" hide-details
-                          :label="cfg?.ai_key_set ? 'API Key（留空保留已存的）' : 'API Key'" />
-          </v-col>
-        </v-row>
-        <v-row dense class="mt-2">
-          <v-col cols="12" md="7">
-            <v-text-field v-model="form.ai_model" hide-details label="模型名"
-                          :placeholder="cfg?.ai_model || 'qwen-flash'" />
-          </v-col>
-          <v-col cols="12" md="5">
-            <v-text-field v-model.number="form.ai_timeout" type="number" min="2" max="30" hide-details
-                          label="超时（秒，2-30）" />
-          </v-col>
-        </v-row>
+        <v-alert class="mt-3" variant="tonal" density="compact" :type="cfg?.ai_ready ? 'success' : 'warning'">
+          <div class="text-body-2">
+            {{ cfg?.ai_ready ? '主程序的智能助手可用，这里不再另配一份' : '主程序的智能助手还没配好' }}
+          </div>
+          <div class="text-caption">
+            <template v-if="cfg?.ai_ready">
+              来自「设定 → AI 大模型」：{{ cfg.ai_provider || '未知来源' }}
+              <template v-if="cfg.ai_model">｜{{ cfg.ai_model }}</template>
+            </template>
+            <template v-else>{{ cfg?.ai_message || '拿不到宿主配置' }}</template>
+          </div>
+        </v-alert>
+        <v-text-field v-model.number="form.ai_timeout" class="mt-2" type="number" min="2" max="30"
+                      hide-details style="max-width: 220px" label="超时（秒，2-30）" />
         <div class="text-caption text-grey mt-1">
-          AI 只能给出口令表里已有的那几种动作，置信度低或动作未知都当没判出来 —— 它只是多一个入口，
-          权限不比口令表大。Key 只存本机配置，任何接口都不回显明文。
+          AI 借用的是 MoviePilot 已经配好的那个大模型：插件不存第二份 Key、不认第二个端点，
+          宿主没配就自动退回到只用口令表。它只能给出口令表里已有的那几种动作，置信度低或动作未知
+          都当没判出来 —— 只是多一个入口，权限不比口令表大。
         </div>
       </div>
 
@@ -389,7 +390,8 @@ defineExpose({ loadConfig, save })
 <style scoped>
 /* 仅插件内局部样式；不得写全局 v- 或 mdi- 类规则（构建有 postcss 门禁）。 */
 .xcf { width: 100%; display: flex; flex-direction: column; }
-.xcf-top { display: flex; align-items: center; gap: 10px; padding: 10px 16px; flex-wrap: wrap; }
+.xcf-top { display: flex; align-items: center; gap: 10px; padding: 10px 16px 0; flex-wrap: wrap; }
+.xcf-note { margin: 4px 16px 12px; padding: 8px 12px; border-radius: 6px; font-size: 12px; line-height: 1.6; opacity: .8; background: rgba(var(--v-theme-on-surface), .05); }
 .xcf-body { padding: 4px 16px 12px; }
 .xcf-group { margin-bottom: 20px; }
 .xcf-group-title { font-size: 13px; font-weight: 600; margin-bottom: 8px; opacity: .8; }

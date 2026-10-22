@@ -108,10 +108,12 @@ export interface PluginConfig {
   voice_memory: boolean
   ai_enabled: boolean
   ai_chat: boolean
-  ai_api_url: string
-  ai_key_set: boolean
-  ai_model: string
   ai_timeout: number
+  // 后四项不是配置，是宿主「设定 → AI 大模型」的读数：插件不另配一份 key
+  ai_ready: boolean
+  ai_provider: string
+  ai_model: string
+  ai_message: string
   library_limit: number
   library_refresh: number
 }

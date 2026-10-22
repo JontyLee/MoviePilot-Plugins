@@ -85,8 +85,8 @@ const EMPTY_STATUS: Status = {
     auto_next: true, keep_light: false, tts_announce: false,
     voice_enabled: false, voice_devices: '', voice_poll: 2, voice_interrupt: true,
     voice_hint_tts: false, voice_hint_text: '正在搜索，请稍候', voice_reply: true,
-    voice_memory: true, ai_enabled: false, ai_chat: false,
-    ai_api_url: '', ai_key_set: false, ai_model: '', ai_timeout: 6,
+    voice_memory: true, ai_enabled: false, ai_chat: false, ai_timeout: 6,
+    ai_ready: false, ai_provider: '', ai_model: '', ai_message: '',
     library_limit: 10000, library_refresh: 60
   },
   extra: {}
@@ -606,11 +606,24 @@ const loginResult = ref<LoginResult | null>(null)
 const verifyCode = ref('')
 const manualToken = ref('')
 const showManual = ref(false)
+// 登录成功后自动把音箱列表端上来：这一栏原来的毛病是登完了还得自己滚下去点「刷新设备」才知道有哪些音箱
+const picker = ref(false)
 
-const loginPending = computed(() => {
-  const state = loginResult.value?.state
-  return state === 'need_captcha' || state === 'need_verify'
-})
+// 候选按「当前默认 → 在线 → 其余」排：刚登完时最有用的那台要在最上面。
+// 下面那块设备总览不重排，保持小米云端返回的顺序，方便跟音箱上的名字对照着找。
+const pickerDevices = computed<Device[]>(() => devices.value.slice().sort((a, b) => {
+  const rank = (d: Device) => (d.is_default ? 0 : d.presence === 'online' ? 1 : 2)
+  return rank(a) - rank(b)
+}))
+
+const loginStates: Record<string, { color: string; text: string }> = {
+  success: { color: 'success', text: '登录成功' },
+  need_captcha: { color: 'warning', text: '卡在图形验证码：照上面的图填验证码提交' },
+  need_verify: { color: 'warning', text: '卡在二次校验：把小米发到手机/邮箱的验证码填进来提交' },
+  failed: { color: 'error', text: '登录失败' }
+}
+
+const loginState = computed(() => loginStates[loginResult.value?.state || ''] || null)
 
 async function startLogin() {
   busy.value = '登录'
@@ -663,7 +676,7 @@ async function submitManual() {
   }
 }
 
-function afterLogin(res: LoginResult) {
+async function afterLogin(res: LoginResult) {
   loginResult.value = res || null
   verifyCode.value = ''
   if (res?.state === 'success') {
@@ -671,7 +684,11 @@ function afterLogin(res: LoginResult) {
     loginForm.value.password = ''
     showManual.value = false
     manualToken.value = ''
-    loadStatus(false)
+    await loadStatus(false)
+    // 后端登录成功时已经强制刷过一遍设备，这里只负责把它直接端到人面前，
+    // 不用再滚下去点一次「刷新设备」
+    if (devices.value.length) picker.value = true
+    else notify('登录成功，但这个账号下没取到音箱设备', 'warning')
     return
   }
   if (res?.state === 'need_captcha' || res?.state === 'need_verify') {
@@ -681,10 +698,16 @@ function afterLogin(res: LoginResult) {
   notify(res?.message || '登录失败', 'error')
 }
 
+function pickDevice(device: Device) {
+  picker.value = false
+  return selectDevice(device)
+}
+
 async function doLogout() {
   const res = await post('/logout', {}, '退出登录')
   if (res) {
     loginResult.value = null
+    picker.value = false
     loginForm.value = { username: loginForm.value.username, password: '' }
   }
 }
@@ -1557,8 +1580,16 @@ const currentPane = computed(() => paneItems.find(p => p.key === pane.value) || 
         <!-- 账号与设备 -->
         <div v-show="pane === 'account'" class="xai-pane">
           <v-card variant="outlined" class="pa-4 mb-3">
-            <div class="xai-block-title">小米账号</div>
-            <div v-if="status.logged_in" class="d-flex align-center" style="gap: 8px; flex-wrap: wrap">
+            <div class="xai-block-title">
+              小米账号
+              <v-chip size="x-small" variant="tonal" class="ml-2"
+                      :color="status.logged_in ? 'success' : 'grey'"
+                      :prepend-icon="status.logged_in ? 'mdi-check-circle-outline' : 'mdi-help-circle-outline'">
+                {{ status.logged_in ? '已登录' : '未登录' }}
+              </v-chip>
+            </div>
+
+            <div v-if="status.logged_in" class="d-flex align-center mb-3" style="gap: 8px; flex-wrap: wrap">
               <div class="text-body-2" style="flex: 1 1 220px">
                 {{ cfg.username || '（未记录账号名）' }}
                 <div class="text-caption text-grey">
@@ -1567,59 +1598,103 @@ const currentPane = computed(() => paneItems.find(p => p.key === pane.value) || 
                   <template v-if="status.token_expired">｜已过期，需要重新登录</template>
                 </div>
               </div>
+              <v-btn size="small" variant="tonal" prepend-icon="mdi-speaker-multiple"
+                     @click="picker = true">选择音箱</v-btn>
               <v-btn size="small" variant="tonal" :loading="busy === '刷新设备'"
                     prepend-icon="mdi-refresh" @click="refreshDevices">刷新设备</v-btn>
               <v-btn size="small" variant="tonal" color="error" :loading="busy === '退出登录'"
                      prepend-icon="mdi-logout" @click="doLogout">退出登录</v-btn>
             </div>
 
-            <template v-else>
-              <div class="d-flex" style="gap: 8px; flex-wrap: wrap">
-                <v-text-field v-model="loginForm.username" density="compact" hide-details clearable
-                              label="小米账号（手机号 / 邮箱 / 账号ID）" :placeholder="cfg.username"
-                              style="min-width: 220px; flex: 1 1 220px" />
-                <v-text-field v-model="loginForm.password" density="compact" hide-details
-                              :type="loginForm.password ? 'text' : 'password'"
-                              :label="cfg.password_set ? '密码（留空则用已保存的）' : '密码'"
-                              style="min-width: 180px; flex: 1 1 180px" @keyup.enter="startLogin" />
-                <v-btn color="primary" variant="flat" class="text-none" :loading="busy === '登录'"
-                       prepend-icon="mdi-login" @click="startLogin">登录</v-btn>
-              </div>
+            <!-- 登录行登成了也留着：换账号、票据过期时补一次登录都在这里，不用先退出 -->
+            <div class="d-flex" style="gap: 8px; flex-wrap: wrap">
+              <v-text-field v-model="loginForm.username" density="compact" hide-details clearable
+                            label="小米账号（手机号 / 邮箱 / 账号ID）" :placeholder="cfg.username"
+                            style="min-width: 220px; flex: 1 1 220px" @keyup.enter="startLogin" />
+              <v-text-field v-model="loginForm.password" density="compact" hide-details
+                            :type="loginForm.password ? 'text' : 'password'"
+                            :label="cfg.password_set ? '密码（留空则用已保存的）' : '密码'"
+                            style="min-width: 180px; flex: 1 1 180px" @keyup.enter="startLogin" />
+              <v-btn color="primary" variant="flat" class="text-none" :loading="busy === '登录'"
+                     prepend-icon="mdi-login" @click="startLogin">登录</v-btn>
+            </div>
 
-              <div v-if="loginPending" class="mt-3">
-                <v-img v-if="loginResult?.captcha_image" :src="loginResult.captcha_image" max-height="120"
-                       class="rounded mb-2" style="max-width: 240px" contain />
-                <div class="d-flex" style="gap: 8px; flex-wrap: wrap">
-                  <v-text-field v-model="verifyCode" density="compact" hide-details
-                                :label="loginResult?.state === 'need_verify' ? '邮箱/短信验证码' : '图形验证码'"
-                                style="max-width: 220px" @keyup.enter="submitVerify" />
-                  <v-btn size="small" variant="tonal" color="info" :loading="busy === '提交验证码'"
-                         @click="submitVerify">提交</v-btn>
-                  <v-btn size="small" variant="text" @click="startLogin">重新发起登录</v-btn>
+            <div v-if="loginResult" class="mt-3">
+              <v-alert :type="loginState?.color || 'info'" variant="tonal" density="compact"
+                       :icon="loginState ? undefined : 'mdi-information-outline'">
+                <div class="text-body-2">{{ loginState?.text || loginResult.state }}</div>
+                <div class="text-caption">{{ loginResult.message }}</div>
+                <div v-if="loginResult.state === 'success'" class="text-caption">
+                  取到 {{ loginResult.device_count }} 台音箱
+                  <template v-if="loginResult.device_count">｜已在上面弹出音箱列表，点一下即设为默认</template>
+                </div>
+              </v-alert>
+            </div>
+
+            <div v-if="loginState?.color === 'warning'" class="mt-3">
+              <v-img v-if="loginResult?.captcha_image" :src="loginResult.captcha_image" max-height="120"
+                     class="rounded mb-2" style="max-width: 240px" contain />
+              <div class="d-flex" style="gap: 8px; flex-wrap: wrap">
+                <v-text-field v-model="verifyCode" density="compact" hide-details
+                              :label="loginResult?.state === 'need_verify' ? '邮箱/短信验证码' : '图形验证码'"
+                              style="max-width: 220px" @keyup.enter="submitVerify" />
+                <v-btn size="small" variant="tonal" color="info" :loading="busy === '提交验证码'"
+                       @click="submitVerify">提交</v-btn>
+                <v-btn size="small" variant="text" @click="startLogin">重新发起登录</v-btn>
+              </div>
+            </div>
+
+            <v-expand-transition>
+              <div v-if="showManual" class="mt-3">
+                <v-textarea v-model="manualToken" :rows="3" density="compact" hide-details
+                            placeholder="userId=…; serviceToken=…; 把浏览器里 i.api.xiaomi.com 登录后的整串 cookie 粘进来" />
+                <div class="d-flex mt-1" style="gap: 8px">
+                  <v-btn size="small" variant="tonal" :loading="busy === '校验票据'"
+                         @click="submitManual">校验并使用</v-btn>
+                  <v-btn size="small" variant="text" @click="showManual = false">取消</v-btn>
                 </div>
               </div>
-              <div v-else-if="loginResult" class="text-caption text-grey mt-2">{{ loginResult.message }}</div>
+            </v-expand-transition>
+            <div class="text-caption text-grey mt-2">
+              账密登不上（小米风控、二次校验过不去）时可以在高级里直接粘贴 cookie 票据；
+              票据只存在本机插件数据里，配置页不回显明文。
+              <v-btn size="x-small" variant="text" class="text-none ml-1"
+                     :prepend-icon="showManual ? 'mdi-chevron-up' : 'mdi-chevron-down'"
+                     @click="showManual = !showManual">高级</v-btn>
+            </div>
+          </v-card>
 
-              <v-expand-transition>
-                <div v-if="showManual" class="mt-3">
-                  <v-textarea v-model="manualToken" :rows="3" density="compact" hide-details
-                              placeholder="userId=…; serviceToken=…; 把浏览器里 i.api.xiaomi.com 登录后的整串 cookie 粘进来" />
-                  <div class="d-flex mt-1" style="gap: 8px">
-                    <v-btn size="small" variant="tonal" :loading="busy === '校验票据'"
-                           @click="submitManual">校验并使用</v-btn>
-                    <v-btn size="small" variant="text" @click="showManual = false">取消</v-btn>
+          <v-expand-transition>
+            <v-card v-if="picker && devices.length" variant="outlined" color="primary" class="pa-4 mb-3">
+              <div class="xai-block-title">
+                选一台当默认音箱
+                <span class="text-caption text-grey ml-2">{{ devices.length }} 台可选</span>
+              </div>
+              <div v-for="device in pickerDevices" :key="device.device_id"
+                   class="d-flex align-center" style="gap: 10px; flex-wrap: wrap; padding: 4px 0">
+                <v-icon :icon="device.presence === 'online' ? 'mdi-speaker' : 'mdi-speaker-off'"
+                        :color="device.is_default ? 'primary' : (device.presence === 'online' ? 'success' : 'grey')" />
+                <div style="min-width: 0; flex: 1 1 200px">
+                  <div class="text-body-2">
+                    {{ device.name || device.alias || device.device_id }}
+                    <v-chip v-if="device.is_default" size="x-small" variant="flat" color="primary" class="ml-1">当前默认</v-chip>
+                  </div>
+                  <div class="text-caption text-grey">
+                    {{ device.model || device.hardware || '未知型号' }}｜{{ device.presence === 'online' ? '在线' : '离线' }}
+                    <template v-if="device.needs_music_api">｜需走 play_music</template>
                   </div>
                 </div>
-              </v-expand-transition>
-              <div class="text-caption text-grey mt-2">
-                账密登不上（小米风控、二次校验过不去）时可以在高级里直接粘贴 cookie 票据；
-                票据只存在本机插件数据里，配置页不回显明文。
-                <v-btn size="x-small" variant="text" class="text-none ml-1"
-                       :prepend-icon="showManual ? 'mdi-chevron-up' : 'mdi-chevron-down'"
-                       @click="showManual = !showManual">高级</v-btn>
+                <v-btn size="small" variant="text" color="primary" :disabled="device.is_default"
+                       :loading="busy === '设为默认'" @click="pickDevice(device)">
+                  {{ device.is_default ? '已是默认' : '选它' }}
+                </v-btn>
               </div>
-            </template>
-          </v-card>
+              <div class="text-caption text-grey mt-1">
+                在线的放前面，离线也能选（音箱上线后照样能用）。不选就落在第一台在线设备上。
+                <v-btn size="x-small" variant="text" class="text-none ml-1" @click="picker = false">收起</v-btn>
+              </div>
+            </v-card>
+          </v-expand-transition>
 
           <div class="xai-block-title">
             音箱设备

@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -682,6 +683,27 @@ class PluginConfigTest(unittest.TestCase):
         if seconds is None:  # 真 apscheduler 用 timedelta
             seconds = trigger.interval.total_seconds()
         self.assertEqual(seconds, 5.0)
+
+    def test_config_page_can_enable_the_plugin(self) -> None:
+        """侧栏出现与否卡在 get_state()，而 get_state() 读的是配置里的 enabled：
+        插件管理页那个开关碰不到它，所以这一项必须在插件自己的配置页能改、能立刻生效。"""
+        plugin = _plugin(config={"enabled": False})
+        self.assertEqual(plugin.get_sidebar_nav(), [])
+        saved = _stub_env.JOB_UPDATES
+        del saved[:]
+        out = plugin.api_config(x.schemas.ConfigIn(enabled=True))
+        self.assertTrue(out.config.enabled)
+        self.assertTrue(plugin.get_state())
+        self.assertEqual(len(plugin.get_sidebar_nav()), 1, "打开后侧栏入口就该出现")
+        self.assertEqual(len(plugin.get_service()), 1, "打开后周期任务就该登记")
+        self.assertEqual(saved, [plugin._plugin_id()], "保存后要请宿主重建一次任务")
+        # 关掉侧栏入口不影响任务，只收起导航；两项各自独立
+        plugin.api_config(x.schemas.ConfigIn(show_sidebar_nav=False))
+        self.assertEqual(plugin.get_sidebar_nav(), [])
+        self.assertTrue(plugin.get_state())
+        del saved[:]
+        plugin.api_config(x.schemas.ConfigIn(default_volume=40))
+        self.assertEqual(saved, [], "没动开关就别多喊一次重建任务")
 
     def test_render_mode_is_vue_federation(self) -> None:
         self.assertEqual(x.XiaoaiSpeaker.get_render_mode(), ("vue", "dist/assets"))
@@ -1424,33 +1446,47 @@ class PluginVoiceTest(unittest.TestCase):
         plugin.api_commands_save(x.schemas.CommandsIn(enabled=None))
         self.assertIn("favorite", plugin._voice_commands(), "enabled=null 要恢复全开")
 
-    def test_ai_fallback_is_the_last_resort(self) -> None:
-        canned: Dict[str, Any] = {}
+    def _host_assistant(self, reply: str = "", **settings) -> "_stub_env._LLMHelper":
+        """把宿主「设定 → AI 大模型」桩成可用，并排好下一次要回的话。"""
+        _SETTINGS.LLM_PROVIDER = settings.get("provider", "deepseek")
+        _SETTINGS.LLM_MODEL = settings.get("model", "test-model")
+        _SETTINGS.LLM_API_KEY = settings.get("api_key", "sk-from-host-settings")
+        _SETTINGS.LLM_BASE_URL = settings.get("base_url", "https://api.example.test")
+        _stub_env._LLMHelper.reset()
+        if reply:
+            _stub_env._LLMHelper.script = [reply]
+        return _stub_env._LLMHelper
 
-        def post_dict(self, url=None, data=None, **kwargs):
-            canned["url"] = url
-            canned["payload"] = json.loads(data or "{}")
-            return {"choices": [{"message": {"content": canned["content"]}}]}
+    def _without_assistant(self) -> None:
+        _SETTINGS.LLM_MODEL = ""
+        _SETTINGS.LLM_API_KEY = ""
+        _stub_env._LLMHelper.reset()
 
-        from app.sdk.network import RequestUtils
-        RequestUtils.post_dict = post_dict
+    def test_ai_fallback_uses_host_assistant(self) -> None:
+        """AI 兜底只能借用主程序配好的那个助手：插件自己不留第二份 key/端点。"""
+        helper = self._host_assistant(
+            '{"action":"set_play_mode","params":{"mode":"random"},"confidence":"high"}')
         try:
-            plugin, client = self._plugin(config={"ai_enabled": True, "ai_api_key": "sk-test",
-                                                   "ai_chat": True})
+            plugin, client = self._plugin(config={"ai_enabled": True, "ai_chat": True})
             # 口令表管不到的说法（"摇滚模式"）由模型兜底，动作仍走同一套执行代码
-            canned["content"] = ('{"action":"set_play_mode","params":{"mode":"random"},'
-                                 '"confidence":"high"}')
             out = plugin.api_voice_test(x.schemas.VoiceIn(text="来点摇滚那种乱序的", execute=True))
             self.assertTrue(out.ok)
             self.assertEqual(out.kind, "set_play_mode")
             self.assertEqual(plugin._queue_state()["mode"], "random")
-            self.assertEqual(canned["url"],
-                             "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")
+            self.assertEqual(helper.kwargs.get("model"), "test-model")
+            self.assertEqual(helper.kwargs.get("api_key"), "sk-from-host-settings")
+            self.assertEqual(helper.kwargs.get("base_url"), "https://api.example.test")
+            # 宿主 get_llm 没有 response_format/timeout 这两项：多传一个就是 TypeError，
+            # JSON 靠提示词约束、超时靠我们自己 wait_for
+            self.assertNotIn("response_format", helper.kwargs)
+            self.assertNotIn("timeout", helper.kwargs)
+            self.assertTrue(helper.instances[0].closed, "用完要把模型实例交还宿主")
             # 模型说"没把握"就当没听见，不许它猜着播
-            canned["content"] = '{"action":"play_song","params":{"name":"稻香"},"confidence":"low"}'
+            helper.script = ['{"action":"play_song","params":{"name":"稻香"},"confidence":"low"}']
             self.assertFalse(plugin.api_voice_test(x.schemas.VoiceIn(text="随便来点")).ok)
             # 对话兜底：口令与记忆都没命中才轮到聊天，且回答不落盘
-            canned["content"] = "今天多云，二十度左右。"
+            # 排两句：第一句给意图判定（解析不出 JSON 就当没命中），第二句才是聊天回答
+            helper.script = ["这句不像口令", "今天多云，二十度左右。"]
             reply = plugin._on_voice_text("今天天气咋样啊", "D1", "")
             self.assertIn("多云", reply)
             self.assertTrue(plugin._chat_active())
@@ -1458,15 +1494,65 @@ class PluginVoiceTest(unittest.TestCase):
             self.assertNotIn("chat_history", [key for key in plugin._store])
             self.assertFalse([call for call in client.calls if call[0] == "play"])
         finally:
-            if hasattr(RequestUtils, "post_dict"):
-                del RequestUtils.post_dict
+            self._without_assistant()
 
-    def test_ai_chat_disabled_without_config(self) -> None:
-        plugin, _ = self._plugin(config={"ai_enabled": True, "ai_api_key": "sk-test"})
+    def test_ai_call_failure_is_not_fatal(self) -> None:
+        """宿主模型超时或报错不许把语音链路拖下水：口令没命中就是没命中，异常不外抛。"""
+        # asyncio.wait_for 在 3.11+ 抛的就是内置 TimeoutError，这里按同一种失败演
+        self._host_assistant(TimeoutError("模型响应超时"))
+        try:
+            plugin, client = self._plugin(config={"ai_enabled": True, "ai_chat": True})
+            self.assertFalse(plugin.api_voice_test(
+                x.schemas.VoiceIn(text="来点摇滚那种乱序的", execute=True)).ok)
+            self.assertEqual(plugin._chat_reply("今天天气咋样啊", "D1"), "")
+            self.assertIn("调用失败", plugin._assistant().error)
+            self.assertFalse([call for call in client.calls if call[0] == "play"])
+        finally:
+            self._without_assistant()
+
+    def test_ai_timeout_is_applied_to_the_host_call(self) -> None:
+        """ai_timeout 不是摆设：它真的当成 wait_for 的 timeout 用（宿主 get_llm 没这一项）。"""
+        self._host_assistant("好，接着放。")
+        seen: Dict[str, Any] = {}
+        real = asyncio.wait_for
+
+        async def spy(coro, *args, **kwargs):
+            seen["timeout"] = kwargs.get("timeout", args[0] if args else None)
+            return await real(coro, *args, **kwargs)
+
+        assistant = x.intents.Assistant(7)
+        asyncio.wait_for = spy
+        try:
+            self.assertEqual(assistant.ask("系统提示", "说一句"), "好，接着放。")
+        finally:
+            asyncio.wait_for = real
+        self.assertEqual(seen.get("timeout"), 7)
+
+    def test_ai_unavailable_without_host_settings(self) -> None:
+        """宿主没配助手时不许假装可用：口令没命中就是没命中，状态里说清缺哪一项。"""
+        self._without_assistant()
+        plugin, _client = self._plugin(config={"ai_enabled": True, "ai_chat": True})
+        self.assertFalse(plugin._ai_available())
+        self.assertIsNone(plugin._match_voice("来点摇滚那种乱序的"))
         self.assertEqual(plugin._chat_reply("今天天气咋样啊", "D1"), "")
-        self.assertFalse(plugin._chat_active())
+        status = plugin._status()
+        self.assertFalse(status.config.ai_ready)
+        self.assertIn("API Key", status.config.ai_message)
         off = self._plugin(config={"ai_enabled": False})[0]
         self.assertIsNone(off._match_voice("今天天气咋样啊"))
+
+    def test_ai_history_keeps_assistant_turns(self) -> None:
+        """对话历史里的助手那一轮要按 assistant 角色回给宿主模型，不能都算成用户说的。"""
+        helper = self._host_assistant("好，接着放。")
+        try:
+            plugin, _client = self._plugin(config={"ai_enabled": True, "ai_chat": True})
+            plugin.__dict__["_chat_history"] = [{"role": "user", "content": "上一句"},
+                                                {"role": "assistant", "content": "上一答"}]
+            plugin._chat_reply("再来一句", "D1")
+            roles = [type(message).__name__ for message in helper.instances[0].messages]
+        finally:
+            self._without_assistant()
+        self.assertEqual(roles, ["SystemMessage", "HumanMessage", "AIMessage", "HumanMessage"])
 
     def test_ai_parse_accepts_fenced_json(self) -> None:
         match = x.intents.AIAnalyzer._parse(
@@ -1483,12 +1569,10 @@ class PluginVoiceTest(unittest.TestCase):
         listener = plugin._listener()
         listener._baseline["D1"] = 123
         out = plugin.api_config(x.schemas.ConfigIn(voice_poll=7, voice_devices="D9",
-                                                   ai_api_key="sk-abc", library_refresh=120))
+                                                   library_refresh=120))
         self.assertEqual(out.config.voice_poll, 7)
         self.assertEqual(out.config.voice_devices, "D9")
-        self.assertTrue(out.config.ai_key_set)
         self.assertEqual(out.config.library_refresh, 120)
-        self.assertNotIn("sk-abc", json.dumps(out.model_dump(), ensure_ascii=False))
         fresh = plugin._listener()
         self.assertEqual(fresh.status()["interval"], 7.0)
         self.assertEqual(fresh._baseline, {}, "改配置要丢掉上一批设备的时间基线")

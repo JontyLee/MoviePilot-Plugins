@@ -7,7 +7,7 @@ intents.py — 把匹配到的意图落到设备上，并维护语音侧的三�
 - `Selection`：从曲库索引里挑出一条曲目 / 一串曲目（song / artist / playlist / 收藏 / 随机）；
 - `SleepTimer`：睡眠定时（到点播完就停、或再播 N 首播完就停），状态落盘所以重启不丢；
 - `Memory`：「上一次说这句话播了哪首」的映射表，同话直接重播，省掉一次搜索也省掉误判；
-- `AIAnalyzer`：口令表没命中时，把一个 OpenAI 兼容的 chat 接口当兜底解析器。
+- `Assistant` / `AIAnalyzer`：口令表没命中时，用 MoviePilot 自己配置的智能助手兜底解析。
 
 播放模式（顺序/列表循环/随机/单曲循环/单曲播放）不在这里判，它属于队列本身的行为，
 在插件的 `_advance` 里实现；这里只负责把模式写进队列状态。
@@ -15,6 +15,7 @@ intents.py — 把匹配到的意图落到设备上，并维护语音侧的三�
 
 from __future__ import annotations
 
+import asyncio
 import json
 import random
 import re
@@ -143,73 +144,166 @@ class Memory:
         self._save(rows[:MEMORY_LIMIT])
 
 
-class AIAnalyzer:
-    """把没命中口令表的话交给一个 OpenAI 兼容接口判定意图。
+class Assistant:
+    """MoviePilot 自己配置的智能助手（设定 → AI 大模型）—— 插件不再配一份 key。
 
-    只在插件里显式配了 api_key 时才启用；返回的动作必须落在 _AI_ACTIONS 里，
-    置信度 low 或动作 unknown 一律当作没判出来。这是"多一个入口"而不是"更聪明的
-    匹配器"：模型给的动作最终仍走同一套执行代码，权限不比口令表大。
+    读法与站内其它插件一致：`app.sdk.config.settings` 取 `LLM_*`，交给
+    `app.agent.llm.LLMHelper.get_llm(...)`（这是个协程，而调用方可能在同步线程里，
+    所以自己兜一个事件循环跑完）。宿主缺件、没配 key/模型都只回一句话说明，
+    不抛异常 —— AI 是口令表之外的一个入口，不该把语音链路拖下水。
+    """
+
+    def __init__(self, timeout: int = 6) -> None:
+        self.timeout = max(2, min(int(timeout or 6), 30))
+        self.settings, self.error = self._read()
+
+    def call(self, value: Any) -> Any:
+        """跑掉宿主返回的协程。测试里换成同步实现，就能替掉整条 LLM 通路。"""
+        return self._resolve(value)
+
+    @staticmethod
+    def _read() -> Tuple[Optional[Dict[str, Any]], str]:
+        try:
+            from app.sdk.config import settings
+        except Exception as exc:  # pragma: no cover - 宿主结构变化时只降级
+            return None, f"读不到 MoviePilot 的智能助手配置：{exc}"
+        config = {
+            "provider": getattr(settings, "LLM_PROVIDER", None) or "openai",
+            "model": str(getattr(settings, "LLM_MODEL", "") or "").strip(),
+            "api_key": str(getattr(settings, "LLM_API_KEY", "") or "").strip(),
+            "base_url": getattr(settings, "LLM_BASE_URL", None),
+            "base_url_preset": getattr(settings, "LLM_BASE_URL_PRESET", None),
+            "api_protocol": getattr(settings, "LLM_API_PROTOCOL", None),
+            "user_agent": getattr(settings, "LLM_USER_AGENT", None),
+            "use_proxy": getattr(settings, "LLM_USE_PROXY", True),
+            "thinking_level": getattr(settings, "LLM_THINKING_LEVEL", None),
+        }
+        if not config["api_key"]:
+            return None, "MoviePilot 未配置智能助手的 API Key（设定 → AI 大模型）"
+        if not config["model"]:
+            return None, "MoviePilot 未配置智能助手的模型"
+        return config, ""
+
+    @property
+    def available(self) -> bool:
+        return self.settings is not None
+
+    def describe(self) -> Dict[str, Any]:
+        """给状态面板的四项：用的是哪家模型，或者为什么不能用（键名与 ConfigOut 同）。"""
+        if not self.available:
+            return {"ai_ready": False, "ai_provider": "", "ai_model": "",
+                    "ai_message": self.error}
+        return {"ai_ready": True,
+                "ai_provider": str(self.settings.get("provider") or ""),
+                "ai_model": str(self.settings.get("model") or ""),
+                "ai_message": "使用 MoviePilot 智能助手"}
+
+    def ask(self, system: str, user: str,
+            history: Optional[List[Dict[str, str]]] = None,
+            temperature: Optional[float] = None) -> str:
+        """一次系统提示 + 用户话的问答；失败回空串，语音链路不接受异常。"""
+        if not self.available:
+            return ""
+        try:
+            from app.agent.llm import LLMHelper
+            from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+        except Exception:  # pragma: no cover - 宿主没装 LLM 依赖
+            self.error = "宿主未安装智能助手依赖（app.agent.llm / langchain）"
+            return ""
+        messages: List[Any] = [SystemMessage(content=system)]
+        for turn in history or []:
+            role = str(turn.get("role") or "")
+            content = str(turn.get("content") or "")
+            if not content:
+                continue
+            if role == "assistant":
+                messages.append(AIMessage(content=content))
+            elif role == "user":
+                messages.append(HumanMessage(content=content))
+        messages.append(HumanMessage(content=user))
+        kwargs = dict(self.settings)
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        # 宿主 get_llm 不收 response_format：要 JSON 全靠提示词约束，_parse 也容得下围栏与散文。
+        try:
+            text = self.call(self._invoke(LLMHelper, messages, kwargs))
+        except Exception as exc:
+            self.error = f"智能助手调用失败：{exc}"
+            text = ""
+        return str(text or "").strip()
+
+    async def _invoke(self, helper: Any, messages: List[Any],
+                      kwargs: Dict[str, Any]) -> str:
+        """建模型、限时取回复、把模型交还宿主：整段跑在 self.call 起的那个事件循环里。
+
+        超时用宿主自己的写法（asyncio.wait_for 包 ainvoke）：get_llm 没有 timeout 参数，
+        只有在这里等，配置页那项 ai_timeout 才真的管用。
+        """
+        llm = await helper.get_llm(streaming=False, **kwargs)
+        try:
+            response = await asyncio.wait_for(llm.ainvoke(messages), timeout=self.timeout)
+        finally:
+            closer = getattr(helper, "close_llm", None)
+            if callable(closer):
+                await closer(llm)
+        extract = getattr(helper, "extract_text_content", None)
+        content = getattr(response, "content", response)
+        if callable(extract):
+            return str(extract(content, fallback_to_string=True) or "")
+        return str(content or "")
+
+    @staticmethod
+    def _resolve(value: Any) -> Any:
+        """跑掉协程：没有事件循环就直接 asyncio.run，已经有了就另起一个循环。
+
+        语音监听在自己的线程里，正常走前者；从 API 线程进来时可能已经有 loop，
+        `asyncio.run` 在那个上下文里会直接报错，所以退到新建循环并关掉。
+        """
+        if not asyncio.iscoroutine(value):
+            return value
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(value)
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(value)
+        finally:
+            loop.close()
+
+
+class AIAnalyzer:
+    """把没命中口令表的话交给 MoviePilot 的智能助手判定意图。
+
+    只在配置里显式开了 `ai_enabled` 且宿主配好了助手时才启用；返回的动作必须落在
+    _AI_ACTIONS 里，置信度 low 或动作 unknown 一律当作没判出来。这是"多一个入口"
+    而不是"更聪明的匹配器"：模型给的动作最终仍走同一套执行代码，权限不比口令表大。
     """
 
     def __init__(self, config: Dict[str, Any]) -> None:
-        self.api_url = str(config.get("api_url") or "").rstrip("/")
-        self.api_key = str(config.get("api_key") or "")
-        self.model = str(config.get("model") or "qwen-flash")
-        try:
-            self.timeout = max(2, min(int(config.get("timeout") or 6), 30))
-        except (TypeError, ValueError):
-            self.timeout = 6
+        self.assistant = config.get("assistant") \
+            if isinstance(config.get("assistant"), Assistant) else Assistant(
+                int(config.get("timeout") or 6))
 
     @property
     def enabled(self) -> bool:
-        return bool(self.api_key and self.api_url)
+        return bool(self.assistant.available)
 
     def analyze(self, text: str) -> Optional[Match]:
         """没命中口令表时的一句话 → 意图。判不出来就回 None，让上层说"没听懂"。"""
-        content = self._post([{"role": "system", "content": _SYSTEM_PROMPT},
-                              {"role": "user", "content": text}],
-                            response_format={"type": "json_object"}, temperature=0)
+        content = self.assistant.ask(_SYSTEM_PROMPT, text, temperature=0)
         return self._parse(_content_json(content), text)
 
     def chat(self, text: str, history: Optional[List[Dict[str, str]]] = None) -> str:
         """AI 对话：把这句话当聊天而不是命令，回一段要播报的话。
 
-        与 `analyze` 同一条网络通路、同一个开关，只是提示词不同；上限压到 120 字，
+        与 `analyze` 同一个助手、同一个开关，只是提示词不同；上限压到 120 字，
         因为 TTS 播长段落时音箱会占用声道很久，用户已经走开了还在念。
         """
-        content = self._post([{"role": "system", "content": _CHAT_PROMPT},
-                              *(history or []),
-                              {"role": "user", "content": text}],
-                             temperature=0.7)
+        content = self.assistant.ask(_CHAT_PROMPT, text, history=history, temperature=0.7)
         if not content:
             return ""
         return " ".join(str(content).split())[:120]
-
-    def _post(self, messages: List[Dict[str, str]], **extra: Any) -> str:
-        """发一次 chat/completions，失败回空串（语音链路不接受异常）。"""
-        if not self.enabled:
-            return ""
-        try:  # 宿主网络层由插件传入，这里只做请求体与结果判定
-            from app.sdk.network import RequestUtils
-        except Exception:  # pragma: no cover - 宿主缺件时直接不启用
-            return ""
-        payload = {"model": self.model, "messages": messages}
-        payload.update({key: value for key, value in extra.items() if value is not None})
-        try:
-            response = RequestUtils(headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}",
-            }, timeout=self.timeout).post_dict(
-                f"{self.api_url}/chat/completions", data=json.dumps(payload))
-        except Exception:
-            return ""
-        if not isinstance(response, dict):
-            return ""
-        try:
-            return str((((response.get("choices") or [{}])[0])
-                        .get("message") or {}).get("content") or "")
-        except (AttributeError, IndexError, TypeError):
-            return ""
 
     @staticmethod
     def _parse(content: Any, raw: str) -> Optional[Match]:

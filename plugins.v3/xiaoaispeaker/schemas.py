@@ -173,10 +173,12 @@ class ConfigOut(BaseModel):
     voice_memory: bool = True
     ai_enabled: bool = False
     ai_chat: bool = False
-    ai_api_url: str = ""
-    ai_key_set: bool = False
-    ai_model: str = ""
     ai_timeout: int = 6
+    # 这三项不是配置，是宿主「设定 → AI 大模型」的读数：插件不另配一份 key
+    ai_ready: bool = False
+    ai_provider: str = ""
+    ai_model: str = ""
+    ai_message: str = ""
     library_limit: int = 10000
     library_refresh: int = 60
 
@@ -184,10 +186,14 @@ class ConfigOut(BaseModel):
 class ConfigIn(BaseModel):
     """配置写入：字段缺省（不出现在 body 里）时保留原值。
 
-    「启用插件」与「显示侧栏入口」不在这里改：那两项要宿主重新注册服务与导航，
-    只有在插件管理页保存才会走到那条链路。
+    `enabled` 就是宿主眼里的「插件已启用」—— 它读的是 `get_state()`，而 `get_state()`
+    取这一项，所以「启用插件」「显示发现侧栏入口」只能在这里改：插件管理页那个开关写的是
+    宿主自己的实例记录，插不进插件的 `get_state()`，只在那儿打开不会出现侧栏，也不会登记
+    周期任务。保存后插件主动喊一次 `update_plugin_job` 让宿主重建任务。
     """
 
+    enabled: Optional[bool] = None
+    show_sidebar_nav: Optional[bool] = None
     username: Optional[str] = None
     password: Optional[str] = None
     default_device_id: Optional[str] = None
@@ -211,9 +217,6 @@ class ConfigIn(BaseModel):
     voice_memory: Optional[bool] = None
     ai_enabled: Optional[bool] = None
     ai_chat: Optional[bool] = None
-    ai_api_url: Optional[str] = None
-    ai_api_key: Optional[str] = None
-    ai_model: Optional[str] = None
     ai_timeout: Optional[int] = None
     library_limit: Optional[int] = None
     library_refresh: Optional[int] = None
