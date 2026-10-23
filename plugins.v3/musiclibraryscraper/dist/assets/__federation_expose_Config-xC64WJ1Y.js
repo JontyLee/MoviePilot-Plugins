@@ -57,7 +57,9 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       mtw_username: "",
       mtw_password: "",
       mtw_resource: [],
-      min_score: 3
+      min_score: 3,
+      // 缺失时主动去内置识别源拉歌词回填，默认关闭；关闭时歌词仍由宿主 lrclib / AMLL 取
+      fill_lyrics: false
     };
     function toResourceList(value) {
       const raw = Array.isArray(value) ? value : String(value ?? "").split(/[;,]/);
@@ -176,7 +178,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               _: 1
             }),
             _createElementVNode("div", _hoisted_2, [
-              _cache[13] || (_cache[13] = _createElementVNode("div", { class: "text-h6" }, "MusicTagWeb音乐库刮削 · 配置", -1)),
+              _cache[14] || (_cache[14] = _createElementVNode("div", { class: "text-h6" }, "MusicTagWeb音乐库刮削 · 配置", -1)),
               _createElementVNode("div", _hoisted_3, _toDisplayString(currentPane.value.desc), 1)
             ]),
             _createVNode(_component_v_spacer),
@@ -258,7 +260,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   density: "compact",
                   class: "mt-3"
                 }, {
-                  default: _withCtx(() => [..._cache[14] || (_cache[14] = [
+                  default: _withCtx(() => [..._cache[15] || (_cache[15] = [
                     _createElementVNode("div", { class: "text-body-2" }, "写进文件就回不去的三件事", -1),
                     _createElementVNode("ul", { class: "mls-list" }, [
                       _createElementVNode("li", null, "「最低匹配分数」调到 1 表示曲名对上就写入，翻唱、钢琴版、纯音乐同名都会被当成 原曲写进文件，且无法回滚。"),
@@ -309,11 +311,11 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                 }),
                 _createElementVNode("div", _hoisted_15, [
                   _createElementVNode("div", _hoisted_16, "写入模式 · " + _toDisplayString(modeNote.value), 1),
-                  _cache[15] || (_cache[15] = _createElementVNode("div", { class: "text-caption text-grey" }, " 只补缺：曲名+艺人+专辑+内嵌封面 四项齐全的文件按 mtime+size 记账直接跳过（一个检索请求都不发）， 缺哪项补哪项，已有非空标签保持不动，手工修改不会被覆盖。 ", -1)),
-                  _cache[16] || (_cache[16] = _createElementVNode("div", { class: "text-caption text-grey" }, " 强制覆盖：每轮忽略增量账、全库重扫重问，候选与现有标签不同就重写，封面重新下载内嵌、歌词强制重写。 候选里没有的字段不会清空，插件不认识的自定义注释字段也不会删。 ", -1)),
-                  _cache[17] || (_cache[17] = _createElementVNode("div", { class: "text-caption text-grey" }, " 最终是否覆盖还取宿主「设置 → 媒体刮削」音乐三项策略与这里的较强者：宿主标签策略=覆盖时， 即使这里选只补缺也会重写；=跳过时，两种模式都不写该项。宿主默认 标签仅缺失、封面仅缺失、歌词更优才换。 ", -1))
+                  _cache[16] || (_cache[16] = _createElementVNode("div", { class: "text-caption text-grey" }, " 只补缺：曲名+艺人+专辑+内嵌封面 四项齐全的文件按 mtime+size 记账直接跳过（一个检索请求都不发）， 缺哪项补哪项，已有非空标签保持不动，手工修改不会被覆盖。 ", -1)),
+                  _cache[17] || (_cache[17] = _createElementVNode("div", { class: "text-caption text-grey" }, " 强制覆盖：每轮忽略增量账、全库重扫重问，候选与现有标签不同就重写，封面重新下载内嵌、歌词强制重写。 候选里没有的字段不会清空，插件不认识的自定义注释字段也不会删。 ", -1)),
+                  _cache[18] || (_cache[18] = _createElementVNode("div", { class: "text-caption text-grey" }, " 最终是否覆盖还取宿主「设置 → 媒体刮削」音乐三项策略与这里的较强者：宿主标签策略=覆盖时， 即使这里选只补缺也会重写；=跳过时，两种模式都不写该项。宿主默认 标签仅缺失、封面仅缺失、歌词更优才换。 ", -1))
                 ]),
-                _cache[18] || (_cache[18] = _createElementVNode("div", { class: "mls-block" }, [
+                _cache[19] || (_cache[19] = _createElementVNode("div", { class: "mls-block" }, [
                   _createElementVNode("div", { class: "mls-block-title" }, "执行周期"),
                   _createElementVNode("div", { class: "text-caption text-grey" }, " 留空按默认 0 3 * * sun（每周日 03:00）。星期编号按宿主的调度器算：0=周一…6=周日、7 视作周日， 和 crontab 的 0/7=周日 差一位；保存后数据页概览会回显「下次触发在周几」，以它为准。 "),
                   _createElementVNode("div", { class: "text-caption text-grey" }, " 非法表达式不会让插件挂掉：会记一条日志并回落默认值，但你自己配的时刻会一起丢掉。 ")
@@ -431,9 +433,18 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   ]),
                   _: 1
                 }),
+                _createVNode(_component_v_switch, {
+                  modelValue: config.value.fill_lyrics,
+                  "onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => config.value.fill_lyrics = $event),
+                  label: "缺失时主动抓取歌词回填（仅内置源 netease / qmusic）",
+                  "hide-details": "",
+                  color: "primary",
+                  inset: "",
+                  class: "mt-1"
+                }, null, 8, ["modelValue"]),
                 _createVNode(_component_v_select, {
                   modelValue: config.value.mtw_resource,
-                  "onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => config.value.mtw_resource = $event),
+                  "onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => config.value.mtw_resource = $event),
                   items: resourceItems.value,
                   label: isMtw.value ? "MTW 识别源（可多选，留空=全部）" : "内置识别源（可多选，留空=全部）",
                   multiple: "",
@@ -444,12 +455,12 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                 }, null, 8, ["modelValue", "items", "label"]),
                 _createElementVNode("div", _hoisted_18, _toDisplayString(sourceNote.value) + "。", 1),
                 _createElementVNode("div", _hoisted_19, [
-                  _cache[19] || (_cache[19] = _createElementVNode("div", { class: "mls-block-title" }, "元数据来源", -1)),
+                  _cache[20] || (_cache[20] = _createElementVNode("div", { class: "mls-block-title" }, "元数据来源", -1)),
                   _createElementVNode("div", _hoisted_20, " 内置源：插件自己直连 " + _toDisplayString(builtinResourceItems.length) + " 个音乐平台的公开检索接口 （" + _toDisplayString(builtinResourceItems.map((i) => i.value).join(" / ")) + "），不需要为刮削单独部署 Music Tag Web； 发给平台的只有清洗后的「曲名-艺人」检索词，库内路径不出本机。 ", 1),
-                  _cache[20] || (_cache[20] = _createElementVNode("div", { class: "text-caption text-grey" }, " Music Tag Web：沿用 MTW 的识别结果，除了内置那几个源，还能用酷我与 smart_tag。 已经部署了 MTW 的装机选这条（或保持「自动」）行为与之前完全一致； 这条会把库内完整路径作为参考一起发给 MTW，所以 MTW 与 MP 必须挂同一份库。 ", -1)),
-                  _cache[21] || (_cache[21] = _createElementVNode("div", { class: "text-caption text-grey" }, " 两种来源都不请求歌词：歌词由宿主刮削链自己取（lrclib / AMLL）。 qq / spotify / acoustid / all 实测恒返回空候选，两种来源都没有列进来。 ", -1))
+                  _cache[21] || (_cache[21] = _createElementVNode("div", { class: "text-caption text-grey" }, " Music Tag Web：沿用 MTW 的识别结果，除了内置那几个源，还能用酷我与 smart_tag。 已经部署了 MTW 的装机选这条（或保持「自动」）行为与之前完全一致； 这条会把库内完整路径作为参考一起发给 MTW，所以 MTW 与 MP 必须挂同一份库。 ", -1)),
+                  _cache[22] || (_cache[22] = _createElementVNode("div", { class: "text-caption text-grey" }, " 歌词回填开关默认关闭：歌词仍由宿主刮削链自己取（lrclib / AMLL）。 打开后只在内置源模式下生效 —— 选中候选缺歌词时，插件主动从 netease / qmusic 抓歌词回填（MTW 模式无此能力）。 qq / spotify / acoustid / all 实测恒返回空候选，两种来源都没有列进来。 ", -1))
                 ]),
-                _cache[22] || (_cache[22] = _createElementVNode("div", { class: "mls-block" }, [
+                _cache[23] || (_cache[23] = _createElementVNode("div", { class: "mls-block" }, [
                   _createElementVNode("div", { class: "mls-block-title" }, "查询与选取"),
                   _createElementVNode("div", { class: "text-caption text-grey" }, " 每个文件按源顺序逐源查询，某源出现 3/3 满分候选就立刻停止，不再问后面的源；都没满分则合并所有候选取最高分。 分数为曲名 / 艺人 / 专辑 各 1 分（先做繁简与大小写归一，互相包含即算命中）；同分时按源顺序、同源内按来源 返回顺序取第一个。最高分仍低于「最低匹配分数」（默认 3，即要求三项全中）就记为失败、不写入。 "),
                   _createElementVNode("div", { class: "text-caption text-grey" }, " 这个阈值只在 1-3 之间生效，越界会按最近的一界执行。用于匹配的本地身份优先读文件已有的 tag， 缺哪项就按 艺人/专辑 (年)/NN - 曲名 的目录结构兜底；只有严格位于「音乐库路径」之下的目录才算艺人/专辑， 库根本身的名字不参与猜测 —— 猜不出来就留空，宁可判「未达阈值」也不拿目录名凑一个假身份去改写标签。 ")
@@ -460,7 +471,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               _withDirectives(_createElementVNode("div", _hoisted_21, [
                 _createVNode(_component_v_textarea, {
                   modelValue: config.value.scraper_paths,
-                  "onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => config.value.scraper_paths = $event),
+                  "onUpdate:modelValue": _cache[11] || (_cache[11] = ($event) => config.value.scraper_paths = $event),
                   rows: 7,
                   label: "音乐库路径（一行一个目录）",
                   placeholder: "/media/music/周杰伦\n/media/music",
@@ -468,13 +479,13 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                 }, null, 8, ["modelValue"]),
                 _createVNode(_component_v_textarea, {
                   modelValue: config.value.exclude_paths,
-                  "onUpdate:modelValue": _cache[11] || (_cache[11] = ($event) => config.value.exclude_paths = $event),
+                  "onUpdate:modelValue": _cache[12] || (_cache[12] = ($event) => config.value.exclude_paths = $event),
                   rows: 3,
                   label: "排除路径",
                   "hide-details": "",
                   class: "mt-2"
                 }, null, 8, ["modelValue"]),
-                _cache[23] || (_cache[23] = _createElementVNode("div", { class: "mls-block" }, [
+                _cache[24] || (_cache[24] = _createElementVNode("div", { class: "mls-block" }, [
                   _createElementVNode("div", { class: "mls-block-title" }, "会处理的文件"),
                   _createElementVNode("div", { class: "text-caption text-grey" }, " 只扫描宿主音频白名单（设置 → 媒体刮削 → 音频扩展名）与本插件支持列表的交集：宿主不收的扩展名写标签时 会被原生刮削链直接拒成「刮削路径中没有支持的音频文件」，先排除掉才不会白打请求、又把文件记成失败并烧满重试次数。 "),
                   _createElementVNode("div", { class: "text-caption text-grey" }, " Jellyfin 的 .trickplay 预览缓存目录整棵跳过；目录软链不跟随，避免回环目录把这一轮卡死。 指向库外的音频软链同样会跳过并在日志里报数量 —— 写标签是按路径落到真实文件的， 让扫描改到音乐库之外的文件不可接受；确有需要请把它指向的目录也加进库路径。 "),
@@ -491,9 +502,9 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               variant: "text",
               class: "text-none",
               "prepend-icon": "mdi-database-eye-outline",
-              onClick: _cache[12] || (_cache[12] = ($event) => emit("switch"))
+              onClick: _cache[13] || (_cache[13] = ($event) => emit("switch"))
             }, {
-              default: _withCtx(() => [..._cache[24] || (_cache[24] = [
+              default: _withCtx(() => [..._cache[25] || (_cache[25] = [
                 _createTextVNode(" 查看数据页 ", -1)
               ])]),
               _: 1
@@ -506,7 +517,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               class: "text-none",
               onClick: saveConfig
             }, {
-              default: _withCtx(() => [..._cache[25] || (_cache[25] = [
+              default: _withCtx(() => [..._cache[26] || (_cache[26] = [
                 _createTextVNode(" 保存配置 ", -1)
               ])]),
               _: 1
@@ -519,6 +530,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const Config = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-65b694dc"]]);
+const Config = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-e362d896"]]);
 
 export { Config as default };

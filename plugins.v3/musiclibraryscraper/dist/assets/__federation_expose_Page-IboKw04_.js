@@ -104,7 +104,8 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
     const buckets = [
       { key: "done", label: "已处理", icon: "mdi-check-circle-outline", hint: "已经写好标签的文件（本轮与往轮累计）" },
       { key: "failed", label: "失败待重试", icon: "mdi-alert-circle-outline", hint: "没查到或没达阈值，下一轮还会再试" },
-      { key: "pending", label: "待处理", icon: "mdi-progress-clock", hint: "账本里没有、下一轮要问的文件" }
+      { key: "pending", label: "待处理", icon: "mdi-progress-clock", hint: "账本里没有、下一轮要问的文件" },
+      { key: "deficient", label: "有缺项", icon: "mdi-file-document-alert-outline", hint: "已处理但封面/歌词等仍缺失，可单项编辑补齐" }
     ];
     const pageText = computed(() => {
       if (!total.value) return "共 0 条";
@@ -115,7 +116,8 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
     const STATUS_TEXT = {
       done: "已处理",
       failed: "失败",
-      pending: "待处理"
+      pending: "待处理",
+      deficient: "有缺项"
     };
     const SOURCE_TEXT = {
       netease: "网易云",
@@ -262,6 +264,59 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
         busy.value = false;
       }
     }
+    const editDialog = ref(false);
+    const editRow = ref(null);
+    const editForm = ref({ title: "", artist: "", album: "", year: "", tracknumber: "", lyrics: "" });
+    function openEdit(row) {
+      editRow.value = row;
+      editForm.value = {
+        title: row.title ?? "",
+        artist: row.artist ?? "",
+        album: row.album ?? "",
+        year: row.year ?? "",
+        tracknumber: row.tracknumber ?? "",
+        lyrics: row.lyrics ?? ""
+      };
+      editDialog.value = true;
+    }
+    async function submitEdit() {
+      if (!editRow.value) return;
+      const fields = {};
+      for (const [key, value] of Object.entries(editForm.value)) {
+        const text = String(value ?? "").trim();
+        if (text) fields[key] = text;
+      }
+      if (!Object.keys(fields).length) {
+        notify("没有可写入的字段", "warning");
+        return;
+      }
+      busy.value = true;
+      try {
+        const res = await props.api.post(`${base.value}/edit`, {
+          path: editRow.value.path,
+          fields
+        });
+        if (res?.accepted) {
+          notify("已保存并清除缺项标记", "success");
+          editDialog.value = false;
+          await refresh();
+        } else if (res?.reason === "out_of_library") {
+          notify("该文件不在媒体库内，无法写入", "warning");
+        } else if (res?.reason === "invalid_fields") {
+          notify("字段不合法或为空", "warning");
+        } else if (res?.reason === "write_failed") {
+          notify("写标签失败，检查文件权限", "error");
+        } else if (res?.reason === "no_path") {
+          notify("缺少文件路径", "warning");
+        } else {
+          notify("保存失败", "error");
+        }
+      } catch (e) {
+        notify(`保存失败：${e?.message || e}`, "error");
+      } finally {
+        busy.value = false;
+      }
+    }
     function onPage(nextPage) {
       page.value = Math.max(1, nextPage);
       offset.value = (page.value - 1) * limit.value;
@@ -319,7 +374,8 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
         key: b.key,
         title: b.label,
         icon: b.icon,
-        badge: b.key === "failed" ? Number(counts.value.failed ?? 0) : b.key === "done" ? Number(counts.value.done ?? 0) : 0
+        // 有缺项也挂数字：这一桶要人逐个进来补，不标数量就看不出还剩多少没处理。
+        badge: b.key === "failed" ? Number(counts.value.failed ?? 0) : b.key === "deficient" ? Number(counts.value.deficient ?? 0) : b.key === "done" ? Number(counts.value.done ?? 0) : 0
       }))
     ]);
     const sourceNames = computed(
@@ -347,6 +403,11 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       const _component_v_text_field = _resolveComponent("v-text-field");
       const _component_v_data_table_server = _resolveComponent("v-data-table-server");
       const _component_v_snackbar = _resolveComponent("v-snackbar");
+      const _component_v_card_title = _resolveComponent("v-card-title");
+      const _component_v_card_subtitle = _resolveComponent("v-card-subtitle");
+      const _component_v_textarea = _resolveComponent("v-textarea");
+      const _component_v_card_actions = _resolveComponent("v-card-actions");
+      const _component_v_dialog = _resolveComponent("v-dialog");
       return _openBlock(), _createBlock(_component_v_card, {
         flat: "",
         class: "mls-page"
@@ -368,7 +429,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               ]),
               _: 1
             }),
-            _cache[10] || (_cache[10] = _createElementVNode("div", { class: "mls-head-text" }, [
+            _cache[18] || (_cache[18] = _createElementVNode("div", { class: "mls-head-text" }, [
               _createElementVNode("div", { class: "text-h6" }, "MusicTagWeb音乐库刮削"),
               _createElementVNode("div", { class: "text-caption text-medium-emphasis" }, " 枚举库内音频 → 读本地身份 → 逐源检索 → 打分定阈值 → 宿主原生写入 → 记账 ")
             ], -1)),
@@ -381,7 +442,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               "prepend-icon": "mdi-progress-clock",
               class: "mr-2"
             }, {
-              default: _withCtx(() => [..._cache[7] || (_cache[7] = [
+              default: _withCtx(() => [..._cache[15] || (_cache[15] = [
                 _createTextVNode(" 扫描进行中 ", -1)
               ])]),
               _: 1
@@ -394,7 +455,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               "prepend-icon": "mdi-cog-outline",
               onClick: _cache[0] || (_cache[0] = ($event) => emit("switch"))
             }, {
-              default: _withCtx(() => [..._cache[8] || (_cache[8] = [
+              default: _withCtx(() => [..._cache[16] || (_cache[16] = [
                 _createTextVNode("配置", -1)
               ])]),
               _: 1
@@ -407,7 +468,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               "prepend-icon": "mdi-refresh",
               onClick: refresh
             }, {
-              default: _withCtx(() => [..._cache[9] || (_cache[9] = [
+              default: _withCtx(() => [..._cache[17] || (_cache[17] = [
                 _createTextVNode("刷新", -1)
               ])]),
               _: 1
@@ -442,7 +503,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                           key: 0,
                           size: "x-small",
                           variant: "tonal",
-                          color: item.key === "failed" ? "warning" : "grey"
+                          color: item.key === "failed" ? "warning" : item.key === "deficient" ? "info" : "grey"
                         }, {
                           default: _withCtx(() => [
                             _createTextVNode(_toDisplayString(item.badge), 1)
@@ -481,7 +542,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                           default: _withCtx(() => [
                             _createVNode(_component_v_card_text, { class: "py-2" }, {
                               default: _withCtx(() => [
-                                _cache[11] || (_cache[11] = _createElementVNode("div", { class: "text-caption" }, "已处理", -1)),
+                                _cache[19] || (_cache[19] = _createElementVNode("div", { class: "text-caption" }, "已处理", -1)),
                                 _createElementVNode("div", _hoisted_6, _toDisplayString(counts.value.done ?? 0), 1)
                               ]),
                               _: 1
@@ -504,7 +565,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                           default: _withCtx(() => [
                             _createVNode(_component_v_card_text, { class: "py-2" }, {
                               default: _withCtx(() => [
-                                _cache[12] || (_cache[12] = _createElementVNode("div", { class: "text-caption" }, "待重试", -1)),
+                                _cache[20] || (_cache[20] = _createElementVNode("div", { class: "text-caption" }, "待重试", -1)),
                                 _createElementVNode("div", _hoisted_7, _toDisplayString(counts.value.retryable ?? 0), 1)
                               ]),
                               _: 1
@@ -527,7 +588,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                           default: _withCtx(() => [
                             _createVNode(_component_v_card_text, { class: "py-2" }, {
                               default: _withCtx(() => [
-                                _cache[13] || (_cache[13] = _createElementVNode("div", { class: "text-caption" }, "超限放弃", -1)),
+                                _cache[21] || (_cache[21] = _createElementVNode("div", { class: "text-caption" }, "超限放弃", -1)),
                                 _createElementVNode("div", _hoisted_8, _toDisplayString(counts.value.exhausted ?? 0), 1)
                               ]),
                               _: 1
@@ -550,7 +611,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                           default: _withCtx(() => [
                             _createVNode(_component_v_card_text, { class: "py-2" }, {
                               default: _withCtx(() => [
-                                _cache[14] || (_cache[14] = _createElementVNode("div", { class: "text-caption" }, "待处理", -1)),
+                                _cache[22] || (_cache[22] = _createElementVNode("div", { class: "text-caption" }, "待处理", -1)),
                                 _createElementVNode("div", _hoisted_9, _toDisplayString(counts.value.pending_unknown ?? 0), 1)
                               ]),
                               _: 1
@@ -565,7 +626,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   _: 1
                 }),
                 _createElementVNode("div", _hoisted_10, [
-                  _cache[16] || (_cache[16] = _createElementVNode("div", { class: "mls-section-title" }, "最近一轮", -1)),
+                  _cache[24] || (_cache[24] = _createElementVNode("div", { class: "mls-section-title" }, "最近一轮", -1)),
                   _createVNode(_component_v_row, { dense: "" }, {
                     default: _withCtx(() => [
                       _createVNode(_component_v_col, {
@@ -602,7 +663,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                             class: "pa-3 mls-fill"
                           }, {
                             default: _withCtx(() => [
-                              _cache[15] || (_cache[15] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mb-1" }, "本轮生效的配置", -1)),
+                              _cache[23] || (_cache[23] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mb-1" }, "本轮生效的配置", -1)),
                               _createElementVNode("div", _hoisted_17, _toDisplayString(cfg.value.mode === "force_all" ? "强制覆盖" : "只补缺") + "｜最低匹配分数 " + _toDisplayString(cfg.value.min_score) + "｜" + _toDisplayString(sourceNames.value), 1),
                               _createElementVNode("div", _hoisted_18, [
                                 _createTextVNode(" 识别来源 " + _toDisplayString(cfg.value.backend_label || "自动") + " ", 1),
@@ -625,7 +686,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   })
                 ]),
                 failureReasons.value.length ? (_openBlock(), _createElementBlock("div", _hoisted_21, [
-                  _cache[17] || (_cache[17] = _createElementVNode("div", { class: "mls-section-title" }, "失败原因分布", -1)),
+                  _cache[25] || (_cache[25] = _createElementVNode("div", { class: "mls-section-title" }, "失败原因分布", -1)),
                   _createVNode(_component_v_card, {
                     variant: "outlined",
                     class: "mls-reason"
@@ -643,10 +704,10 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     ]),
                     _: 1
                   }),
-                  _cache[18] || (_cache[18] = _createElementVNode("div", { class: "text-caption text-grey mt-1" }, " 原因里写了差哪一项：「曲名/艺人/专辑未对上」可以调「最低匹配分数」或改文件名； 「本地无某项」是文件本身没给出这个信息（整张 CD 压成一个 wav），降阈值也救不回来， 应该把它排出扫描范围。超限的用「重试全部失败」再试。 ", -1))
+                  _cache[26] || (_cache[26] = _createElementVNode("div", { class: "text-caption text-grey mt-1" }, " 原因里写了差哪一项：「曲名/艺人/专辑未对上」可以调「最低匹配分数」或改文件名； 「本地无某项」是文件本身没给出这个信息（整张 CD 压成一个 wav），降阈值也救不回来， 应该把它排出扫描范围。超限的用「重试全部失败」再试。 ", -1))
                 ])) : _createCommentVNode("", true),
                 _createElementVNode("div", _hoisted_24, [
-                  _cache[19] || (_cache[19] = _createElementVNode("div", { class: "mls-section-title" }, "流水线", -1)),
+                  _cache[27] || (_cache[27] = _createElementVNode("div", { class: "mls-section-title" }, "流水线", -1)),
                   _createElementVNode("div", _hoisted_25, [
                     (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(_unref(FLOW_STEPS), (step, i) => {
                       return _openBlock(), _createElementBlock("div", {
@@ -678,7 +739,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     loading: busy.value,
                     onClick: retryAllFailed
                   }, {
-                    default: _withCtx(() => [..._cache[20] || (_cache[20] = [
+                    default: _withCtx(() => [..._cache[28] || (_cache[28] = [
                       _createTextVNode("重试全部失败", -1)
                     ])]),
                     _: 1
@@ -690,7 +751,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     loading: busy.value,
                     onClick: _cache[1] || (_cache[1] = ($event) => scanNow(false))
                   }, {
-                    default: _withCtx(() => [..._cache[21] || (_cache[21] = [
+                    default: _withCtx(() => [..._cache[29] || (_cache[29] = [
                       _createTextVNode("增量扫描", -1)
                     ])]),
                     _: 1
@@ -702,7 +763,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     loading: busy.value,
                     onClick: _cache[2] || (_cache[2] = ($event) => scanNow(true))
                   }, {
-                    default: _withCtx(() => [..._cache[22] || (_cache[22] = [
+                    default: _withCtx(() => [..._cache[30] || (_cache[30] = [
                       _createTextVNode("全量覆盖", -1)
                     ])]),
                     _: 1
@@ -736,7 +797,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     loading: busy.value,
                     onClick: retryAllFailed
                   }, {
-                    default: _withCtx(() => [..._cache[23] || (_cache[23] = [
+                    default: _withCtx(() => [..._cache[31] || (_cache[31] = [
                       _createTextVNode("重试全部失败", -1)
                     ])]),
                     _: 1
@@ -748,7 +809,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     loading: busy.value,
                     onClick: _cache[4] || (_cache[4] = ($event) => scanNow(false))
                   }, {
-                    default: _withCtx(() => [..._cache[24] || (_cache[24] = [
+                    default: _withCtx(() => [..._cache[32] || (_cache[32] = [
                       _createTextVNode("增量扫描", -1)
                     ])]),
                     _: 1
@@ -760,7 +821,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     loading: busy.value,
                     onClick: _cache[5] || (_cache[5] = ($event) => scanNow(true))
                   }, {
-                    default: _withCtx(() => [..._cache[25] || (_cache[25] = [
+                    default: _withCtx(() => [..._cache[33] || (_cache[33] = [
                       _createTextVNode("全量覆盖", -1)
                     ])]),
                     _: 1
@@ -774,7 +835,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     { title: "重试", key: "retries", width: 70, sortable: false },
                     { title: "大小", key: "size", width: 90, sortable: false },
                     { title: "修改时间", key: "mtime", width: 180, sortable: false },
-                    { title: "操作", key: "actions", sortable: false, width: 90 }
+                    { title: "操作", key: "actions", sortable: false, width: 140 }
                   ],
                   items: rows.value,
                   "items-length": total.value,
@@ -799,7 +860,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     _createVNode(_component_v_chip, {
                       size: "x-small",
                       variant: "tonal",
-                      color: item.status === "done" ? "success" : item.status === "failed" ? "error" : "grey"
+                      color: item.status === "done" ? "success" : item.status === "failed" ? "error" : item.status === "deficient" ? "info" : "grey"
                     }, {
                       default: _withCtx(() => [
                         _createTextVNode(_toDisplayString(statusText(item.status)), 1)
@@ -818,20 +879,33 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     _createTextVNode(_toDisplayString(fmtSize(item.size)), 1)
                   ]),
                   "item.actions": _withCtx(({ item }) => [
-                    _createVNode(_component_v_btn, {
+                    item.status === "deficient" ? (_openBlock(), _createBlock(_component_v_btn, {
+                      key: 0,
+                      size: "x-small",
+                      variant: "text",
+                      color: "primary",
+                      loading: busy.value,
+                      onClick: ($event) => openEdit(item)
+                    }, {
+                      default: _withCtx(() => [..._cache[34] || (_cache[34] = [
+                        _createTextVNode("编辑", -1)
+                      ])]),
+                      _: 1
+                    }, 8, ["loading", "onClick"])) : (_openBlock(), _createBlock(_component_v_btn, {
+                      key: 1,
                       size: "x-small",
                       variant: "text",
                       color: "primary",
                       loading: busy.value,
                       onClick: ($event) => retryRow(item)
                     }, {
-                      default: _withCtx(() => [..._cache[26] || (_cache[26] = [
+                      default: _withCtx(() => [..._cache[35] || (_cache[35] = [
                         _createTextVNode("重试", -1)
                       ])]),
                       _: 1
-                    }, 8, ["loading", "onClick"])
+                    }, 8, ["loading", "onClick"]))
                   ]),
-                  "no-data": _withCtx(() => [..._cache[27] || (_cache[27] = [
+                  "no-data": _withCtx(() => [..._cache[36] || (_cache[36] = [
                     _createElementVNode("div", { class: "text-center pa-6 text-grey" }, "该桶暂无数据", -1)
                   ])]),
                   _: 1
@@ -850,7 +924,109 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               _createTextVNode(_toDisplayString(snackbar.value.text), 1)
             ]),
             _: 1
-          }, 8, ["modelValue", "color"])
+          }, 8, ["modelValue", "color"]),
+          _createVNode(_component_v_dialog, {
+            modelValue: editDialog.value,
+            "onUpdate:modelValue": _cache[14] || (_cache[14] = ($event) => editDialog.value = $event),
+            "max-width": "560px"
+          }, {
+            default: _withCtx(() => [
+              _createVNode(_component_v_card, null, {
+                default: _withCtx(() => [
+                  _createVNode(_component_v_card_title, { class: "text-h6" }, {
+                    default: _withCtx(() => [..._cache[37] || (_cache[37] = [
+                      _createTextVNode("补齐缺项", -1)
+                    ])]),
+                    _: 1
+                  }),
+                  _createVNode(_component_v_card_subtitle, { class: "text-truncate" }, {
+                    default: _withCtx(() => [
+                      _createTextVNode(_toDisplayString(editRow.value?.name), 1)
+                    ]),
+                    _: 1
+                  }),
+                  _createVNode(_component_v_card_text, null, {
+                    default: _withCtx(() => [
+                      _createVNode(_component_v_text_field, {
+                        modelValue: editForm.value.title,
+                        "onUpdate:modelValue": _cache[7] || (_cache[7] = ($event) => editForm.value.title = $event),
+                        label: "曲名",
+                        density: "compact",
+                        class: "mb-1"
+                      }, null, 8, ["modelValue"]),
+                      _createVNode(_component_v_text_field, {
+                        modelValue: editForm.value.artist,
+                        "onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => editForm.value.artist = $event),
+                        label: "艺人",
+                        density: "compact",
+                        class: "mb-1"
+                      }, null, 8, ["modelValue"]),
+                      _createVNode(_component_v_text_field, {
+                        modelValue: editForm.value.album,
+                        "onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => editForm.value.album = $event),
+                        label: "专辑",
+                        density: "compact",
+                        class: "mb-1"
+                      }, null, 8, ["modelValue"]),
+                      _createVNode(_component_v_text_field, {
+                        modelValue: editForm.value.year,
+                        "onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => editForm.value.year = $event),
+                        label: "年份",
+                        density: "compact",
+                        class: "mb-1"
+                      }, null, 8, ["modelValue"]),
+                      _createVNode(_component_v_text_field, {
+                        modelValue: editForm.value.tracknumber,
+                        "onUpdate:modelValue": _cache[11] || (_cache[11] = ($event) => editForm.value.tracknumber = $event),
+                        label: "音轨号",
+                        density: "compact",
+                        class: "mb-1"
+                      }, null, 8, ["modelValue"]),
+                      _createVNode(_component_v_textarea, {
+                        modelValue: editForm.value.lyrics,
+                        "onUpdate:modelValue": _cache[12] || (_cache[12] = ($event) => editForm.value.lyrics = $event),
+                        label: "歌词",
+                        density: "compact",
+                        rows: "4",
+                        "auto-grow": ""
+                      }, null, 8, ["modelValue"])
+                    ]),
+                    _: 1
+                  }),
+                  _createVNode(_component_v_card_actions, null, {
+                    default: _withCtx(() => [
+                      _createVNode(_component_v_spacer),
+                      _createVNode(_component_v_btn, {
+                        variant: "text",
+                        class: "text-none",
+                        onClick: _cache[13] || (_cache[13] = ($event) => editDialog.value = false)
+                      }, {
+                        default: _withCtx(() => [..._cache[38] || (_cache[38] = [
+                          _createTextVNode("取消", -1)
+                        ])]),
+                        _: 1
+                      }),
+                      _createVNode(_component_v_btn, {
+                        variant: "flat",
+                        color: "primary",
+                        class: "text-none",
+                        loading: busy.value,
+                        onClick: submitEdit
+                      }, {
+                        default: _withCtx(() => [..._cache[39] || (_cache[39] = [
+                          _createTextVNode("保存", -1)
+                        ])]),
+                        _: 1
+                      }, 8, ["loading"])
+                    ]),
+                    _: 1
+                  })
+                ]),
+                _: 1
+              })
+            ]),
+            _: 1
+          }, 8, ["modelValue"])
         ]),
         _: 1
       });
@@ -858,6 +1034,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const Page = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-dac80d3c"]]);
+const Page = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-ab1e3b0e"]]);
 
 export { Page as default };
