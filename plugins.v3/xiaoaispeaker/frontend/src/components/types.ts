@@ -81,7 +81,9 @@ export interface Search {
 export interface PluginConfig {
   enabled: boolean
   show_sidebar_nav: boolean
+  // 掩码账号（13****34 / ab***@example.com），接口不给明文
   username: string
+  username_set: boolean
   password_set: boolean
   default_device_id: string
   music_dirs: string

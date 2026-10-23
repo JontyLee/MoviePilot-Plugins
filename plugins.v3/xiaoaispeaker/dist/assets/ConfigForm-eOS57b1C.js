@@ -136,7 +136,9 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
         ...form.value,
         enabled: !!c.enabled,
         show_sidebar_nav: c.show_sidebar_nav !== false,
-        username: c.username || "",
+        // 服务端回的是掩码（13****34），填进输入框就成了「把掩码存成账号」：这里只留空，
+        // 已存账号用占位符提示，要换才输入
+        username: "",
         // 密码永不回显：留空即「不改动」，由服务端的 if password 判掉
         password: "",
         default_device_id: c.default_device_id || "",
@@ -178,6 +180,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       try {
         const body = { ...form.value };
         if (!body.password) delete body.password;
+        if (!body.username) delete body.username;
         fillFromStatus(await props.api.post(`${base.value}/config`, body));
         notify("配置已保存", "success");
         emit("saved");
@@ -280,8 +283,10 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       modelValue: form.value.username,
                       "onUpdate:modelValue": _cache[2] || (_cache[2] = ($event) => form.value.username = $event),
                       label: "小米账号（手机号 / 邮箱 / 账号ID）",
-                      "hide-details": ""
-                    }, null, 8, ["modelValue"])
+                      placeholder: cfg.value?.username_set ? cfg.value.username : "",
+                      hint: cfg.value?.username_set ? `已保存：${cfg.value.username}，留空即不修改` : "留空即不修改",
+                      "persistent-hint": ""
+                    }, null, 8, ["modelValue", "placeholder", "hint"])
                   ]),
                   _: 1
                 }),
@@ -295,8 +300,9 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       "onUpdate:modelValue": _cache[3] || (_cache[3] = ($event) => form.value.password = $event),
                       type: form.value.password ? "text" : "password",
                       label: cfg.value?.password_set ? "密码（留空保留已存的）" : "密码",
-                      "hide-details": ""
-                    }, null, 8, ["modelValue", "type", "label"])
+                      hint: cfg.value?.password_set ? "已保存密码，接口永不回显" : "只在首次填写",
+                      "persistent-hint": ""
+                    }, null, 8, ["modelValue", "type", "label", "hint"])
                   ]),
                   _: 1
                 })
@@ -755,6 +761,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const ConfigForm = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-f8f2cee5"]]);
+const ConfigForm = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-2a554835"]]);
 
 export { ConfigForm as C };

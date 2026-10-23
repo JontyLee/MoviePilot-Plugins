@@ -142,11 +142,13 @@ class PlayOut(BaseModel):
 
 
 class ConfigOut(BaseModel):
-    """配置回显：密码与票据只回「是否已设置」，不回明文。"""
+    """配置回显：密码与票据只回「是否已设置」，账号只回掩码形状。"""
 
     enabled: bool = False
     show_sidebar_nav: bool = True
+    # 掩码后的账号（13****34 / ab***@example.com）：够认得出"存的是哪个"，不构成身份
     username: str = ""
+    username_set: bool = False
     password_set: bool = False
     default_device_id: str = ""
     music_dirs: str = ""
@@ -194,6 +196,7 @@ class ConfigIn(BaseModel):
 
     enabled: Optional[bool] = None
     show_sidebar_nav: Optional[bool] = None
+    # 账号只在用户真的改了那一格时才送：留空或送回来的是掩码，一律当作「不改」
     username: Optional[str] = None
     password: Optional[str] = None
     default_device_id: Optional[str] = None

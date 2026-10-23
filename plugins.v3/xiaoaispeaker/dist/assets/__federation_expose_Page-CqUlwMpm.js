@@ -4,38 +4,41 @@ import { _ as _export_sfc } from './_plugin-vue_export-helper-pcqpp-6-.js';
 
 const {defineComponent:_defineComponent} = await importShared('vue');
 
-const {resolveComponent:_resolveComponent,createVNode:_createVNode,withCtx:_withCtx,createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,createTextVNode:_createTextVNode,Fragment:_Fragment,openBlock:_openBlock,createElementBlock:_createElementBlock,createCommentVNode:_createCommentVNode,createBlock:_createBlock,renderList:_renderList,unref:_unref,withKeys:_withKeys,normalizeClass:_normalizeClass} = await importShared('vue');
+const {resolveComponent:_resolveComponent,createVNode:_createVNode,createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,createTextVNode:_createTextVNode,Fragment:_Fragment,openBlock:_openBlock,createElementBlock:_createElementBlock,createCommentVNode:_createCommentVNode,normalizeClass:_normalizeClass,withCtx:_withCtx,createBlock:_createBlock,renderList:_renderList,unref:_unref,withKeys:_withKeys} = await importShared('vue');
 
 const _hoisted_1 = { class: "xai-head" };
-const _hoisted_2 = { class: "xai-head-text" };
-const _hoisted_3 = { class: "text-caption text-medium-emphasis" };
-const _hoisted_4 = { class: "xai-body" };
-const _hoisted_5 = ["title"];
-const _hoisted_6 = { class: "text-caption text-grey" };
-const _hoisted_7 = {
+const _hoisted_2 = { class: "xai-mark" };
+const _hoisted_3 = { class: "xai-head-text" };
+const _hoisted_4 = { class: "xai-head-sub" };
+const _hoisted_5 = { class: "xai-body" };
+const _hoisted_6 = ["title"];
+const _hoisted_7 = { class: "text-caption text-grey" };
+const _hoisted_8 = {
   key: 0,
   class: "text-caption text-error"
 };
-const _hoisted_8 = {
-  class: "d-flex align-center mt-2",
-  style: { "gap": "6px", "flex-wrap": "wrap" }
+const _hoisted_9 = {
+  class: "d-flex align-center mt-3",
+  style: { "gap": "10px", "flex-wrap": "wrap" }
 };
-const _hoisted_9 = { class: "xai-row" };
-const _hoisted_10 = { class: "xai-title" };
-const _hoisted_11 = { class: "text-caption text-grey" };
-const _hoisted_12 = ["onClick"];
-const _hoisted_13 = { class: "xai-queue-index" };
-const _hoisted_14 = ["title"];
-const _hoisted_15 = { class: "text-caption text-grey" };
-const _hoisted_16 = {
+const _hoisted_10 = { class: "xai-transport" };
+const _hoisted_11 = { class: "xai-volume" };
+const _hoisted_12 = { class: "xai-row" };
+const _hoisted_13 = { class: "xai-title" };
+const _hoisted_14 = { class: "text-caption text-grey" };
+const _hoisted_15 = ["onClick"];
+const _hoisted_16 = { class: "xai-queue-index" };
+const _hoisted_17 = ["title"];
+const _hoisted_18 = { class: "text-caption text-grey" };
+const _hoisted_19 = {
   key: 1,
   class: "text-caption text-grey"
 };
-const _hoisted_17 = {
+const _hoisted_20 = {
   key: 2,
   class: "text-caption text-grey"
 };
-const _hoisted_18 = {
+const _hoisted_21 = {
   class: "text-body-2 text-truncate",
   style: { "flex": "1 1 auto" }
 };
@@ -135,15 +138,13 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
     });
     return (_ctx, _cache) => {
       const _component_v_icon = _resolveComponent("v-icon");
-      const _component_v_avatar = _resolveComponent("v-avatar");
       const _component_v_spacer = _resolveComponent("v-spacer");
-      const _component_v_chip = _resolveComponent("v-chip");
       const _component_v_btn = _resolveComponent("v-btn");
-      const _component_v_divider = _resolveComponent("v-divider");
       const _component_v_alert = _resolveComponent("v-alert");
       const _component_v_slider = _resolveComponent("v-slider");
       const _component_v_card = _resolveComponent("v-card");
       const _component_v_text_field = _resolveComponent("v-text-field");
+      const _component_v_chip = _resolveComponent("v-chip");
       const _component_v_snackbar = _resolveComponent("v-snackbar");
       return _openBlock(), _createBlock(_component_v_card, {
         flat: "",
@@ -151,24 +152,15 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       }, {
         default: _withCtx(() => [
           _createElementVNode("div", _hoisted_1, [
-            _createVNode(_component_v_avatar, {
-              color: "primary",
-              variant: "tonal",
-              rounded: "lg",
-              size: "32",
-              class: "mr-3"
-            }, {
-              default: _withCtx(() => [
-                _createVNode(_component_v_icon, {
-                  icon: "mdi-speaker",
-                  size: "20"
-                })
-              ]),
-              _: 1
-            }),
-            _createElementVNode("div", _hoisted_2, [
-              _cache[9] || (_cache[9] = _createElementVNode("div", { class: "text-subtitle-1" }, "小爱音箱", -1)),
-              _createElementVNode("div", _hoisted_3, [
+            _createElementVNode("span", _hoisted_2, [
+              _createVNode(_component_v_icon, {
+                icon: playing.value?.status === 1 ? "mdi-speaker-wireless" : "mdi-speaker",
+                size: "18"
+              }, null, 8, ["icon"])
+            ]),
+            _createElementVNode("div", _hoisted_3, [
+              _cache[9] || (_cache[9] = _createElementVNode("div", { class: "xai-head-title" }, "小爱音箱", -1)),
+              _createElementVNode("div", _hoisted_4, [
                 status.value?.logged_in ? (_openBlock(), _createElementBlock(_Fragment, { key: 0 }, [
                   _createTextVNode(_toDisplayString(cfg.value?.username || "已登录") + "｜" + _toDisplayString(devices.value.length) + " 台设备", 1)
                 ], 64)) : (_openBlock(), _createElementBlock(_Fragment, { key: 1 }, [
@@ -177,12 +169,15 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               ])
             ]),
             _createVNode(_component_v_spacer),
-            status.value?.token_expired ? (_openBlock(), _createBlock(_component_v_chip, {
+            _createElementVNode("span", {
+              class: _normalizeClass(["xai-pill", playing.value?.status === 1 ? "xai-pill-ok" : "xai-pill-idle"])
+            }, _toDisplayString(playing.value?.status_text || "未知"), 3),
+            status.value?.token_expired ? (_openBlock(), _createBlock(_component_v_btn, {
               key: 0,
               size: "x-small",
-              variant: "tonal",
+              variant: "text",
               color: "error",
-              class: "mr-2"
+              class: "ml-1 text-none"
             }, {
               default: _withCtx(() => [..._cache[10] || (_cache[10] = [
                 _createTextVNode("票据过期", -1)
@@ -191,33 +186,20 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
             })) : _createCommentVNode("", true),
             props.showSwitch ? (_openBlock(), _createBlock(_component_v_btn, {
               key: 1,
-              size: "small",
+              icon: "mdi-cog-outline",
+              size: "x-small",
               variant: "text",
-              class: "text-none",
-              "prepend-icon": "mdi-cog-outline",
               onClick: _cache[0] || (_cache[0] = ($event) => emit("switch"))
-            }, {
-              default: _withCtx(() => [..._cache[11] || (_cache[11] = [
-                _createTextVNode("配置", -1)
-              ])]),
-              _: 1
             })) : _createCommentVNode("", true),
             _createVNode(_component_v_btn, {
-              size: "small",
+              icon: "mdi-refresh",
+              size: "x-small",
               variant: "text",
-              class: "text-none",
               loading: !!busy.value,
-              "prepend-icon": "mdi-refresh",
               onClick: _cache[1] || (_cache[1] = ($event) => loadStatus())
-            }, {
-              default: _withCtx(() => [..._cache[12] || (_cache[12] = [
-                _createTextVNode("刷新", -1)
-              ])]),
-              _: 1
-            }, 8, ["loading"])
+            }, null, 8, ["loading"])
           ]),
-          _createVNode(_component_v_divider),
-          _createElementVNode("div", _hoisted_4, [
+          _createElementVNode("div", _hoisted_5, [
             (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(status.value?.needs || [], (item) => {
               return _openBlock(), _createBlock(_component_v_alert, {
                 key: item,
@@ -233,15 +215,15 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               }, 1024);
             }), 128)),
             _createVNode(_component_v_card, {
-              variant: "outlined",
-              class: "pa-3"
+              variant: "flat",
+              class: "xai-hero pa-4"
             }, {
               default: _withCtx(() => [
                 _createElementVNode("div", {
-                  class: "text-body-2 text-truncate",
+                  class: "xai-hero-title text-truncate",
                   title: playing.value?.title || playing.value?.path
-                }, _toDisplayString(playing.value?.title || playing.value?.path || playing.value?.url || "当前没有在播放"), 9, _hoisted_5),
-                _createElementVNode("div", _hoisted_6, [
+                }, _toDisplayString(playing.value?.title || playing.value?.path || playing.value?.url || "当前没有在播放"), 9, _hoisted_6),
+                _createElementVNode("div", _hoisted_7, [
                   _createTextVNode(_toDisplayString(playing.value?.device_name || "无设备") + "｜" + _toDisplayString(playing.value?.status_text || "未知") + " ", 1),
                   playing.value?.volume !== null && playing.value?.volume !== void 0 ? (_openBlock(), _createElementBlock(_Fragment, { key: 0 }, [
                     _createTextVNode(" ｜音量 " + _toDisplayString(playing.value?.volume), 1)
@@ -250,65 +232,73 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     _createTextVNode(" ｜" + _toDisplayString(_unref(fmtSeconds)(playing.value?.position)) + " / " + _toDisplayString(_unref(fmtSeconds)(playing.value?.duration)), 1)
                   ], 64)) : _createCommentVNode("", true)
                 ]),
-                playing.value?.error ? (_openBlock(), _createElementBlock("div", _hoisted_7, _toDisplayString(playing.value.error), 1)) : _createCommentVNode("", true),
-                _createElementVNode("div", _hoisted_8, [
-                  _createVNode(_component_v_btn, {
-                    size: "small",
-                    variant: "tonal",
-                    icon: "mdi-previous",
-                    loading: busy.value === "播放控制",
-                    onClick: _cache[2] || (_cache[2] = ($event) => control("prev"))
-                  }, null, 8, ["loading"]),
-                  _createVNode(_component_v_btn, {
-                    size: "small",
-                    color: "primary",
-                    variant: "flat",
-                    icon: playing.value?.status === 1 ? "mdi-pause" : "mdi-play",
-                    loading: busy.value === "播放控制",
-                    onClick: _cache[3] || (_cache[3] = ($event) => control(playing.value?.status === 1 ? "pause" : "play"))
-                  }, null, 8, ["icon", "loading"]),
-                  _createVNode(_component_v_btn, {
-                    size: "small",
-                    variant: "tonal",
-                    icon: "mdi-skip-next",
-                    loading: busy.value === "播放控制",
-                    onClick: _cache[4] || (_cache[4] = ($event) => control("next"))
-                  }, null, 8, ["loading"]),
-                  _createVNode(_component_v_btn, {
-                    size: "small",
-                    variant: "tonal",
-                    color: "error",
-                    icon: "mdi-stop",
-                    loading: busy.value === "播放控制",
-                    onClick: _cache[5] || (_cache[5] = ($event) => control("stop"))
-                  }, null, 8, ["loading"]),
-                  _createVNode(_component_v_spacer),
-                  _createVNode(_component_v_slider, {
-                    modelValue: volume.value,
-                    "onUpdate:modelValue": _cache[6] || (_cache[6] = ($event) => volume.value = $event),
-                    min: "0",
-                    max: "100",
-                    step: "1",
-                    "hide-details": "",
-                    density: "compact",
-                    style: { "max-width": "130px" }
-                  }, null, 8, ["modelValue"]),
-                  _createVNode(_component_v_btn, {
-                    size: "x-small",
-                    variant: "text",
-                    loading: busy.value === "设置音量",
-                    onClick: setVolume
-                  }, {
-                    default: _withCtx(() => [..._cache[13] || (_cache[13] = [
-                      _createTextVNode("设音量", -1)
-                    ])]),
-                    _: 1
-                  }, 8, ["loading"])
+                playing.value?.error ? (_openBlock(), _createElementBlock("div", _hoisted_8, _toDisplayString(playing.value.error), 1)) : _createCommentVNode("", true),
+                _createElementVNode("div", _hoisted_9, [
+                  _createElementVNode("div", _hoisted_10, [
+                    _createVNode(_component_v_btn, {
+                      size: "x-small",
+                      variant: "text",
+                      icon: "mdi-previous-variant",
+                      loading: busy.value === "播放控制",
+                      onClick: _cache[2] || (_cache[2] = ($event) => control("prev"))
+                    }, null, 8, ["loading"]),
+                    _createVNode(_component_v_btn, {
+                      class: "xai-transport-main",
+                      color: "primary",
+                      variant: "flat",
+                      rounded: "circle",
+                      icon: playing.value?.status === 1 ? "mdi-pause" : "mdi-play",
+                      loading: busy.value === "播放控制",
+                      onClick: _cache[3] || (_cache[3] = ($event) => control(playing.value?.status === 1 ? "pause" : "play"))
+                    }, null, 8, ["icon", "loading"]),
+                    _createVNode(_component_v_btn, {
+                      size: "x-small",
+                      variant: "text",
+                      icon: "mdi-skip-next-circle-outline",
+                      loading: busy.value === "播放控制",
+                      onClick: _cache[4] || (_cache[4] = ($event) => control("next"))
+                    }, null, 8, ["loading"]),
+                    _createVNode(_component_v_btn, {
+                      size: "x-small",
+                      variant: "text",
+                      color: "error",
+                      icon: "mdi-stop-circle-outline",
+                      loading: busy.value === "播放控制",
+                      onClick: _cache[5] || (_cache[5] = ($event) => control("stop"))
+                    }, null, 8, ["loading"])
+                  ]),
+                  _createElementVNode("div", _hoisted_11, [
+                    _createVNode(_component_v_icon, {
+                      icon: "mdi-volume-low",
+                      size: "15",
+                      class: "mr-1"
+                    }),
+                    _createVNode(_component_v_slider, {
+                      modelValue: volume.value,
+                      "onUpdate:modelValue": _cache[6] || (_cache[6] = ($event) => volume.value = $event),
+                      min: "0",
+                      max: "100",
+                      step: "1",
+                      "hide-details": "",
+                      density: "compact"
+                    }, null, 8, ["modelValue"]),
+                    _createVNode(_component_v_btn, {
+                      size: "x-small",
+                      variant: "text",
+                      loading: busy.value === "设置音量",
+                      onClick: setVolume
+                    }, {
+                      default: _withCtx(() => [..._cache[11] || (_cache[11] = [
+                        _createTextVNode("设音量", -1)
+                      ])]),
+                      _: 1
+                    }, 8, ["loading"])
+                  ])
                 ])
               ]),
               _: 1
             }),
-            _createElementVNode("div", _hoisted_9, [
+            _createElementVNode("div", _hoisted_12, [
               _createVNode(_component_v_text_field, {
                 modelValue: keyword.value,
                 "onUpdate:modelValue": _cache[7] || (_cache[7] = ($event) => keyword.value = $event),
@@ -326,15 +316,15 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                 loading: busy.value === "播放",
                 onClick: playKeyword
               }, {
-                default: _withCtx(() => [..._cache[14] || (_cache[14] = [
+                default: _withCtx(() => [..._cache[12] || (_cache[12] = [
                   _createTextVNode("播放", -1)
                 ])]),
                 _: 1
               }, 8, ["loading"])
             ]),
-            _createElementVNode("div", _hoisted_10, [
-              _cache[15] || (_cache[15] = _createTextVNode(" 队列 ", -1)),
-              _createElementVNode("span", _hoisted_11, _toDisplayString(queue.value?.total || 0) + " 首", 1),
+            _createElementVNode("div", _hoisted_13, [
+              _cache[13] || (_cache[13] = _createTextVNode(" 队列 ", -1)),
+              _createElementVNode("span", _hoisted_14, _toDisplayString(queue.value?.total || 0) + " 首", 1),
               _createVNode(_component_v_chip, {
                 size: "x-small",
                 variant: "tonal",
@@ -358,19 +348,19 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     class: _normalizeClass(["xai-queue-row", { "xai-queue-current": i === queue.value?.index }]),
                     onClick: ($event) => control(String(i))
                   }, [
-                    _createElementVNode("span", _hoisted_13, _toDisplayString(i + 1), 1),
+                    _createElementVNode("span", _hoisted_16, _toDisplayString(i + 1), 1),
                     _createElementVNode("span", {
                       class: "xai-queue-name",
                       title: item.path
-                    }, _toDisplayString(item.title || item.name), 9, _hoisted_14),
-                    _createElementVNode("span", _hoisted_15, _toDisplayString(_unref(fmtSize)(item.size)), 1)
-                  ], 10, _hoisted_12);
+                    }, _toDisplayString(item.title || item.name), 9, _hoisted_17),
+                    _createElementVNode("span", _hoisted_18, _toDisplayString(_unref(fmtSize)(item.size)), 1)
+                  ], 10, _hoisted_15);
                 }), 128))
               ]),
               _: 1
-            })) : (_openBlock(), _createElementBlock("div", _hoisted_16, "队列为空（侧栏页可以从音乐库目录或搜索结果建队列）。")),
-            _cache[18] || (_cache[18] = _createElementVNode("div", { class: "xai-title" }, "设备", -1)),
-            !devices.value.length ? (_openBlock(), _createElementBlock("div", _hoisted_17, _toDisplayString(status.value?.logged_in ? "没有取到设备，可在侧栏页刷新设备列表。" : "登录后才会列出音箱。"), 1)) : _createCommentVNode("", true),
+            })) : (_openBlock(), _createElementBlock("div", _hoisted_19, "队列为空（侧栏页可以从音乐库目录或搜索结果建队列）。")),
+            _cache[16] || (_cache[16] = _createElementVNode("div", { class: "xai-title" }, "设备", -1)),
+            !devices.value.length ? (_openBlock(), _createElementBlock("div", _hoisted_20, _toDisplayString(status.value?.logged_in ? "没有取到设备，可在侧栏页刷新设备列表。" : "登录后才会列出音箱。"), 1)) : _createCommentVNode("", true),
             (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(devices.value, (device) => {
               return _openBlock(), _createElementBlock("div", {
                 key: device.device_id,
@@ -381,14 +371,14 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   size: "18",
                   color: device.presence === "online" ? "success" : "grey"
                 }, null, 8, ["icon", "color"]),
-                _createElementVNode("span", _hoisted_18, _toDisplayString(device.name || device.alias || device.device_id), 1),
+                _createElementVNode("span", _hoisted_21, _toDisplayString(device.name || device.alias || device.device_id), 1),
                 device.is_default ? (_openBlock(), _createBlock(_component_v_chip, {
                   key: 0,
                   size: "x-small",
                   variant: "flat",
                   color: "primary"
                 }, {
-                  default: _withCtx(() => [..._cache[16] || (_cache[16] = [
+                  default: _withCtx(() => [..._cache[14] || (_cache[14] = [
                     _createTextVNode("默认", -1)
                   ])]),
                   _: 1
@@ -410,14 +400,14 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   loading: busy.value === "设为默认",
                   onClick: ($event) => selectDevice(device)
                 }, {
-                  default: _withCtx(() => [..._cache[17] || (_cache[17] = [
+                  default: _withCtx(() => [..._cache[15] || (_cache[15] = [
                     _createTextVNode("设为默认", -1)
                   ])]),
                   _: 1
                 }, 8, ["disabled", "loading", "onClick"])
               ]);
             }), 128)),
-            _cache[19] || (_cache[19] = _createElementVNode("div", { class: "text-caption text-grey mt-3" }, " 库内浏览、整目录入队与播报在侧栏「小爱音箱」页面；外部直链推送同样在那里。 ", -1))
+            _cache[17] || (_cache[17] = _createElementVNode("div", { class: "text-caption text-grey mt-3" }, " 库内浏览、整目录入队与播报在侧栏「小爱音箱」页面；外部直链推送同样在那里。 ", -1))
           ]),
           _createVNode(_component_v_snackbar, {
             modelValue: snackbar.value.show,
@@ -438,6 +428,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const Page = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-3d8a4ff7"]]);
+const Page = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-61641a37"]]);
 
 export { Page as default };

@@ -656,10 +656,70 @@ class PluginConfigTest(unittest.TestCase):
                                          "expires_at": time.time() + 3600}},
         })
         dumped = json.dumps(plugin._status().model_dump(), ensure_ascii=False)
-        for secret in ("secret", "PASSSECRET9", "CUSECRET9", "STSECRET9", "SSECURITY9"):
+        for secret in ("secret", "me@example.com", "PASSSECRET9", "CUSECRET9",
+                       "STSECRET9", "SSECURITY9"):
             self.assertNotIn(secret, dumped)
         for key in ("service_token", "pass_token", "ssecurity", "password"):
             self.assertNotIn(f'"{key}"', dumped)
+
+    def test_account_is_echoed_masked(self) -> None:
+        """账号只回掩码：侧栏每 5 秒轮一次状态，明文等于把手机号挂在页面上。"""
+        plugin = _plugin()
+        cfg = plugin._status().config
+        self.assertEqual(cfg.username, "me***@example.com")
+        self.assertTrue(cfg.username_set)
+        self.assertEqual(plugin._mask_account("13800138000"), "13****00")
+        self.assertEqual(plugin._mask_account("123456789"), "12****89")
+        self.assertEqual(plugin._mask_account(""), "")
+
+    def test_masked_account_round_trip_does_not_overwrite_the_real_one(self) -> None:
+        plugin = _plugin()
+        plugin.api_config(x.schemas.ConfigIn(username="me***@example.com"))
+        self.assertEqual(plugin._configs[-1]["username"], "me@example.com")
+        plugin.api_config(x.schemas.ConfigIn(username="other@example.com"))
+        self.assertEqual(plugin._configs[-1]["username"], "other@example.com")
+
+    def test_login_flow_runs_through_the_login_lock(self) -> None:
+        """整条登录链路的回归：`with self._login_lock():` 把锁当方法调用，每次登录 500。"""
+        def handler(method, url, body):
+            if "serviceLogin?" in url:
+                return _Resp(payload={"code": 0, "sid": "micoapi", "_sign": "SIGN",
+                                      "qs": "http://qs", "callback": "http://cb"})
+            if "serviceLoginAuth2" in url:
+                return _Resp(payload={"location": "/pass/rsn1", "ssecurity": "SS",
+                                      "userId": "7", "nonce": "1"}, prefixed=True)
+            return _Resp(status=302, headers={"Location": "https://api2.mina.mi.com/redirect",
+                                              "Set-Cookie": "serviceToken=NEWTOKEN; Path=/"})
+
+        plugin = _plugin()
+        plugin._client = lambda: (_FakeClient(devices=[_device()]), "")
+        with _NetworkPatch(handler):
+            out = plugin.api_login(x.schemas.LoginIn(username="me@example.com", password="pass"))
+        self.assertEqual(out.state, mina.LOGIN_SUCCESS, out.message)
+        self.assertTrue(out.logged_in)
+        self.assertEqual(out.device_count, 1)
+        self.assertEqual(plugin.get_data("token")["user_id"], "7")
+
+    def test_login_failure_comes_back_as_a_message_not_an_exception(self) -> None:
+        plugin = _plugin()
+        original = x.XiaoaiAuth
+
+        class _Boom:
+            username = "me@example.com"
+
+            def __init__(self, username: str, password: str) -> None:
+                pass
+
+            def login(self):
+                raise RuntimeError("小米返回了看不懂的页面")
+
+        x.XiaoaiAuth = _Boom
+        try:
+            out = plugin.api_login(x.schemas.LoginIn(username="me@example.com", password="pass"))
+        finally:
+            x.XiaoaiAuth = original
+        self.assertEqual(out.state, "failed")
+        self.assertIn("看不懂的页面", out.message)
 
     def test_sidebar_nav_and_service_gating(self) -> None:
         plugin = _plugin()

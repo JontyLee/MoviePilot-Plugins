@@ -78,7 +78,7 @@ const EMPTY_STATUS: Status = {
     mode: 'order'
   },
   config: {
-    enabled: false, show_sidebar_nav: true, username: '', password_set: false,
+    enabled: false, show_sidebar_nav: true, username: '', username_set: false, password_set: false,
     default_device_id: '', music_dirs: '', dir_count: 0, missing_dirs: [],
     base_url: '', base_url_effective: '', base_url_source: '', play_mode: 'auto',
     audio_exts: '', audio_id: '', stream_ttl: 3600, default_volume: 0,
@@ -108,6 +108,16 @@ const queue = computed(() => status.value.queue)
 const devices = computed<Device[]>(() => status.value.devices || [])
 const needs = computed(() => status.value.needs || [])
 const notices = computed(() => status.value.notices || [])
+
+// 顶栏那颗「最后同步」的相对时间：轮询每 5 秒动一次 syncedAt，读数就跟着走
+const syncedAt = ref(0)
+const syncText = computed(() => {
+  if (!syncedAt.value) return '尚未同步'
+  const diff = Math.max(0, Math.round((Date.now() - syncedAt.value) / 1000))
+  if (diff < 5) return '刚刚同步'
+  if (diff < 60) return `${diff} 秒前同步`
+  return `${Math.round(diff / 60)} 分钟前同步`
+})
 
 // 睡眠定时、索引概况、监听概况都搭在 /status.extra 里一起回来：首屏与轮询都能看到，
 // 不必为这三块各发一次请求。单独取详情时才走各自的端点。
@@ -147,6 +157,7 @@ function notify(msg: string, color = 'info') {
 async function loadStatus(showError = true) {
   try {
     status.value = await (props.api as MoviePilotApi).get(`${base.value}/status`)
+    syncedAt.value = Date.now()
     if (!volumeTouched.value) {
       volume.value = playing.value.volume ?? cfg.value.default_volume ?? 50
     }
@@ -916,38 +927,50 @@ const paneItems: { key: Pane; title: string; icon: string; desc: string }[] = [
 ]
 
 const currentPane = computed(() => paneItems.find(p => p.key === pane.value) || paneItems[0])
+
+// 侧栏条目右边的小数字：一眼能看出「有几台音箱」「队列里堆了多少首」「监听抓了几句」，
+// 0 就不显示，免得整列都是灰色的零
+function paneBadge(key: Pane): number {
+  if (key === 'account') return devices.value.length
+  if (key === 'play') return queue.value.total || 0
+  if (key === 'voice') return voice.value.handled || 0
+  return 0
+}
 </script>
 
 <template>
   <v-card flat class="xai-page">
     <div class="xai-head">
-      <v-avatar color="primary" variant="tonal" rounded="lg" size="34" class="mr-3">
-        <v-icon icon="mdi-speaker" size="22" />
-      </v-avatar>
-      <div class="xai-head-text">
-        <div class="text-h6">小爱音箱</div>
-        <div class="text-caption text-medium-emphasis">
-          库内音频直链推送到小爱音箱 · v{{ status.version || '-' }}
+      <div class="xai-brand">
+        <span class="xai-brand-mark">
+          <v-icon :icon="playing.status === 1 ? 'mdi-speaker-wireless' : 'mdi-speaker'" size="20" />
+        </span>
+        <div class="xai-brand-text">
+          <div class="xai-brand-title">小爱音箱</div>
+          <div class="xai-brand-sub">
+            库内音频直链推送 · v{{ status.version || '-' }} · {{ syncText }}
+          </div>
         </div>
       </div>
       <v-spacer />
-      <v-chip size="small" variant="tonal" class="mr-2"
-              :color="status.token_expired ? 'error' : status.logged_in ? 'success' : 'warning'"
-              :prepend-icon="status.logged_in ? 'mdi-check-circle-outline' : 'mdi-alert-circle-outline'">
-        {{ status.token_expired ? '票据已过期' : status.logged_in ? '已登录' : '未登录' }}
-      </v-chip>
-      <v-chip size="small" variant="tonal" class="mr-2"
-              :color="statusColor(playing.status)"
-              :prepend-icon="playing.status === 1 ? 'mdi-play-circle-outline' : 'mdi-pause-circle-outline'">
-        {{ playing.device_name || '无设备' }} · {{ playing.status_text }}
-      </v-chip>
-      <v-btn size="small" variant="text" class="text-none" :loading="loading || !!busy"
-             prepend-icon="mdi-refresh" @click="loadStatus()">刷新</v-btn>
+      <div class="xai-stats">
+        <span class="xai-pill" :class="`xai-pill-${status.token_expired ? 'error' : status.logged_in ? 'ok' : 'warn'}`">
+          <v-icon size="13"
+                  :icon="status.logged_in ? 'mdi-check-circle-outline' : 'mdi-alert-circle-outline'" />
+          {{ status.token_expired ? '票据过期' : status.logged_in ? '已登录' : '未登录' }}
+        </span>
+        <span class="xai-pill" :class="`xai-pill-${playing.status === 1 ? 'ok' : 'idle'}`">
+          <v-icon size="13"
+                  :icon="playing.status === 1 ? 'mdi-play' : 'mdi-pause'" />
+          {{ playing.device_name || '无设备' }} · {{ playing.status_text }}
+        </span>
+      </div>
+      <v-btn icon="mdi-refresh" size="small" variant="text" :loading="loading || !!busy"
+             @click="loadStatus()" />
     </div>
-    <v-divider />
 
     <v-alert v-if="needs.length || notices.length" type="info" variant="tonal"
-             density="compact" class="ma-3">
+             density="compact" class="xai-todo">
       <div v-for="item in needs" :key="'n' + item" class="text-body-2">
         <v-icon icon="mdi-form-select" size="14" class="mr-1" />{{ item }}
       </div>
@@ -958,7 +981,7 @@ const currentPane = computed(() => paneItems.find(p => p.key === pane.value) || 
 
     <div class="xai-body">
       <nav class="xai-nav">
-        <v-list density="comfortable" nav class="py-2">
+        <v-list density="compact" nav class="py-2">
           <v-list-item
             v-for="item in paneItems"
             :key="item.key"
@@ -968,53 +991,69 @@ const currentPane = computed(() => paneItems.find(p => p.key === pane.value) || 
             class="xai-nav-item"
             @click="switchPane(item.key)"
           >
-            <template #prepend><v-icon :icon="item.icon" class="mr-2" /></template>
+            <template #prepend><v-icon :icon="item.icon" class="mr-2" size="18" /></template>
             <v-list-item-title>{{ item.title }}</v-list-item-title>
+            <template #append>
+              <span v-if="paneBadge(item.key)" class="xai-nav-badge">{{ paneBadge(item.key) }}</span>
+            </template>
           </v-list-item>
         </v-list>
       </nav>
 
       <section class="xai-content">
-        <div class="xai-pane-title">{{ currentPane.desc }}</div>
+        <div class="xai-pane-title">
+          <span class="xai-pane-name">{{ currentPane.title }}</span>
+          <span class="xai-pane-desc">{{ currentPane.desc }}</span>
+        </div>
 
         <!-- 播放台 -->
         <div v-show="pane === 'play'" class="xai-pane">
-          <v-card variant="outlined" class="pa-4">
-            <div class="d-flex align-center" style="gap: 12px; flex-wrap: wrap">
-              <v-icon :icon="playing.status === 1 ? 'mdi-volume-high' : 'mdi-volume-variant-off'"
-                      size="34" :color="statusColor(playing.status)" />
-              <div style="min-width: 0; flex: 1 1 240px">
-                <div class="text-subtitle-1 text-truncate" :title="playing.title || playing.path">
+          <v-card variant="flat" class="xai-hero pa-5">
+            <div class="d-flex align-center" style="gap: 14px; flex-wrap: wrap">
+              <span class="xai-hero-mark" :class="{ 'xai-hero-live': playing.status === 1 }">
+                <v-icon :icon="playing.status === 1 ? 'mdi-volume-high' : 'mdi-volume-variant-off'"
+                        size="26" />
+              </span>
+              <div style="min-width: 0; flex: 1 1 260px">
+                <div class="xai-hero-title text-truncate" :title="playing.title || playing.path">
                   {{ playing.title || playing.path || playing.url || '音箱上没有在放的东西' }}
                 </div>
-                <div class="text-caption text-grey">
+                <div class="xai-hero-sub">
                   {{ playing.device_name || '未选择设备' }}
                   <template v-if="playing.source">｜来源 {{ playing.source }}</template>
                   <template v-if="playing.updated_at">｜{{ playing.updated_at }}</template>
                 </div>
                 <div v-if="playing.error" class="text-caption text-error">{{ playing.error }}</div>
               </div>
-              <div class="text-right">
-                <div class="text-caption text-grey">{{ fmtSeconds(playing.position) }} / {{ fmtSeconds(playing.duration) }}</div>
-                <v-chip size="x-small" variant="tonal" :color="statusColor(playing.status)">{{ playing.status_text }}</v-chip>
+              <div class="text-right xai-hero-time">
+                <div>{{ fmtSeconds(playing.position) }} <span>/ {{ fmtSeconds(playing.duration) }}</span></div>
+                <span class="xai-pill" :class="`xai-pill-${statusColor(playing.status) === 'success' ? 'ok' : 'idle'}`">
+                  {{ playing.status_text }}
+                </span>
               </div>
             </div>
-            <v-progress-linear :model-value="progress" height="4" color="primary" class="mt-3" rounded />
-            <div class="d-flex align-center mt-3" style="gap: 6px; flex-wrap: wrap">
-              <v-btn size="small" variant="tonal" prepend-icon="mdi-previous" :loading="busy === '播放控制'"
-                     @click="control('prev')">上一首</v-btn>
-              <v-btn size="small" color="primary" variant="flat" :icon="playing.status === 1 ? 'mdi-pause' : 'mdi-play'"
-                     :loading="busy === '播放控制'" @click="control(playing.status === 1 ? 'pause' : 'play')" />
-              <v-btn size="small" variant="tonal" append-icon="mdi-skip-next" :loading="busy === '播放控制'"
-                     @click="control('next')">下一首</v-btn>
-              <v-btn size="small" variant="tonal" color="error" prepend-icon="mdi-stop"
-                     :loading="busy === '播放控制'" @click="control('stop')">停止</v-btn>
-              <v-spacer />
-              <span class="text-caption text-grey">音量</span>
-              <v-slider v-model="volume" min="0" max="100" step="1" hide-details density="compact"
-                        style="max-width: 160px" @update:model-value="volumeTouched = true" />
-              <v-btn size="small" variant="tonal" :loading="busy === '设置音量'" @click="setVolume">设为
-                {{ Math.round(volume) }}</v-btn>
+            <v-progress-linear :model-value="progress" height="5" color="primary"
+                               class="mt-4 xai-hero-bar" rounded />
+            <div class="d-flex align-center mt-4" style="gap: 10px; flex-wrap: wrap">
+              <div class="xai-transport">
+                <v-btn icon="mdi-previous-variant" size="small" variant="text"
+                       :loading="busy === '播放控制'" @click="control('prev')" />
+                <v-btn class="xai-transport-main" color="primary" variant="flat" rounded="circle"
+                       :icon="playing.status === 1 ? 'mdi-pause' : 'mdi-play'"
+                       :loading="busy === '播放控制'"
+                       @click="control(playing.status === 1 ? 'pause' : 'play')" />
+                <v-btn icon="mdi-skip-next-circle-outline" size="small" variant="text"
+                       :loading="busy === '播放控制'" @click="control('next')" />
+                <v-btn icon="mdi-stop-circle-outline" size="small" variant="text" color="error"
+                       :loading="busy === '播放控制'" @click="control('stop')" />
+              </div>
+              <div class="xai-volume">
+                <v-icon icon="mdi-volume-low" size="16" class="mr-1" />
+                <v-slider v-model="volume" min="0" max="100" step="1" hide-details density="compact"
+                          @update:model-value="volumeTouched = true" />
+                <v-btn size="x-small" variant="tonal" :loading="busy === '设置音量'"
+                       @click="setVolume">设为 {{ Math.round(volume) }}</v-btn>
+              </div>
             </div>
             <div class="d-flex align-center mt-2 xai-modes">
               <span class="text-caption text-grey mr-1">播放方式</span>
@@ -1396,13 +1435,13 @@ const currentPane = computed(() => paneItems.find(p => p.key === pane.value) || 
               <v-checkbox v-model="taskForm.enabled" label="启用" density="compact" hide-details />
             </div>
 
-            <div v-if="taskForm.schedule.type === 'weekly'" class="xai-modes mt-2">
+            <div v-if="taskForm.schedule.type === 'weekly'" class="xai-days mt-2">
               <v-chip v-for="(label, day) in weekDays" :key="day" size="small" class="xai-mode"
                       :variant="taskForm.schedule.weekdays.includes(day) ? 'flat' : 'outlined'"
                       :color="taskForm.schedule.weekdays.includes(day) ? 'primary' : 'default'"
                       @click="toggleIn(taskForm.schedule.weekdays, day)">{{ label }}</v-chip>
             </div>
-            <div v-else class="xai-modes mt-2">
+            <div v-else class="xai-days mt-2">
               <v-chip v-for="day in monthDays" :key="day" size="small" class="xai-mode"
                       :variant="taskForm.schedule.monthdays.includes(day) ? 'flat' : 'outlined'"
                       :color="taskForm.schedule.monthdays.includes(day) ? 'primary' : 'default'"
@@ -1591,7 +1630,8 @@ const currentPane = computed(() => paneItems.find(p => p.key === pane.value) || 
 
             <div v-if="status.logged_in" class="d-flex align-center mb-3" style="gap: 8px; flex-wrap: wrap">
               <div class="text-body-2" style="flex: 1 1 220px">
-                {{ cfg.username || '（未记录账号名）' }}
+                {{ cfg.username_set ? cfg.username : '（未记录账号名）' }}
+                <span v-if="cfg.username_set" class="text-caption text-grey ml-1">已掩码</span>
                 <div class="text-caption text-grey">
                   票据保存于 {{ status.token_saved_at || '-' }}
                   <template v-if="status.manual_token">｜手工粘贴的 cookie</template>
@@ -1791,58 +1831,193 @@ const currentPane = computed(() => paneItems.find(p => p.key === pane.value) || 
 </template>
 
 <style scoped>
-/* 仅插件内局部样式；不得写全局 v- 或 mdi- 类规则（构建有 postcss 门禁）。 */
-.xai-page { width: 100%; }
-.xai-head { display: flex; align-items: center; gap: 8px; padding: 12px 16px; }
-.xai-head-text { min-width: 0; }
-.xai-body { display: flex; min-height: 440px; }
+/* 仅插件内局部样式；不得写全局 v- 或 mdi- 类规则（构建有 postcss 门禁，含 .v- 的选择器会被整条删掉）。
+   颜色一律取主程序的 --v-theme-* 变量，深色浅色都跟着宿主走。 */
+.xai-page {
+  width: 100%;
+  --xai-radius: 14px;
+  --xai-ink: rgba(var(--v-theme-on-surface), .92);
+  --xai-ink-soft: rgba(var(--v-theme-on-surface), .62);
+  --xai-ink-faint: rgba(var(--v-theme-on-surface), .42);
+  --xai-line: rgba(var(--v-border-color), var(--v-border-opacity));
+  --xai-veil: rgba(var(--v-theme-on-surface), .045);
+}
+
+/* ---------- 顶栏 ---------- */
+.xai-head {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--xai-line);
+  background: linear-gradient(180deg, var(--xai-veil), transparent);
+}
+.xai-brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.xai-brand-mark {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 38px; height: 38px; border-radius: 12px; flex: 0 0 auto;
+  color: rgb(var(--v-theme-primary));
+  background: rgba(var(--v-theme-primary), .14);
+  box-shadow: inset 0 0 0 1px rgba(var(--v-theme-primary), .18);
+}
+.xai-brand-text { min-width: 0; line-height: 1.25; }
+.xai-brand-title { font-size: 15px; font-weight: 650; letter-spacing: .2px; color: var(--xai-ink); }
+.xai-brand-sub { font-size: 11.5px; color: var(--xai-ink-faint); white-space: nowrap; }
+.xai-stats { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+/* 状态药丸：顶栏、播放台、详情页共用一套形状 */
+.xai-pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 22px; padding: 0 9px; border-radius: 999px;
+  font-size: 11.5px; font-weight: 500; white-space: nowrap;
+  border: 1px solid transparent;
+}
+.xai-pill-ok { color: rgb(var(--v-theme-success)); background: rgba(var(--v-theme-success), .12); border-color: rgba(var(--v-theme-success), .2); }
+.xai-pill-warn { color: rgb(var(--v-theme-warning)); background: rgba(var(--v-theme-warning), .12); border-color: rgba(var(--v-theme-warning), .2); }
+.xai-pill-error { color: rgb(var(--v-theme-error)); background: rgba(var(--v-theme-error), .12); border-color: rgba(var(--v-theme-error), .2); }
+.xai-pill-idle { color: var(--xai-ink-soft); background: var(--xai-veil); border-color: var(--xai-line); }
+
+.xai-todo { margin: 14px 18px 0; border-radius: var(--xai-radius); }
+
+/* ---------- 骨架 ---------- */
+.xai-body { display: flex; min-height: 460px; }
 .xai-nav {
-  flex: 0 0 168px;
-  border-right: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
-  background: rgba(var(--v-theme-on-surface), .02);
+  flex: 0 0 186px;
+  padding: 10px 0;
+  border-right: 1px solid var(--xai-line);
+  background: var(--xai-veil);
 }
-.xai-nav-item { margin: 2px 8px; }
+.xai-nav-item { margin: 1px 8px; }
+.xai-nav-badge {
+  min-width: 20px; padding: 0 6px; height: 18px; line-height: 18px; text-align: center;
+  border-radius: 999px; font-size: 11px; font-weight: 600;
+  color: var(--xai-ink-soft); background: rgba(var(--v-theme-on-surface), .08);
+}
 .xai-content { flex: 1 1 auto; min-width: 0; overflow-y: auto; }
-.xai-pane { padding: 12px 16px; }
+.xai-pane { padding: 14px 18px 22px; }
 .xai-pane-config { padding: 0; }
-.xai-pane-title { font-size: 12px; color: rgba(var(--v-theme-on-surface), .6); margin-bottom: 10px; }
-.xai-block { margin-top: 16px; }
-.xai-block-title { font-size: 13px; font-weight: 600; margin-bottom: 6px; opacity: .8; }
-.xai-queue { padding: 4px 6px; max-height: 320px; overflow-y: auto; }
+.xai-pane-title {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  padding: 14px 18px 0;
+}
+.xai-pane-name { font-size: 13px; font-weight: 650; color: var(--xai-ink); }
+.xai-pane-desc { font-size: 11.5px; color: var(--xai-ink-faint); }
+
+/* 每个内容块之间靠留白分段，不再靠一条条横线 */
+.xai-block { margin-top: 18px; }
+.xai-block-title {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; font-weight: 600; letter-spacing: .3px;
+  color: var(--xai-ink-soft); margin-bottom: 8px;
+}
+
+/* ---------- 播放台 ---------- */
+.xai-hero {
+  border-radius: var(--xai-radius);
+  color: var(--xai-ink);
+  background:
+    radial-gradient(120% 140% at 0% 0%, rgba(var(--v-theme-primary), .16), transparent 60%),
+    linear-gradient(180deg, rgba(var(--v-theme-surface, 255, 255, 255), .06), transparent),
+    var(--xai-veil);
+  box-shadow: inset 0 0 0 1px var(--xai-line);
+}
+.xai-hero-mark {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 54px; height: 54px; border-radius: 16px; flex: 0 0 auto;
+  color: rgb(var(--v-theme-primary)); background: rgba(var(--v-theme-primary), .14);
+}
+/* 正在播的时候给一圈呼吸的光环，页面不动也知道在放 */
+.xai-hero-live { animation: xai-pulse 2.4s ease-in-out infinite; }
+@keyframes xai-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(var(--v-theme-primary), .22); }
+  50% { box-shadow: 0 0 0 9px rgba(var(--v-theme-primary), 0); }
+}
+@media (prefers-reduced-motion: reduce) { .xai-hero-live { animation: none; } }
+.xai-hero-title { font-size: 17px; font-weight: 650; letter-spacing: .2px; }
+.xai-hero-sub { font-size: 11.5px; color: var(--xai-ink-faint); margin-top: 2px; }
+.xai-hero-time { font-size: 13px; font-variant-numeric: tabular-nums; color: var(--xai-ink); }
+.xai-hero-time span { font-size: 11.5px; color: var(--xai-ink-faint); }
+.xai-hero-bar { background: rgba(var(--v-theme-on-surface), .08); }
+.xai-transport {
+  display: inline-flex; align-items: center; gap: 2px; padding: 3px;
+  border-radius: 999px; background: rgba(var(--v-theme-on-surface), .06);
+}
+.xai-transport-main { width: 42px; height: 42px; box-shadow: 0 4px 14px rgba(var(--v-theme-primary), .3); }
+.xai-volume {
+  display: flex; align-items: center; flex: 1 1 240px; min-width: 200px; max-width: 380px;
+  color: var(--xai-ink-soft);
+}
+.xai-modes { gap: 2px; flex-wrap: wrap; }
+/* 定时任务的星期/几号是用点选的，靠 2px 的间距点不准；这类日格单独给一排留白 */
+.xai-days { display: flex; flex-wrap: wrap; gap: 6px; }
+.xai-mode { cursor: pointer; user-select: none; transition: transform .12s ease; }
+.xai-mode:active { transform: scale(.95); }
+@media (prefers-reduced-motion: reduce) { .xai-mode:active { transform: none; } }
+
+/* ---------- 队列 / 目录 / 歌词 / 日志 ---------- */
+.xai-queue { padding: 4px 6px; max-height: 340px; overflow-y: auto; }
 .xai-queue-row {
-  display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 6px; cursor: pointer;
+  display: flex; align-items: center; gap: 10px; padding: 7px 10px;
+  border-radius: 10px; cursor: pointer; transition: background .14s ease;
 }
-.xai-queue-row:hover { background: rgba(var(--v-theme-on-surface), .05); }
-.xai-queue-current { background: rgba(var(--v-theme-primary), .12); }
-.xai-queue-index { flex: 0 0 22px; font-size: 12px; color: rgba(var(--v-theme-on-surface), .6); }
-.xai-queue-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
-.xai-dir { display: flex; align-items: center; padding: 3px 6px; border-radius: 6px; cursor: pointer; font-size: 13px; }
-.xai-dir:hover { background: rgba(var(--v-theme-on-surface), .05); }
-.xai-lyric { max-height: 260px; overflow-y: auto; padding: 4px 8px; }
+.xai-queue-row:hover { background: rgba(var(--v-theme-on-surface), .06); }
+.xai-queue-current {
+  background: rgba(var(--v-theme-primary), .1);
+  box-shadow: inset 2px 0 0 rgb(var(--v-theme-primary));
+}
+.xai-queue-index { flex: 0 0 22px; font-size: 11.5px; color: var(--xai-ink-faint); font-variant-numeric: tabular-nums; }
+.xai-queue-name {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 13px; color: var(--xai-ink);
+}
+.xai-dir {
+  display: flex; align-items: center; gap: 6px; padding: 6px 9px;
+  border-radius: 9px; cursor: pointer; font-size: 13px; color: var(--xai-ink);
+  transition: background .14s ease;
+}
+.xai-dir:hover { background: rgba(var(--v-theme-on-surface), .06); }
+.xai-lyric { max-height: 280px; overflow-y: auto; padding: 4px 8px; }
 .xai-lyric-line {
-  display: flex; gap: 8px; padding: 3px 6px; border-radius: 6px; font-size: 13px;
-  color: rgba(var(--v-theme-on-surface), .72);
+  display: flex; gap: 10px; padding: 5px 8px; border-radius: 8px; font-size: 13px;
+  color: var(--xai-ink-soft);
 }
-.xai-lyric-active { background: rgba(var(--v-theme-primary), .12); color: rgba(var(--v-theme-on-surface), 1); font-weight: 600; }
-.xai-lyric-time { flex: 0 0 42px; font-size: 11px; color: rgba(var(--v-theme-on-surface), .5); }
-.xai-logs { padding: 4px 8px; max-height: 260px; overflow-y: auto; }
-.xai-log { display: flex; align-items: center; gap: 8px; padding: 3px 0; flex-wrap: wrap; }
-.xai-log-message { flex: 1 1 200px; min-width: 0; opacity: .8; }
+.xai-lyric-active {
+  background: rgba(var(--v-theme-primary), .12); color: var(--xai-ink);
+  font-weight: 600; box-shadow: inset 2px 0 0 rgb(var(--v-theme-primary));
+}
+.xai-lyric-time { flex: 0 0 42px; font-size: 11px; color: var(--xai-ink-faint); font-variant-numeric: tabular-nums; }
+.xai-logs { padding: 4px 8px; max-height: 280px; overflow-y: auto; }
+.xai-log { display: flex; align-items: center; gap: 8px; padding: 5px 0; flex-wrap: wrap; }
+.xai-log-message { flex: 1 1 200px; min-width: 0; color: var(--xai-ink-soft); }
+
 .xai-table { font-size: 13px; }
 .xai-table .text-truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.xai-modes { gap: 2px; flex-wrap: wrap; }
-.xai-cmd { display: flex; align-items: center; gap: 10px; padding: 2px 6px; }
+.xai-cmd { display: flex; align-items: center; gap: 10px; padding: 4px 6px; }
 .xai-cmd-keywords { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.xai-record { display: flex; align-items: baseline; gap: 8px; padding: 3px 6px; font-size: 13px; }
-.xai-record-at { flex: 0 0 74px; }
+.xai-record { display: flex; align-items: baseline; gap: 8px; padding: 4px 6px; font-size: 13px; }
+.xai-record-at { flex: 0 0 74px; color: var(--xai-ink-faint); font-variant-numeric: tabular-nums; }
 .xai-record-text { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cursor-pointer { cursor: pointer; }
+
+/* 长列表滚动条细一点，别抢内容 */
+.xai-content::-webkit-scrollbar, .xai-queue::-webkit-scrollbar,
+.xai-lyric::-webkit-scrollbar, .xai-logs::-webkit-scrollbar { width: 7px; height: 7px; }
+.xai-content::-webkit-scrollbar-thumb, .xai-queue::-webkit-scrollbar-thumb,
+.xai-lyric::-webkit-scrollbar-thumb, .xai-logs::-webkit-scrollbar-thumb {
+  border-radius: 999px; background: rgba(var(--v-theme-on-surface), .16);
+}
+
+@media (max-width: 900px) {
+  .xai-brand-sub { display: none; }
+  .xai-stats { display: none; }
+}
 @media (max-width: 760px) {
   .xai-body { flex-direction: column; }
   .xai-nav {
     flex: 0 0 auto;
     border-right: none;
-    border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+    border-bottom: 1px solid var(--xai-line);
   }
+  .xai-head { padding: 12px 14px; }
+  .xai-pane, .xai-pane-title { padding-left: 14px; padding-right: 14px; }
+  .xai-volume { max-width: none; }
 }
 </style>

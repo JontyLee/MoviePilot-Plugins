@@ -6,7 +6,7 @@ xiaoaispeaker — MoviePilot v3 插件（插件名：小爱音箱）
 定时任务、歌词，以及一组远程命令。播放走「插件签发一条带签名与有效期的 HTTP 直链，音箱自己经
 云端拉流」这条路，不依赖 Emby/Jellyfin，也不需要额外部署 Music Tag Web。
 
-v0.3.0 的边界（有意为之，不是遗漏）：
+当前版本的边界（有意为之，不是遗漏）：
 - 只支持小米云端 Mina 接口（登录 → serviceToken → /remote/ubus），不做 MiIO 本地 RPC：
   局域网直连要额外拿 token 与 miio 密钥、按型号试 siid/piid，收益不抵复杂度。
 - 歌词只在本页面上显示（同目录 .lrc/.txt 与音频内嵌标签）：触屏音箱的本机歌词要那块的
@@ -22,6 +22,9 @@ v0.3.0 的边界（有意为之，不是遗漏）：
   宿主没配就在配置页写明缺哪一项并退回到只用口令表，插件这里不留 key。
 - 「启用插件」「显示侧栏入口」只能在插件自己的配置页改：宿主投影侧栏入口前先调 get_state()，
   而插件管理页那个开关写的是宿主自己的实例记录，插不进这一项。
+- 账号只回显掩码（13****34 / ab***@example.com）：/status 带着整份配置每 5 秒被轮一次，
+  明文账号名等于把手机号长期挂在任何能看到侧栏的人眼前。写回时带 * 的值一律当作没改，
+  免得页面把掩码原样存回去，把真账号覆盖成打不上的一串。
 
 出处与许可：小米云端的登录三步流程、clientSign 算法、ubus 请求体、需要走 play_music 的
 型号白名单，移植自 Songloft 的「智能音箱」插件 songloft-plugin-miot
@@ -239,7 +242,7 @@ class XiaoaiSpeaker(_PluginBase):
         "库内目录浏览与搜索、远程命令；播放直链由插件签名限时，不依赖媒体服务器。"
     )
     plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/xiaoai.svg"
-    plugin_version = "0.3.0"
+    plugin_version = "0.3.1"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "xiaoaispeaker_"
@@ -440,6 +443,23 @@ class XiaoaiSpeaker(_PluginBase):
         except Exception:  # pragma: no cover - 宿主配置读取异常形状不固定
             domain = ""
         return (domain, "app_domain") if domain else ("", "")
+
+    @staticmethod
+    def _mask_account(value: Any) -> str:
+        """账号只回显形状，不回显身份。
+
+        侧栏页每 5 秒带 whole config 轮一次 /status，明文账号名等于把手机号或邮箱
+        长期挂在任何能看到这块页面的人眼前；配置页那格也只需要知道"存的是哪个账号"。
+        """
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if "@" in text:
+            name, _, domain = text.partition("@")
+            return f"{name[:2]}***@{domain}"
+        if text.isdigit() and len(text) >= 7:
+            return f"{text[:2]}****{text[-2:]}"
+        return f"{text[:2]}***"
 
     def _config_snapshot(self) -> Dict[str, Any]:
         """当前配置的全量字典：update_config 是整体替换，任何写回都必须用这份。"""
@@ -1866,7 +1886,7 @@ class XiaoaiSpeaker(_PluginBase):
         """开始或续跑一次登录会话（验证码回来时只带 code）。"""
         code = (payload.code or "").strip()
         manual = (payload.manual_token or "").strip()
-        with self._login_lock():
+        with self._login_lock:
             if manual:
                 return self._login_manual(manual)
             auth: Optional[XiaoaiAuth] = self.__dict__.get("_auth")
@@ -1877,7 +1897,10 @@ class XiaoaiSpeaker(_PluginBase):
                     else auth.submit_captcha(code)
                 )
             else:
-                username = (payload.username or self._username or "").strip()
+                username = str(payload.username or "").strip()
+                if "*" in username:  # 掩码回填不算账号
+                    username = ""
+                username = (username or self._username).strip()
                 password = payload.password or self._password or ""
                 if not username or not password:
                     return LoginOut(state="failed", message="请填写小米账号和密码",
@@ -1909,6 +1932,9 @@ class XiaoaiSpeaker(_PluginBase):
         if state == LOGIN_FAILED:
             self.__dict__["_auth"] = None
             self.__dict__["_captcha_image"] = ""
+            logger.warning(f"{_LOG} 登录失败：{message or '小米没有给出原因'}")
+        elif state in (LOGIN_NEED_CAPTCHA, LOGIN_NEED_VERIFY):
+            logger.info(f"{_LOG} 登录停在 {state}：{message or '需要人工填码'}")
         return LoginOut(state=state, message=message,
                         captcha_image=captcha or self.__dict__.get("_captcha_image", ""),
                         logged_in=bool(self._token()),
@@ -2078,7 +2104,8 @@ class XiaoaiSpeaker(_PluginBase):
             config=ConfigOut(
                 enabled=self._enabled,
                 show_sidebar_nav=self._show_sidebar_nav,
-                username=self._username,
+                username=self._mask_account(self._username),
+                username_set=bool(self._username),
                 password_set=bool(self._password),
                 default_device_id=self._default_device_id,
                 music_dirs=self._music_dirs,
@@ -2561,8 +2588,17 @@ class XiaoaiSpeaker(_PluginBase):
                                                    force=True))
 
     def api_login(self, payload: LoginIn) -> LoginOut:
-        """POST /login —— 开始登录，或把验证码交回进行中的那次会话。"""
-        return self._login(payload)
+        """POST /login —— 开始登录，或把验证码交回进行中的那次会话。
+
+        小米这条路会抛网络与协议异常，页面只显示「登录失败」的话没人知道该改什么：
+        异常统一折成 state=failed 带原因回来，原样留在插件日志里。
+        """
+        try:
+            return self._login(payload)
+        except Exception as exc:
+            logger.warning(f"{_LOG} 登录流程异常: {exc}")
+            return LoginOut(state="failed", message=f"登录流程出错：{exc}",
+                            logged_in=bool(self._token()))
 
     def api_logout(self) -> LoginOut:
         """POST /logout —— 清除本机票据。"""
@@ -2943,7 +2979,9 @@ class XiaoaiSpeaker(_PluginBase):
                 self._default_volume = self._clamp_volume(data.pop("default_volume"))
             if "username" in data:
                 username = str(data.pop("username") or "").strip()
-                if username != self._username:
+                # 回显的是掩码：原样送回来或留空都不算用户改了账号，否则一保存就把
+                # 真账号写成 "13****34"，下次登录必挂在密码之前
+                if username and "*" not in username and username != self._username:
                     self._username = username
                     self.__dict__["_auth"] = None
                     self.__dict__["_auth_state"] = ""

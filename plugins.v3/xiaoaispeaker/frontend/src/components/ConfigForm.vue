@@ -115,7 +115,9 @@ function fillFromStatus(data: Status) {
     ...form.value,
     enabled: !!c.enabled,
     show_sidebar_nav: c.show_sidebar_nav !== false,
-    username: c.username || '',
+    // 服务端回的是掩码（13****34），填进输入框就成了「把掩码存成账号」：这里只留空，
+    // 已存账号用占位符提示，要换才输入
+    username: '',
     // 密码永不回显：留空即「不改动」，由服务端的 if password 判掉
     password: '',
     default_device_id: c.default_device_id || '',
@@ -160,6 +162,8 @@ async function save() {
     const body: Record<string, any> = { ...form.value }
     // 密码是「留空即不改动」：服务端按 if password 判掉空串，这里先删掉免得写成空
     if (!body.password) delete body.password
+    // 账号同理：留空表示不改，服务端还会再把带 * 的掩码当没改过兜一层
+    if (!body.username) delete body.username
     fillFromStatus(await (props.api as MoviePilotApi).post(`${base.value}/config`, body))
     notify('配置已保存', 'success')
     emit('saved')
@@ -206,11 +210,17 @@ defineExpose({ loadConfig, save })
         </v-alert>
         <v-row dense>
           <v-col cols="12" md="6">
-            <v-text-field v-model="form.username" label="小米账号（手机号 / 邮箱 / 账号ID）" hide-details />
+            <v-text-field v-model="form.username"
+                          label="小米账号（手机号 / 邮箱 / 账号ID）"
+                          :placeholder="cfg?.username_set ? cfg.username : ''"
+                          :hint="cfg?.username_set ? `已保存：${cfg.username}，留空即不修改` : '留空即不修改'"
+                          persistent-hint />
           </v-col>
           <v-col cols="12" md="6">
             <v-text-field v-model="form.password" :type="form.password ? 'text' : 'password'"
-                          :label="cfg?.password_set ? '密码（留空保留已存的）' : '密码'" hide-details />
+                          :label="cfg?.password_set ? '密码（留空保留已存的）' : '密码'"
+                          :hint="cfg?.password_set ? '已保存密码，接口永不回显' : '只在首次填写'"
+                          persistent-hint />
           </v-col>
         </v-row>
         <div class="text-caption text-grey mt-1">
@@ -388,12 +398,50 @@ defineExpose({ loadConfig, save })
 </template>
 
 <style scoped>
-/* 仅插件内局部样式；不得写全局 v- 或 mdi- 类规则（构建有 postcss 门禁）。 */
-.xcf { width: 100%; display: flex; flex-direction: column; }
-.xcf-top { display: flex; align-items: center; gap: 10px; padding: 10px 16px 0; flex-wrap: wrap; }
-.xcf-note { margin: 4px 16px 12px; padding: 8px 12px; border-radius: 6px; font-size: 12px; line-height: 1.6; opacity: .8; background: rgba(var(--v-theme-on-surface), .05); }
-.xcf-body { padding: 4px 16px 12px; }
-.xcf-group { margin-bottom: 20px; }
-.xcf-group-title { font-size: 13px; font-weight: 600; margin-bottom: 8px; opacity: .8; }
-.xcf-actions { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
+/* 仅插件内局部样式；含 .v- 的选择器会被构建的 postcss 门禁整条删掉，所以只碰自己的类。
+   配色全部取宿主 --v-theme-*，深浅色跟着主程序走。 */
+.xcf {
+  width: 100%; display: flex; flex-direction: column;
+  --xcf-radius: 14px;
+  --xcf-ink: rgba(var(--v-theme-on-surface), .92);
+  --xcf-ink-faint: rgba(var(--v-theme-on-surface), .5);
+  --xcf-line: rgba(var(--v-border-color), var(--v-border-opacity));
+}
+.xcf-top {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 14px 18px 0;
+}
+.xcf-note {
+  margin: 10px 18px 14px; padding: 10px 13px;
+  border-radius: 12px; font-size: 12px; line-height: 1.65;
+  color: var(--xcf-ink);
+  background: rgba(var(--v-theme-info), .08);
+  border: 1px solid rgba(var(--v-theme-info), .18);
+}
+.xcf-body { padding: 0 18px 16px; display: flex; flex-direction: column; gap: 14px; }
+.xcf-group {
+  padding: 16px;
+  border-radius: var(--xcf-radius);
+  border: 1px solid var(--xcf-line);
+  background: rgba(var(--v-theme-on-surface), .028);
+}
+.xcf-group-title {
+  display: flex; align-items: center; gap: 7px; margin-bottom: 12px;
+  font-size: 12px; font-weight: 650; letter-spacing: .3px; color: var(--xcf-ink);
+}
+.xcf-group-title::before {
+  content: ''; width: 3px; height: 13px; border-radius: 2px;
+  background: rgb(var(--v-theme-primary)); opacity: .8;
+}
+.xcf-actions {
+  position: sticky; bottom: 0; z-index: 2;
+  display: flex; align-items: center; gap: 8px; padding: 12px 18px;
+  border-top: 1px solid var(--xcf-line);
+  background: rgba(var(--v-theme-surface), .86);
+  backdrop-filter: blur(8px);
+}
+@media (max-width: 760px) {
+  .xcf-top, .xcf-note, .xcf-body { padding-left: 14px; padding-right: 14px; }
+  .xcf-group { padding: 13px; }
+}
 </style>
