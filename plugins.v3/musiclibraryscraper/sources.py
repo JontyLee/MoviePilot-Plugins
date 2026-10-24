@@ -1,17 +1,22 @@
 """内置识别源：各音乐平台公开检索接口的请求构造与候选解析。
 
-为什么要这一层：MTW 的识别源本身就是转调这些平台的公开接口，插件把同一层接过来，
-使用者不必为刮削单独再起一个 Music Tag Web；已经部署了 MTW 的人仍可在配置里切回去。
+为什么要这一层：这些平台的公开检索接口原本是被 Music Tag Web 转调的，插件把同一层接过来，
+使用者不必为刮削单独再起一个 Music Tag Web —— 少一个服务、少一份账密，也少一条
+「MTW 必须和 MP 挂同一份库」的约束。
 
 这个模块不碰网络。所有请求由插件发起（沿用宿主 RequestUtils 那一条缝），这里只回答
 两个问题：这个源该怎么问（build_request）、答复里的哪一条算候选（parse_candidates）。
-候选一律折叠成 MTW fetch_id3_by_title 的形状，打分与写入那条链路因此完全不用改。
+候选一律折叠成同一套键名（沿用 fetch_id3_by_title 的形状），打分与写入那条链路因此不用改。
 
 刻意不做的事：
 - 不替宿主决定歌词要不要覆盖。歌词按 fill_lyrics 开关取一份挂回候选的 lyrics，最终写不写、
   覆盖谁仍交给宿主的 LyricsChain；插件只把候选那一段补上，让那条链路看得见歌词。
-- 不做酷我。实测 r.s 检索接口对曲名索引恒不返回命中，www 接口要带签名与 token，
-  复杂度与收益不成比例；需要酷我的继续用 MTW 模式。
+- 不做 Spotify 与 AcoustID。前者要 client/secret 换 OAuth token 才有检索，后者要音频指纹
+  （fpcalc）加应用 key —— 两个都不是「拿曲名艺人去问」的文本检索源，插件这层没有可用的匿名接口。
+- 不做酷我。它的匿名检索接口（search.kuwo.cn/r.s）答的是「哪个录音在」而不是「这首歌属于哪张专辑」：
+  实测 ALBUM 与封面字段整片为空，排在最前的又常是伴奏、片段、演唱会串烧。满分要曲名+艺人+专辑
+  三项都对得上，这个源永远凑不齐第三项，只会把请求量和对不上的候选一起加进来；真要接得先按
+  MUSICRID 逐个补专辑与封面，那等于给每个候选多打一发。www 那个接口能给全，但要签名与 token。
 - 不做 MusicBrainz 封面。检索响应里不带封面字段，为封面再追一次 coverartarchive
   请求等于给每个候选多打一发；MusicBrainz 的价值在繁体与别名文本对得上。
 
@@ -25,8 +30,8 @@ applications/task/services/*.so 里，本文件没有复制它的实现代码；
 import base64
 from typing import Any, Dict, List, Optional, Tuple
 
-# 源顺序即查询顺序，与 MTW 模式的默认顺序保持一致（除开插件没实现的酷我）：
-# 某源出到满分候选就立刻停止，把最可能命中的中文源排在前面。
+# 源顺序即查询顺序：某源出到满分候选就立刻停止，把命中率最高、字段最全的中文源排在前面，
+# 只给文本兜底的 MusicBrainz 排最后（它答得出繁体与别名，答不出封面）。
 RESOURCES = ("netease", "qmusic", "kugou", "migu", "musicbrainz")
 
 # 解析故障的原因。两种都不是"这个文件查不到"的结论，调用方据此决定要不要给文件记失败：
@@ -322,7 +327,7 @@ def _musicbrainz_request(keyword: str, limit: int) -> Dict[str, Any]:
         "url": "https://musicbrainz.org/ws/2/recording",
         # MusicBrainz 的使用条款要求调用方自报身份，没有 From 容易被限流。
         "headers": {"user-agent": _USER_AGENT,
-                    "from": "MoviePilot-MusicLibraryScraper/0.5 (local music library scraper)"},
+                    "from": "MoviePilot-MusicLibraryScraper/0.7 (local music library scraper)"},
         "params": {"query": keyword, "fmt": "json", "limit": str(limit)},
     }
 

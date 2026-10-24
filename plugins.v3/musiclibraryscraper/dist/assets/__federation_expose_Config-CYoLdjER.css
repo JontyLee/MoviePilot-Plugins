@@ -1,0 +1,46 @@
+
+/* 仅插件内局部样式；不得写全局 v- 或 mdi- 类规则（构建有 postcss 门禁）。 */
+.mls-card[data-v-054efbaa] { width: 100%; display: flex; flex-direction: column;
+}
+.mls-head[data-v-054efbaa] { display: flex; align-items: center; gap: 8px; padding: 14px 18px;
+}
+.mls-head-text[data-v-054efbaa] { min-width: 0;
+}
+.mls-body[data-v-054efbaa] { display: flex; min-height: 400px;
+}
+/* 侧栏对话框里整张卡要被限高：限在卡片上、让内容区自己滚，
+   底部的保存条才不会顶出可视区被裁掉（宿主那层滚动交给 v-dialog 做不了这件事）。 */
+.mls-card-fit[data-v-054efbaa] { max-height: 86vh;
+}
+.mls-card-fit .mls-body[data-v-054efbaa] { flex: 1 1 auto; min-height: 0;
+}
+.mls-nav[data-v-054efbaa] {
+  flex: 0 0 176px;
+  border-right: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+  background: rgba(var(--v-theme-on-surface), .02);
+}
+.mls-nav-item[data-v-054efbaa] { margin: 2px 8px;
+}
+.mls-content[data-v-054efbaa] { flex: 1 1 auto; min-width: 0; overflow-y: auto;
+}
+.mls-pane[data-v-054efbaa] { padding: 16px 18px;
+}
+.mls-block[data-v-054efbaa] { margin-top: 14px;
+}
+.mls-block-title[data-v-054efbaa] { font-size: 13px; font-weight: 600; margin-bottom: 4px; opacity: .8;
+}
+.mls-docs[data-v-054efbaa] { margin-top: 18px; padding-top: 12px; border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+}
+.mls-chips[data-v-054efbaa] { display: flex; flex-wrap: wrap; gap: 6px;
+}
+.mls-actions[data-v-054efbaa] { display: flex; align-items: center; gap: 8px; padding: 10px 16px;
+}
+@media (max-width: 760px) {
+.mls-body[data-v-054efbaa] { flex-direction: column;
+}
+.mls-nav[data-v-054efbaa] {
+    flex: 0 0 auto;
+    border-right: none;
+    border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+}
+}

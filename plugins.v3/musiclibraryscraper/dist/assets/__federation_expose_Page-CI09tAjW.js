@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { F as FLOW_STEPS, _ as _export_sfc } from './_plugin-vue_export-helper-BRkMt5bj.js';
+import { s as stageCounts, F as FlowPipeline, a as FLOW_STEPS, _ as _export_sfc } from './flow-BYkeE1Vm.js';
 
 const {defineComponent:_defineComponent} = await importShared('vue');
 
@@ -13,25 +13,28 @@ const _hoisted_5 = {
   key: 0,
   class: "mls-pane"
 };
-const _hoisted_6 = { class: "text-h5" };
-const _hoisted_7 = { class: "text-h5" };
-const _hoisted_8 = { class: "text-h5" };
+const _hoisted_6 = { class: "mls-section" };
+const _hoisted_7 = { class: "mls-flow-head" };
+const _hoisted_8 = { class: "text-caption text-grey" };
 const _hoisted_9 = { class: "text-h5" };
-const _hoisted_10 = { class: "mls-section" };
-const _hoisted_11 = { class: "text-caption text-medium-emphasis mb-1" };
-const _hoisted_12 = { key: 0 };
-const _hoisted_13 = { class: "text-body-2" };
-const _hoisted_14 = { class: "text-body-2" };
+const _hoisted_10 = { class: "text-h5" };
+const _hoisted_11 = { class: "text-h5" };
+const _hoisted_12 = { class: "text-h5" };
+const _hoisted_13 = { class: "mls-section" };
+const _hoisted_14 = { class: "text-caption text-medium-emphasis mb-1" };
 const _hoisted_15 = {
   key: 0,
-  class: "text-caption text-warning mt-1"
+  class: "text-caption text-grey"
 };
 const _hoisted_16 = {
   key: 1,
+  class: "text-caption text-warning mt-1"
+};
+const _hoisted_17 = {
+  key: 2,
   class: "text-caption text-grey mt-1"
 };
-const _hoisted_17 = { class: "text-body-2" };
-const _hoisted_18 = { class: "text-caption text-grey" };
+const _hoisted_18 = { class: "text-body-2" };
 const _hoisted_19 = { class: "text-caption text-grey" };
 const _hoisted_20 = { class: "text-caption text-grey" };
 const _hoisted_21 = {
@@ -40,38 +43,32 @@ const _hoisted_21 = {
 };
 const _hoisted_22 = { class: "mls-reason-text" };
 const _hoisted_23 = { class: "text-caption text-no-wrap" };
-const _hoisted_24 = { class: "mls-section" };
-const _hoisted_25 = { class: "mls-flow" };
-const _hoisted_26 = { class: "mls-flow-index" };
-const _hoisted_27 = { class: "mls-flow-body" };
-const _hoisted_28 = { class: "text-body-2 font-weight-medium" };
-const _hoisted_29 = { class: "text-caption text-grey" };
-const _hoisted_30 = { class: "d-flex align-center gap-2 mt-4" };
-const _hoisted_31 = {
+const _hoisted_24 = { class: "d-flex align-center gap-2 mt-4" };
+const _hoisted_25 = {
   key: 1,
   class: "mls-pane"
 };
-const _hoisted_32 = { class: "d-flex align-center flex-wrap gap-2 mb-2" };
-const _hoisted_33 = { class: "text-subtitle-2" };
-const _hoisted_34 = { class: "text-caption text-grey" };
-const _hoisted_35 = ["title"];
-const _hoisted_36 = {
+const _hoisted_26 = { class: "d-flex align-center flex-wrap gap-2 mb-2" };
+const _hoisted_27 = { class: "text-subtitle-2" };
+const _hoisted_28 = { class: "text-caption text-grey" };
+const _hoisted_29 = ["title"];
+const _hoisted_30 = {
   class: "text-caption text-grey text-truncate",
   style: { "max-width": "480px" }
 };
-const _hoisted_37 = {
+const _hoisted_31 = {
   key: 0,
   class: "text-caption"
 };
-const _hoisted_38 = {
+const _hoisted_32 = {
   key: 1,
   class: "text-caption text-grey"
 };
-const _hoisted_39 = {
+const _hoisted_33 = {
   key: 2,
   class: "text-caption text-grey"
 };
-const _hoisted_40 = { key: 3 };
+const _hoisted_34 = { key: 3 };
 const {ref,onMounted,computed,inject} = await importShared('vue');
 const _sfc_main = /* @__PURE__ */ _defineComponent({
   __name: "Page",
@@ -122,11 +119,9 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
     const SOURCE_TEXT = {
       netease: "网易云",
       qmusic: "QQ 音乐",
-      kuwo: "酷我",
       kugou: "酷狗",
       migu: "咪咕",
-      musicbrainz: "MusicBrainz",
-      smart_tag: "智能"
+      musicbrainz: "MusicBrainz"
     };
     function statusText(value) {
       return STATUS_TEXT[value] || value;
@@ -380,8 +375,9 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       }))
     ]);
     const sourceNames = computed(
-      () => (cfg.value?.active_resource || []).map((s) => sourceText(s)).join(" → ") || "全部源"
+      () => (cfg.value?.resources || []).map((s) => sourceText(s)).join(" → ") || "全部源"
     );
+    const stages = computed(() => stageCounts(runs.value));
     const activeBucket = computed(() => buckets.find((b) => b.key === bucket.value));
     onMounted(() => {
       emit("layout", { maxWidth: "86rem" });
@@ -430,9 +426,9 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               ]),
               _: 1
             }),
-            _cache[18] || (_cache[18] = _createElementVNode("div", { class: "mls-head-text" }, [
-              _createElementVNode("div", { class: "text-h6" }, "MusicTagWeb音乐库刮削"),
-              _createElementVNode("div", { class: "text-caption text-medium-emphasis" }, " 枚举库内音频 → 读本地身份 → 逐源检索 → 打分定阈值 → 宿主原生写入 → 记账 ")
+            _cache[19] || (_cache[19] = _createElementVNode("div", { class: "mls-head-text" }, [
+              _createElementVNode("div", { class: "text-h6" }, "TagFlow音乐库刮削"),
+              _createElementVNode("div", { class: "text-caption text-medium-emphasis" }, " 直连平台检索补标签 · 逐文件核对与补齐在下方分桶里 ")
             ], -1)),
             _createVNode(_component_v_spacer),
             running.value ? (_openBlock(), _createBlock(_component_v_chip, {
@@ -443,7 +439,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               "prepend-icon": "mdi-progress-clock",
               class: "mr-2"
             }, {
-              default: _withCtx(() => [..._cache[15] || (_cache[15] = [
+              default: _withCtx(() => [..._cache[16] || (_cache[16] = [
                 _createTextVNode(" 扫描进行中 ", -1)
               ])]),
               _: 1
@@ -456,7 +452,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               "prepend-icon": "mdi-cog-outline",
               onClick: _cache[0] || (_cache[0] = ($event) => emit("switch"))
             }, {
-              default: _withCtx(() => [..._cache[16] || (_cache[16] = [
+              default: _withCtx(() => [..._cache[17] || (_cache[17] = [
                 _createTextVNode("配置", -1)
               ])]),
               _: 1
@@ -469,7 +465,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               "prepend-icon": "mdi-refresh",
               onClick: refresh
             }, {
-              default: _withCtx(() => [..._cache[17] || (_cache[17] = [
+              default: _withCtx(() => [..._cache[18] || (_cache[18] = [
                 _createTextVNode("刷新", -1)
               ])]),
               _: 1
@@ -529,6 +525,51 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
             ]),
             _createElementVNode("section", _hoisted_4, [
               view.value === "overview" ? (_openBlock(), _createElementBlock("div", _hoisted_5, [
+                _createElementVNode("div", _hoisted_6, [
+                  _createElementVNode("div", _hoisted_7, [
+                    _cache[22] || (_cache[22] = _createElementVNode("div", { class: "mls-section-title" }, "本轮流转", -1)),
+                    _createElementVNode("div", _hoisted_8, [
+                      running.value ? (_openBlock(), _createElementBlock(_Fragment, { key: 0 }, [
+                        _createTextVNode("扫描进行中 · 光点走到哪一环就问到了哪一环")
+                      ], 64)) : runs.value.ts ? (_openBlock(), _createElementBlock(_Fragment, { key: 1 }, [
+                        _createTextVNode(" 静止的是上一轮：" + _toDisplayString(fmtTime(runs.value.ts)) + "，" + _toDisplayString(runs.value.force === void 0 ? "只补缺" : runs.value.force ? "强制覆盖" : "只补缺") + " · 用时 " + _toDisplayString(runs.value.duration_s ?? 0) + "s ", 1)
+                      ], 64)) : (_openBlock(), _createElementBlock(_Fragment, { key: 2 }, [
+                        _createTextVNode("还没跑过一轮 —— 下面勾一个按钮开跑")
+                      ], 64))
+                    ]),
+                    _createVNode(_component_v_spacer),
+                    _createVNode(_component_v_btn, {
+                      size: "small",
+                      variant: "tonal",
+                      color: "info",
+                      loading: busy.value,
+                      onClick: _cache[1] || (_cache[1] = ($event) => scanNow(false))
+                    }, {
+                      default: _withCtx(() => [..._cache[20] || (_cache[20] = [
+                        _createTextVNode("增量扫描", -1)
+                      ])]),
+                      _: 1
+                    }, 8, ["loading"]),
+                    _createVNode(_component_v_btn, {
+                      size: "small",
+                      variant: "tonal",
+                      color: "warning",
+                      loading: busy.value,
+                      onClick: retryAllFailed
+                    }, {
+                      default: _withCtx(() => [..._cache[21] || (_cache[21] = [
+                        _createTextVNode("重试失败", -1)
+                      ])]),
+                      _: 1
+                    }, 8, ["loading"])
+                  ]),
+                  _createVNode(FlowPipeline, {
+                    steps: _unref(FLOW_STEPS),
+                    counts: stages.value,
+                    running: running.value,
+                    variant: "live"
+                  }, null, 8, ["steps", "counts", "running"])
+                ]),
                 _createVNode(_component_v_row, { dense: "" }, {
                   default: _withCtx(() => [
                     _createVNode(_component_v_col, {
@@ -543,8 +584,8 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                           default: _withCtx(() => [
                             _createVNode(_component_v_card_text, { class: "py-2" }, {
                               default: _withCtx(() => [
-                                _cache[19] || (_cache[19] = _createElementVNode("div", { class: "text-caption" }, "已处理", -1)),
-                                _createElementVNode("div", _hoisted_6, _toDisplayString(counts.value.done ?? 0), 1)
+                                _cache[23] || (_cache[23] = _createElementVNode("div", { class: "text-caption" }, "已处理", -1)),
+                                _createElementVNode("div", _hoisted_9, _toDisplayString(counts.value.done ?? 0), 1)
                               ]),
                               _: 1
                             })
@@ -566,8 +607,8 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                           default: _withCtx(() => [
                             _createVNode(_component_v_card_text, { class: "py-2" }, {
                               default: _withCtx(() => [
-                                _cache[20] || (_cache[20] = _createElementVNode("div", { class: "text-caption" }, "待重试", -1)),
-                                _createElementVNode("div", _hoisted_7, _toDisplayString(counts.value.retryable ?? 0), 1)
+                                _cache[24] || (_cache[24] = _createElementVNode("div", { class: "text-caption" }, "待重试", -1)),
+                                _createElementVNode("div", _hoisted_10, _toDisplayString(counts.value.retryable ?? 0), 1)
                               ]),
                               _: 1
                             })
@@ -589,8 +630,8 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                           default: _withCtx(() => [
                             _createVNode(_component_v_card_text, { class: "py-2" }, {
                               default: _withCtx(() => [
-                                _cache[21] || (_cache[21] = _createElementVNode("div", { class: "text-caption" }, "超限放弃", -1)),
-                                _createElementVNode("div", _hoisted_8, _toDisplayString(counts.value.exhausted ?? 0), 1)
+                                _cache[25] || (_cache[25] = _createElementVNode("div", { class: "text-caption" }, "超限放弃", -1)),
+                                _createElementVNode("div", _hoisted_11, _toDisplayString(counts.value.exhausted ?? 0), 1)
                               ]),
                               _: 1
                             })
@@ -612,8 +653,8 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                           default: _withCtx(() => [
                             _createVNode(_component_v_card_text, { class: "py-2" }, {
                               default: _withCtx(() => [
-                                _cache[22] || (_cache[22] = _createElementVNode("div", { class: "text-caption" }, "待处理", -1)),
-                                _createElementVNode("div", _hoisted_9, _toDisplayString(counts.value.pending_unknown ?? 0), 1)
+                                _cache[26] || (_cache[26] = _createElementVNode("div", { class: "text-caption" }, "待处理", -1)),
+                                _createElementVNode("div", _hoisted_12, _toDisplayString(counts.value.pending_unknown ?? 0), 1)
                               ]),
                               _: 1
                             })
@@ -626,8 +667,8 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   ]),
                   _: 1
                 }),
-                _createElementVNode("div", _hoisted_10, [
-                  _cache[24] || (_cache[24] = _createElementVNode("div", { class: "mls-section-title" }, "最近一轮", -1)),
+                _createElementVNode("div", _hoisted_13, [
+                  _cache[28] || (_cache[28] = _createElementVNode("div", { class: "mls-section-title" }, "最近一轮", -1)),
                   _createVNode(_component_v_row, { dense: "" }, {
                     default: _withCtx(() => [
                       _createVNode(_component_v_col, {
@@ -640,14 +681,10 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                             class: "pa-3 mls-fill"
                           }, {
                             default: _withCtx(() => [
-                              _createElementVNode("div", _hoisted_11, [
-                                _createTextVNode(" 扫描时间 " + _toDisplayString(fmtTime(runs.value.ts)) + " ", 1),
-                                cfg.value.cron ? (_openBlock(), _createElementBlock("span", _hoisted_12, "｜定时 " + _toDisplayString(cfg.value.cron) + "（下次 " + _toDisplayString(cfg.value.cron_next) + "）", 1)) : _createCommentVNode("", true)
-                              ]),
-                              _createElementVNode("div", _hoisted_13, " 发现 " + _toDisplayString(runs.value.scanned ?? 0) + "｜缓存跳过 " + _toDisplayString(runs.value.from_cache ?? 0) + "｜已有tag跳过 " + _toDisplayString(runs.value.skipped_tagged ?? 0), 1),
-                              _createElementVNode("div", _hoisted_14, " 成功 " + _toDisplayString(runs.value.ok ?? 0) + "｜失败 " + _toDisplayString(runs.value.failed ?? 0) + "｜服务侧故障 " + _toDisplayString(runs.value.transport ?? 0) + "｜处理异常 " + _toDisplayString(runs.value.error ?? 0), 1),
-                              runs.value.aborted ? (_openBlock(), _createElementBlock("div", _hoisted_15, " 识别来源连续故障，本轮已中止，未处理的留到下一轮 ")) : _createCommentVNode("", true),
-                              lastTargeted.value.ts ? (_openBlock(), _createElementBlock("div", _hoisted_16, " 最近定向重试 " + _toDisplayString(fmtTime(lastTargeted.value.ts)) + "：成功 " + _toDisplayString(lastTargeted.value.ok ?? 0) + "｜失败 " + _toDisplayString(lastTargeted.value.failed ?? 0), 1)) : _createCommentVNode("", true)
+                              _createElementVNode("div", _hoisted_14, " 扫描时间 " + _toDisplayString(fmtTime(runs.value.ts)) + "｜用时 " + _toDisplayString(runs.value.duration_s ?? 0) + "s ", 1),
+                              cfg.value.cron ? (_openBlock(), _createElementBlock("div", _hoisted_15, " 定时 " + _toDisplayString(cfg.value.cron) + "｜下次 " + _toDisplayString(cfg.value.cron_next), 1)) : _createCommentVNode("", true),
+                              runs.value.aborted ? (_openBlock(), _createElementBlock("div", _hoisted_16, " 识别源连续故障，本轮已中止，未处理的留到下一轮 ")) : _createCommentVNode("", true),
+                              lastTargeted.value.ts ? (_openBlock(), _createElementBlock("div", _hoisted_17, " 最近定向重试 " + _toDisplayString(fmtTime(lastTargeted.value.ts)) + "：成功 " + _toDisplayString(lastTargeted.value.ok ?? 0) + "｜失败 " + _toDisplayString(lastTargeted.value.failed ?? 0), 1)) : _createCommentVNode("", true)
                             ]),
                             _: 1
                           })
@@ -664,17 +701,9 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                             class: "pa-3 mls-fill"
                           }, {
                             default: _withCtx(() => [
-                              _cache[23] || (_cache[23] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mb-1" }, "本轮生效的配置", -1)),
-                              _createElementVNode("div", _hoisted_17, _toDisplayString(cfg.value.mode === "force_all" ? "强制覆盖" : "只补缺") + "｜最低匹配分数 " + _toDisplayString(cfg.value.min_score) + "｜" + _toDisplayString(sourceNames.value), 1),
-                              _createElementVNode("div", _hoisted_18, [
-                                _createTextVNode(" 识别来源 " + _toDisplayString(cfg.value.backend_label || "自动") + " ", 1),
-                                cfg.value.backend === "builtin" ? (_openBlock(), _createElementBlock(_Fragment, { key: 0 }, [
-                                  _createTextVNode(" ｜直连平台检索，库内路径不外传 ")
-                                ], 64)) : (_openBlock(), _createElementBlock(_Fragment, { key: 1 }, [
-                                  _createTextVNode(" ｜MTW " + _toDisplayString(cfg.value.mtw_base_url || "未配置") + "｜账密 " + _toDisplayString(cfg.value.has_username ? "已配" : "未配"), 1)
-                                ], 64))
-                              ]),
-                              _createElementVNode("div", _hoisted_19, " 库路径 " + _toDisplayString((cfg.value.scraper_paths || []).length) + " 个｜排除 " + _toDisplayString((cfg.value.exclude_paths || []).length) + " 个 ", 1),
+                              _cache[27] || (_cache[27] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mb-1" }, "本轮生效的配置", -1)),
+                              _createElementVNode("div", _hoisted_18, _toDisplayString(cfg.value.mode === "force_all" ? "强制覆盖" : "只补缺") + "｜最低匹配分数 " + _toDisplayString(cfg.value.min_score) + "｜" + _toDisplayString(sourceNames.value), 1),
+                              _createElementVNode("div", _hoisted_19, " 库路径 " + _toDisplayString((cfg.value.scraper_paths || []).length) + " 个｜排除 " + _toDisplayString((cfg.value.exclude_paths || []).length) + " 个｜歌词" + _toDisplayString(cfg.value.fill_lyrics ? "主动抓取" : "交给宿主"), 1),
                               _createElementVNode("div", _hoisted_20, " 实际处理的扩展名：" + _toDisplayString((cfg.value.audio_extensions || []).join(" / ")), 1)
                             ]),
                             _: 1
@@ -687,7 +716,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   })
                 ]),
                 failureReasons.value.length ? (_openBlock(), _createElementBlock("div", _hoisted_21, [
-                  _cache[25] || (_cache[25] = _createElementVNode("div", { class: "mls-section-title" }, "失败原因分布", -1)),
+                  _cache[29] || (_cache[29] = _createElementVNode("div", { class: "mls-section-title" }, "失败原因分布", -1)),
                   _createVNode(_component_v_card, {
                     variant: "outlined",
                     class: "mls-reason"
@@ -705,33 +734,9 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     ]),
                     _: 1
                   }),
-                  _cache[26] || (_cache[26] = _createElementVNode("div", { class: "text-caption text-grey mt-1" }, " 原因里写了差哪一项：「曲名/艺人/专辑未对上」可以调「最低匹配分数」或改文件名； 「本地无某项」是文件本身没给出这个信息（整张 CD 压成一个 wav），降阈值也救不回来， 应该把它排出扫描范围。超限的用「重试全部失败」再试。 ", -1))
+                  _cache[30] || (_cache[30] = _createElementVNode("div", { class: "text-caption text-grey mt-1" }, " 原因里写了差哪一项：「未对上」可以调分数或改文件名；「本地无某项」是文件本身没给出 这个信息，降分数也救不回来，该把它排出扫描范围。 ", -1))
                 ])) : _createCommentVNode("", true),
                 _createElementVNode("div", _hoisted_24, [
-                  _cache[27] || (_cache[27] = _createElementVNode("div", { class: "mls-section-title" }, "流水线", -1)),
-                  _createElementVNode("div", _hoisted_25, [
-                    (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(_unref(FLOW_STEPS), (step, i) => {
-                      return _openBlock(), _createElementBlock("div", {
-                        key: step.key,
-                        class: "mls-flow-step"
-                      }, [
-                        _createElementVNode("div", _hoisted_26, _toDisplayString(i + 1), 1),
-                        _createElementVNode("div", _hoisted_27, [
-                          _createElementVNode("div", _hoisted_28, [
-                            _createVNode(_component_v_icon, {
-                              icon: step.icon,
-                              size: "16",
-                              class: "mr-1"
-                            }, null, 8, ["icon"]),
-                            _createTextVNode(_toDisplayString(step.title), 1)
-                          ]),
-                          _createElementVNode("div", _hoisted_29, _toDisplayString(step.desc), 1)
-                        ])
-                      ]);
-                    }), 128))
-                  ])
-                ]),
-                _createElementVNode("div", _hoisted_30, [
                   _createVNode(_component_v_spacer),
                   _createVNode(_component_v_btn, {
                     size: "small",
@@ -740,7 +745,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     loading: busy.value,
                     onClick: retryAllFailed
                   }, {
-                    default: _withCtx(() => [..._cache[28] || (_cache[28] = [
+                    default: _withCtx(() => [..._cache[31] || (_cache[31] = [
                       _createTextVNode("重试全部失败", -1)
                     ])]),
                     _: 1
@@ -750,9 +755,9 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     variant: "tonal",
                     color: "info",
                     loading: busy.value,
-                    onClick: _cache[1] || (_cache[1] = ($event) => scanNow(false))
+                    onClick: _cache[2] || (_cache[2] = ($event) => scanNow(false))
                   }, {
-                    default: _withCtx(() => [..._cache[29] || (_cache[29] = [
+                    default: _withCtx(() => [..._cache[32] || (_cache[32] = [
                       _createTextVNode("增量扫描", -1)
                     ])]),
                     _: 1
@@ -762,25 +767,25 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     variant: "tonal",
                     color: "error",
                     loading: busy.value,
-                    onClick: _cache[2] || (_cache[2] = ($event) => scanNow(true))
+                    onClick: _cache[3] || (_cache[3] = ($event) => scanNow(true))
                   }, {
-                    default: _withCtx(() => [..._cache[30] || (_cache[30] = [
+                    default: _withCtx(() => [..._cache[33] || (_cache[33] = [
                       _createTextVNode("全量覆盖", -1)
                     ])]),
                     _: 1
                   }, 8, ["loading"])
                 ])
-              ])) : (_openBlock(), _createElementBlock("div", _hoisted_31, [
-                _createElementVNode("div", _hoisted_32, [
+              ])) : (_openBlock(), _createElementBlock("div", _hoisted_25, [
+                _createElementVNode("div", _hoisted_26, [
                   _createElementVNode("div", null, [
-                    _createElementVNode("div", _hoisted_33, _toDisplayString(activeBucket.value?.label), 1),
-                    _createElementVNode("div", _hoisted_34, _toDisplayString(activeBucket.value?.hint), 1)
+                    _createElementVNode("div", _hoisted_27, _toDisplayString(activeBucket.value?.label), 1),
+                    _createElementVNode("div", _hoisted_28, _toDisplayString(activeBucket.value?.hint), 1)
                   ]),
                   _createVNode(_component_v_spacer),
                   _createVNode(_component_v_text_field, {
                     modelValue: search.value,
                     "onUpdate:modelValue": [
-                      _cache[3] || (_cache[3] = ($event) => search.value = $event),
+                      _cache[4] || (_cache[4] = ($event) => search.value = $event),
                       onSearch
                     ],
                     density: "compact",
@@ -798,7 +803,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     loading: busy.value,
                     onClick: retryAllFailed
                   }, {
-                    default: _withCtx(() => [..._cache[31] || (_cache[31] = [
+                    default: _withCtx(() => [..._cache[34] || (_cache[34] = [
                       _createTextVNode("重试全部失败", -1)
                     ])]),
                     _: 1
@@ -808,9 +813,9 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     variant: "tonal",
                     color: "info",
                     loading: busy.value,
-                    onClick: _cache[4] || (_cache[4] = ($event) => scanNow(false))
+                    onClick: _cache[5] || (_cache[5] = ($event) => scanNow(false))
                   }, {
-                    default: _withCtx(() => [..._cache[32] || (_cache[32] = [
+                    default: _withCtx(() => [..._cache[35] || (_cache[35] = [
                       _createTextVNode("增量扫描", -1)
                     ])]),
                     _: 1
@@ -820,9 +825,9 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     variant: "tonal",
                     color: "error",
                     loading: busy.value,
-                    onClick: _cache[5] || (_cache[5] = ($event) => scanNow(true))
+                    onClick: _cache[6] || (_cache[6] = ($event) => scanNow(true))
                   }, {
-                    default: _withCtx(() => [..._cache[33] || (_cache[33] = [
+                    default: _withCtx(() => [..._cache[36] || (_cache[36] = [
                       _createTextVNode("全量覆盖", -1)
                     ])]),
                     _: 1
@@ -854,8 +859,8 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   "item.name": _withCtx(({ item }) => [
                     _createElementVNode("div", {
                       title: item.path
-                    }, _toDisplayString(item.name), 9, _hoisted_35),
-                    _createElementVNode("div", _hoisted_36, _toDisplayString(item.path), 1)
+                    }, _toDisplayString(item.name), 9, _hoisted_29),
+                    _createElementVNode("div", _hoisted_30, _toDisplayString(item.path), 1)
                   ]),
                   "item.status": _withCtx(({ item }) => [
                     _createVNode(_component_v_chip, {
@@ -870,8 +875,8 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     }, 1032, ["color"])
                   ]),
                   "item.reason": _withCtx(({ item }) => [
-                    item.reason ? (_openBlock(), _createElementBlock("span", _hoisted_37, _toDisplayString(item.reason), 1)) : _createCommentVNode("", true),
-                    item.score != null ? (_openBlock(), _createElementBlock("span", _hoisted_38, " · 分数 " + _toDisplayString(item.score), 1)) : item.source ? (_openBlock(), _createElementBlock("span", _hoisted_39, " · " + _toDisplayString(sourceText(item.source)), 1)) : !item.reason ? (_openBlock(), _createElementBlock("span", _hoisted_40, "-")) : _createCommentVNode("", true)
+                    item.reason ? (_openBlock(), _createElementBlock("span", _hoisted_31, _toDisplayString(item.reason), 1)) : _createCommentVNode("", true),
+                    item.score != null ? (_openBlock(), _createElementBlock("span", _hoisted_32, " · 分数 " + _toDisplayString(item.score), 1)) : item.source ? (_openBlock(), _createElementBlock("span", _hoisted_33, " · " + _toDisplayString(sourceText(item.source)), 1)) : !item.reason ? (_openBlock(), _createElementBlock("span", _hoisted_34, "-")) : _createCommentVNode("", true)
                   ]),
                   "item.mtime": _withCtx(({ item }) => [
                     _createTextVNode(_toDisplayString(fmtTime(item.mtime)), 1)
@@ -888,7 +893,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       loading: busy.value,
                       onClick: ($event) => openEdit(item)
                     }, {
-                      default: _withCtx(() => [..._cache[34] || (_cache[34] = [
+                      default: _withCtx(() => [..._cache[37] || (_cache[37] = [
                         _createTextVNode("编辑", -1)
                       ])]),
                       _: 1
@@ -900,13 +905,13 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       loading: busy.value,
                       onClick: ($event) => retryRow(item)
                     }, {
-                      default: _withCtx(() => [..._cache[35] || (_cache[35] = [
+                      default: _withCtx(() => [..._cache[38] || (_cache[38] = [
                         _createTextVNode("重试", -1)
                       ])]),
                       _: 1
                     }, 8, ["loading", "onClick"]))
                   ]),
-                  "no-data": _withCtx(() => [..._cache[36] || (_cache[36] = [
+                  "no-data": _withCtx(() => [..._cache[39] || (_cache[39] = [
                     _createElementVNode("div", { class: "text-center pa-6 text-grey" }, "该桶暂无数据", -1)
                   ])]),
                   _: 1
@@ -916,7 +921,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
           ]),
           _createVNode(_component_v_snackbar, {
             modelValue: snackbar.value.show,
-            "onUpdate:modelValue": _cache[6] || (_cache[6] = ($event) => snackbar.value.show = $event),
+            "onUpdate:modelValue": _cache[7] || (_cache[7] = ($event) => snackbar.value.show = $event),
             color: snackbar.value.color,
             timeout: "3000",
             location: "bottom"
@@ -928,14 +933,14 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
           }, 8, ["modelValue", "color"]),
           _createVNode(_component_v_dialog, {
             modelValue: editDialog.value,
-            "onUpdate:modelValue": _cache[14] || (_cache[14] = ($event) => editDialog.value = $event),
+            "onUpdate:modelValue": _cache[15] || (_cache[15] = ($event) => editDialog.value = $event),
             "max-width": "560px"
           }, {
             default: _withCtx(() => [
               _createVNode(_component_v_card, null, {
                 default: _withCtx(() => [
                   _createVNode(_component_v_card_title, { class: "text-h6" }, {
-                    default: _withCtx(() => [..._cache[37] || (_cache[37] = [
+                    default: _withCtx(() => [..._cache[40] || (_cache[40] = [
                       _createTextVNode("补齐缺项", -1)
                     ])]),
                     _: 1
@@ -950,42 +955,42 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     default: _withCtx(() => [
                       _createVNode(_component_v_text_field, {
                         modelValue: editForm.value.title,
-                        "onUpdate:modelValue": _cache[7] || (_cache[7] = ($event) => editForm.value.title = $event),
+                        "onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => editForm.value.title = $event),
                         label: "曲名",
                         density: "compact",
                         class: "mb-1"
                       }, null, 8, ["modelValue"]),
                       _createVNode(_component_v_text_field, {
                         modelValue: editForm.value.artist,
-                        "onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => editForm.value.artist = $event),
+                        "onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => editForm.value.artist = $event),
                         label: "艺人",
                         density: "compact",
                         class: "mb-1"
                       }, null, 8, ["modelValue"]),
                       _createVNode(_component_v_text_field, {
                         modelValue: editForm.value.album,
-                        "onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => editForm.value.album = $event),
+                        "onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => editForm.value.album = $event),
                         label: "专辑",
                         density: "compact",
                         class: "mb-1"
                       }, null, 8, ["modelValue"]),
                       _createVNode(_component_v_text_field, {
                         modelValue: editForm.value.year,
-                        "onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => editForm.value.year = $event),
+                        "onUpdate:modelValue": _cache[11] || (_cache[11] = ($event) => editForm.value.year = $event),
                         label: "年份",
                         density: "compact",
                         class: "mb-1"
                       }, null, 8, ["modelValue"]),
                       _createVNode(_component_v_text_field, {
                         modelValue: editForm.value.tracknumber,
-                        "onUpdate:modelValue": _cache[11] || (_cache[11] = ($event) => editForm.value.tracknumber = $event),
+                        "onUpdate:modelValue": _cache[12] || (_cache[12] = ($event) => editForm.value.tracknumber = $event),
                         label: "音轨号",
                         density: "compact",
                         class: "mb-1"
                       }, null, 8, ["modelValue"]),
                       _createVNode(_component_v_textarea, {
                         modelValue: editForm.value.lyrics,
-                        "onUpdate:modelValue": _cache[12] || (_cache[12] = ($event) => editForm.value.lyrics = $event),
+                        "onUpdate:modelValue": _cache[13] || (_cache[13] = ($event) => editForm.value.lyrics = $event),
                         label: "歌词",
                         density: "compact",
                         rows: "4",
@@ -1000,9 +1005,9 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       _createVNode(_component_v_btn, {
                         variant: "text",
                         class: "text-none",
-                        onClick: _cache[13] || (_cache[13] = ($event) => editDialog.value = false)
+                        onClick: _cache[14] || (_cache[14] = ($event) => editDialog.value = false)
                       }, {
-                        default: _withCtx(() => [..._cache[38] || (_cache[38] = [
+                        default: _withCtx(() => [..._cache[41] || (_cache[41] = [
                           _createTextVNode("取消", -1)
                         ])]),
                         _: 1
@@ -1014,7 +1019,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                         loading: busy.value,
                         onClick: submitEdit
                       }, {
-                        default: _withCtx(() => [..._cache[39] || (_cache[39] = [
+                        default: _withCtx(() => [..._cache[42] || (_cache[42] = [
                           _createTextVNode("保存", -1)
                         ])]),
                         _: 1
@@ -1035,6 +1040,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const Page = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-b4601f6f"]]);
+const Page = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-56c0f874"]]);
 
 export { Page as default };

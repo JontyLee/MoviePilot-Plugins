@@ -1,11 +1,15 @@
-// 数据流转的同一份描述：配置页用它讲"这一环由哪个开关决定"，数据页用它讲"这一轮走到哪了"。
-// 两处必须同源，否则改了流水线却只改了一个页面。
+// 流水线只有一份描述：配置页拿它画「一个文件要过几道判断」，数据页拿它画「这一轮走到哪、
+// 各环落了多少文件」。两处同源，改了环节不会只改一个页面。
+// 这里只留界面要显示的最短文字 —— 逐项判据、失败归因、各源现状都在仓库的
+// docs/musiclibraryscraper.md，配置页与概览不该长成一篇说明文。
 export interface FlowStep {
   key: string
   icon: string
+  // 两个字左右的环节名，画在节点上
   title: string
-  desc: string
-  // 决定这一环的配置项（配置页用得上，数据页只是浏览）
+  // 一行小字：这一环凭什么放行
+  caption: string
+  // 决定这一环的配置项（配置页标出来，数据页不显示）
   knobs?: string
 }
 
@@ -13,60 +17,78 @@ export const FLOW_STEPS: FlowStep[] = [
   {
     key: 'enumerate',
     icon: 'mdi-folder-search-outline',
-    title: '枚举库内音频',
-    desc: '只处理「宿主音频白名单 ∩ 插件支持表」的交集；Jellyfin 的 .trickplay 预览缓存整棵跳过，'
-      + '目录软链不跟随，指向库外的音频软链也跳过 —— 写标签是按路径落到真实文件的。',
+    title: '枚举',
+    caption: '宿主白名单交集',
     knobs: '音乐库路径 / 排除路径'
   },
   {
     key: 'identity',
-    icon: 'mdi-file-document-edit-outline',
-    title: '读本地身份',
-    desc: '用 mutagen 读文件已有的曲名/艺人/专辑/年份/轨道号；缺哪项就按 艺人/专辑 (年)/NN - 曲名 '
-      + '的目录结构兜底。只有严格在库路径之下的目录才算艺人/专辑，库根本身的名字不参与猜测。',
+    icon: 'mdi-tag-text-outline',
+    title: '身份',
+    caption: '标签优先，目录兜底',
     knobs: '音乐库路径'
   },
   {
     key: 'incremental',
     icon: 'mdi-skip-forward-outline',
-    title: '增量判据',
-    desc: '只补缺模式下，曲名+艺人+专辑+内嵌封面 四项齐全的文件按 mtime+size 直接记账跳过，'
-      + '一个请求都不发；缺哪项补哪项，已有非空标签不动。强制覆盖则每轮全库重扫重问。',
+    title: '增量',
+    caption: '四项齐全就免问',
     knobs: '写入模式'
   },
   {
     key: 'query',
     icon: 'mdi-magnify',
-    title: '逐源检索',
-    desc: '按「识别来源」逐个问：内置源直接请求各音乐平台的公开检索接口（只发清洗后的「曲名-艺人」检索词，'
-      + '库内路径不出本机），MTW 模式转给 /apimt/fetch_id3_by_title（会带完整路径作参考）。'
-      + '某个源已经出到 3/3 满分候选就立刻停止，不再问后面的源 —— 否则每个文件都要打满整个源列表。',
-    knobs: '识别来源 / 识别源'
+    title: '检索',
+    caption: '逐源问，满分即停',
+    knobs: '识别源'
   },
   {
     key: 'score',
     icon: 'mdi-scale-balance',
-    title: '打分与阈值',
-    desc: '曲名 / 艺人 / 专辑 各 1 分（繁简与大小写归一后互相包含即算命中）；都没满分就合并全部候选取最高分。'
-      + '最高分仍低于「最低匹配分数」判失败、不写入，也不碰文件。失败原因会连着写清差在哪一项：'
-      + '「曲名未对上」是候选不对，可以放宽阈值或改文件名；「本地无曲名」是文件本身没给出曲名'
-      + '（整张 CD 压成一个 wav 就是这种），放宽阈值也救不回来，该把它排出扫描范围。',
+    title: '打分',
+    caption: '曲名/艺人/专辑 各 1 分',
     knobs: '最低匹配分数'
   },
   {
     key: 'write',
     icon: 'mdi-content-save-move-outline',
-    title: '宿主原生写入',
-    desc: '命中后沿用 MP 原生音乐刮削链写标签、下载内嵌封面、写歌词；最终是否覆盖还要叠加宿主'
-      + '「设置 → 媒体刮削」的音乐三项策略，取两者里较强者。',
-    knobs: '写入模式 + 宿主刮削策略'
+    title: '写入',
+    caption: '宿主原生刮削链',
+    knobs: '写入模式 + 宿主策略'
   },
   {
     key: 'ledger',
     icon: 'mdi-bookcheck-outline',
     title: '记账',
-    desc: '成功进「已处理」，未达阈值进「失败待重试」，同一个文件最多重试 5 次后进「超限放弃」。'
-      + '服务侧故障不算文件失败、不烧额度：内置源全部不可达、MTW 不可达/鉴权失败都一样，'
-      + '连续 5 次故障本轮直接熔断，剩下的留给下一轮。'
+    caption: '故障不算文件失败'
   }
 ]
+
+// 各环节的数字来自 /status 的 runs（本轮汇总）：数据页把流水线画成"这一轮走到哪了"。
+// 键与环节同名，取不到的按 0。
+export interface StageCounts {
+  enumerate?: number
+  identity?: number
+  incremental?: number
+  query?: number
+  score?: number
+  write?: number
+  ledger?: number
+}
+
+export function stageCounts(runs: any): StageCounts {
+  const n = (v: any) => Number(v ?? 0) || 0
+  const scanned = n(runs?.scanned)
+  // 免问的那部分：命中增量账 + 已有标签判齐 + 超限跳过
+  const free = n(runs?.from_cache) + n(runs?.skipped_tagged) + n(runs?.exhausted)
+  const queried = Math.max(scanned - free, 0)
+  return {
+    enumerate: scanned,
+    identity: scanned,
+    incremental: free,
+    query: queried,
+    score: n(runs?.ok) + n(runs?.failed),
+    write: n(runs?.ok),
+    ledger: n(runs?.failed) + n(runs?.transport) + n(runs?.error)
+  }
+}

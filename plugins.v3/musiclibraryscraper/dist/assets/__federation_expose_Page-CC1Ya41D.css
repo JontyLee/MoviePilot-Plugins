@@ -1,0 +1,49 @@
+
+/* 仅插件内局部样式；不得写全局 v- 或 mdi- 类规则（构建有 postcss 门禁）。 */
+.mls-page[data-v-56c0f874] { width: 100%;
+}
+.mls-head[data-v-56c0f874] { display: flex; align-items: center; gap: 8px; padding: 12px 16px;
+}
+.mls-head-text[data-v-56c0f874] { min-width: 0;
+}
+.mls-body[data-v-56c0f874] { display: flex; min-height: 440px;
+}
+.mls-nav[data-v-56c0f874] {
+  flex: 0 0 176px;
+  border-right: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+  background: rgba(var(--v-theme-on-surface), .02);
+}
+.mls-nav-item[data-v-56c0f874] { margin: 2px 8px;
+}
+.mls-content[data-v-56c0f874] { flex: 1 1 auto; min-width: 0; overflow-y: auto;
+}
+.mls-pane[data-v-56c0f874] { padding: 14px 16px;
+}
+.mls-section[data-v-56c0f874] { margin-top: 14px;
+}
+.mls-section-title[data-v-56c0f874] { font-size: 13px; font-weight: 600; margin-bottom: 6px; opacity: .75;
+}
+.mls-fill[data-v-56c0f874] { height: 100%;
+}
+.mls-reason[data-v-56c0f874] { padding: 6px 10px;
+}
+.mls-reason-row[data-v-56c0f874] { display: flex; align-items: center; gap: 10px; padding: 3px 0;
+}
+.mls-reason-text[data-v-56c0f874] { flex: 1 1 auto; min-width: 0; font-size: 13px;
+}
+.mls-flow-head[data-v-56c0f874] { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px;
+}
+.mls-page .text-truncate[data-v-56c0f874] {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (max-width: 760px) {
+.mls-body[data-v-56c0f874] { flex-direction: column;
+}
+.mls-nav[data-v-56c0f874] {
+    flex: 0 0 auto;
+    border-right: none;
+    border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+}
+}

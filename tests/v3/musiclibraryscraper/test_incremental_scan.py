@@ -1,8 +1,8 @@
 """MusicLibraryScraper 增量扫描 & 状态账 单测。
 
 只验证插件自身逻辑（done/failed 记账、mtime+size 增量跳过、失败重试上限、定向重试、
-prune、status 汇总不泄漏密码）。MTW 网络与 MP 写入通过替换私有方法 __scrape_file /
-__is_complete 完全屏蔽。
+prune、配置回显与回写不泄漏凭据）。识别源的网络与 MP 写入通过替换私有方法
+__scrape_file / __is_complete 完全屏蔽；真的发请求那几条用 RequestUtils 替身作答。
 
 运行：python3 tests/v3/musiclibraryscraper/test_incremental_scan.py
 """
@@ -73,10 +73,10 @@ _SCRAPE = "_MusicLibraryScraper__scrape_file"
 class _Resp:
     """requests.Response 的最小替身：只带插件要看的那三样（status_code / json / close）。
 
-    存在的理由就是本轮修掉的那个坑：宿主 RequestUtils.post_json 里那句 `if response:`
-    判的是 requests 的 Response.__bool__（等价于 status_code < 400），所以 401、500 会
-    连同错误体一起被折成 None。用 post_json 做桩的测试会把"JWT 过期"演成"MTW 挂了"，
-    和线上行为完全不同 —— 客户端一律改用 post() + 这个假响应。
+    存在的理由：宿主 RequestUtils 的便捷方法（get/post_json）判的是
+    Response.__bool__（等价于 status_code < 400），非 2xx 会连同错误体一起被折成
+    None —— 限流(429)、风控(403) 就分不开真连不上。插件因此自己拿 get_res/post
+    读状态码，桩也就必须能按状态码作答。
     """
 
     def __init__(self, status=200, payload=None, bad_json=False):
@@ -97,9 +97,9 @@ class _Resp:
 def _ru(handler):
     """按 handler(url, body) -> _Resp|None 造一个 RequestUtils 替身类（None = 连不上）。
 
-    MTW 那条路是 POST JSON，内置源是 GET 带查询参数（QQ 音乐除外，它也 POST）——
-    两条通道都交给同一个 handler，第二个参数原样给出请求体或查询参数，
-    这样"内置源不许把库内路径发出去"这类断言能直接看请求内容。
+    内置源多数是 GET 带查询参数，QQ 音乐那份是 POST JSON —— 两条都交给同一个
+    handler，第二个参数原样给出请求体或查询参数，这样"识别请求不许把库内路径发出去"
+    这类断言能直接看请求内容。
     """
 
     class _Ru:
@@ -113,6 +113,60 @@ def _ru(handler):
             return handler(url, params)
 
     return _Ru
+
+
+def _payload(resource: str, rows):
+    """把折叠形状的候选还原成各平台自己的检索响应，供"逐源问答"那几条用例喂桩。
+
+    只铺打分看得见的三项（曲名/艺人/专辑），其余字段给到解析器认得的最低配置 ——
+    用例要断言的是"问了几个源、每个源答了什么"，不是各平台字段映射（那归
+    BuiltinSourcesTest 拿真实形状守）。
+    """
+    if resource == "netease":
+        return {"result": {"songs": [{
+            "id": 1, "name": r["name"], "no": 1, "cd": "01", "dt": 1000,
+            "publishTime": 0,
+            "ar": [{"name": r["artist"]}],
+            "al": {"name": r["album"], "picUrl": "http://p/1.jpg"},
+        } for r in rows]}}
+    if resource == "qmusic":
+        return {"req_0": {"code": 0, "data": {"body": {"song": {"list": [{
+            "title": r["name"], "mid": "S1", "interval": 1,
+            "time_public": "2003-07-31", "index_album": 1, "index_cd": 1,
+            "singer": [{"name": r["artist"]}],
+            "album": {"mid": "A1", "name": r["album"]},
+        } for r in rows]}}}}}
+    if resource == "kugou":
+        return {"status": 1, "data": {"info": [{
+            "hash": "H1", "songname_original": r["name"], "songname": r["name"],
+            "singername": r["artist"], "album_name": r["album"], "duration": 1,
+            "trans_param": {"union_cover": "http://c/{size}.jpg"},
+        } for r in rows]}}
+    if resource == "migu":
+        return {"code": "000000", "songResultData": {"result": [{
+            "id": "M1", "name": r["name"], "duration": 1, "publishDate": "2003-07-31",
+            "singers": [{"name": r["artist"]}], "albums": [{"name": r["album"]}],
+            "imgItems": [{"imgSizeType": "03", "img": "http://c/3.jpg"}],
+        } for r in rows]}}
+    if resource == "musicbrainz":
+        return {"recordings": [{
+            "id": "MB1", "title": r["name"], "length": 1000,
+            "first-release-date": "2003-07-31",
+            "artist-credit": [{"name": r["artist"]}],
+            "releases": [{"id": "r1", "title": r["album"],
+                          "status": "Official", "date": "2003-07-31"}],
+        } for r in rows]}
+    raise KeyError(resource)
+
+
+def _source_of(url: str) -> str:
+    """从请求 URL 认回是哪个源（桩只有 URL 可依据）。"""
+    for host, resource in (("music.163.com", "netease"), ("musicu.fcg", "qmusic"),
+                           ("kugou.com", "kugou"), ("migu.cn", "migu"),
+                           ("musicbrainz.org", "musicbrainz")):
+        if host in url:
+            return resource
+    raise AssertionError(f"不是内置源的 URL：{url}")
 
 
 @contextlib.contextmanager
@@ -136,8 +190,7 @@ class IncrementalScanTest(unittest.TestCase):
         p = mls.MusicLibraryScraper()
         p._scraper_paths = str(tmp)
         p._exclude_paths = ""
-        p._mtw_base_url = "http://mtw:8002"
-        p._mtw_resources = ["netease"]
+        p._active_resources = ["netease"]
         p._force_all = False
         p._min_score = 3
         counters = {"scrape": 0, "tag": 0}
@@ -181,7 +234,7 @@ class IncrementalScanTest(unittest.TestCase):
         c["scrape"] = c["tag"] = 0
         self._scan(p)
         runs = p.get_data("runs")
-        # 两个 done 命中缓存：既不读 tag 也不调 MTW
+        # 两个 done 命中缓存：既不读 tag 也不发识别请求
         self.assertEqual(runs["from_cache"], 2)
         # 只有可重试的失败项（retries=1<MAX）再次触发 scrape
         self.assertEqual(c["scrape"], 1)
@@ -238,7 +291,7 @@ class IncrementalScanTest(unittest.TestCase):
         self.assertEqual(len(p.get_data("done")), 1)
 
     def _transport_outage(self, names, existing_failed=None, reason=None):
-        """造一个"每次抓取都是 MTW 侧故障"的插件实例。"""
+        """造一个"每次抓取都撞上识别源侧故障"的插件实例。"""
         files = {n: "ok" for n in names}
         p, tmp, counters = self._plugin(files)
 
@@ -251,8 +304,8 @@ class IncrementalScanTest(unittest.TestCase):
             p.save_data("failed", existing_failed)
         return p, tmp, counters
 
-    def test_mtw_outage_does_not_burn_retry_budget(self):
-        """MTW 整体故障不能记在文件头上：不写 failed 账、不涨 retries，否则连错
+    def test_transport_outage_does_not_burn_retry_budget(self):
+        """识别源整体不可达不能记在文件头上：不写 failed 账、不涨 retries，否则连错
         MAX_RETRY 轮整库就永久跳过（mtime+size 不变，再也不刷）。"""
         p, tmp, c = self._transport_outage([f"{i}.mp3" for i in range(4)])
         self._scan(p)
@@ -265,7 +318,7 @@ class IncrementalScanTest(unittest.TestCase):
         """汇总的"待处理"必须和同一时刻数据页的待处理桶是同一个口径。
 
         桶是"这份文件列表里既不在 done 也不在 failed 的那些"。上一轮已经记过失败的
-        文件在这一轮撞上 MTW 故障时，账本原样留着（不涨 retries 也不删），所以它属于
+        文件在这一轮撞上服务侧故障时，账本原样留着（不涨 retries 也不删），所以它属于
         失败桶、不属于待处理；用计数器加减很容易把它多算进待处理，两个数字就对不上了。
         """
         names = [f"{i}.mp3" for i in range(4)]
@@ -280,7 +333,7 @@ class IncrementalScanTest(unittest.TestCase):
         self.assertEqual(len(p._collect_rows("pending")), runs["pending"])
         self.assertIn(str(tmp / "0.mp3"), p.get_data("failed"))
 
-    def test_mtw_outage_breaks_the_round_and_keeps_the_books(self):
+    def test_transport_outage_breaks_the_round_and_keeps_the_books(self):
         """连续故障踩满阈值就熔断：剩下的文件不再空打请求，且不 prune（账本只走了一半）。"""
         stale = {"/nonexistent/gone.mp3": {"mtime": 1, "size": 1, "retries": 1}}
         p, tmp, c = self._transport_outage(
@@ -292,7 +345,7 @@ class IncrementalScanTest(unittest.TestCase):
         self.assertTrue(runs["aborted"])
         self.assertEqual(runs["transport"], mls._ABORT_AFTER_TRANSPORT)
         # 熔断后没走到的文件必须还算"待处理"，否则那一轮看起来像库已经扫完；
-        # 栽在 MTW 故障上的那 5 个也一样待处理 —— 它们既没进 done 也没进 failed，
+        # 栽在服务侧故障上的那 5 个也一样待处理 —— 它们既没进 done 也没进 failed，
         # 数据页的待处理桶会把它们列出来，汇总跟着减一份就对不上号了。
         self.assertEqual(runs["pending"], 12)
         self.assertEqual(len(p._collect_rows("pending")), runs["pending"])
@@ -307,7 +360,7 @@ class IncrementalScanTest(unittest.TestCase):
         self.assertFalse(p.get_data("last_targeted")["aborted"])
 
     def test_large_targeted_batch_also_breaks_on_outage(self):
-        """/retry 全部失败项可能有几千个：MTW 真挂着时一样要熔断，否则一路打到底。"""
+        """/retry 全部失败项可能有几千个：识别源真挂着时一样要熔断，否则一路打到底。"""
         p, tmp, c = self._transport_outage([f"{i}.mp3" for i in range(12)])
         self._scan(
             p, force=True, target_paths=[str(tmp / f"{i}.mp3") for i in range(12)]
@@ -316,9 +369,9 @@ class IncrementalScanTest(unittest.TestCase):
         self.assertTrue(p.get_data("last_targeted")["aborted"])
 
     def test_transport_outage_covers_every_documented_reason(self):
-        """三种故障归因在批量循环里走同一条分支：鉴权失败、接口报错和不可达一样不记在
-        文件头上、一样计入 transport、一样能熔断。批量侧此前只有"不可达"被验证过 ——
-        另两种是 v0.3.4 新增的归因，之前只证明了它们存在于那个元组里。"""
+        """每一条传输侧归因在批量循环里走同一分支：都不记在文件头上、都计入 transport、
+        都能熔断。含 legacy 那几条是因为账本里的历史失败会带着旧归因文本进入新一轮
+        判定，分类不能按"这条是旧文案所以不算故障"走。"""
         for reason in mls._TRANSPORT_REASONS:
             with self.subTest(reason=reason):
                 p, tmp, c = self._transport_outage(
@@ -411,19 +464,6 @@ class IncrementalScanTest(unittest.TestCase):
         self.assertGreater(len(done_saves), 1)
         self.assertTrue(any(n > 0 for n in done_saves[:-1]), done_saves)
 
-    def test_status_hides_password(self):
-        p, tmp, c = self._plugin({"a.mp3": "ok"})
-        p._enabled = True
-        p._mtw_username = "JontyLee"
-        p._mtw_password = "SECRETPW123"
-        self._scan(p)
-        status = p._build_status()
-        blob = str(status)
-        self.assertNotIn("SECRETPW123", blob)
-        self.assertNotIn("mtw_password", status["config"])
-        self.assertTrue(status["config"]["has_username"])
-        self.assertEqual(status["counts"]["done"], 1)
-        self.assertIn("deficient", status["counts"])
 
     def test_status_groups_failures_by_reason(self):
         """失败按原因聚合：调阈值是"这一类有几个、这类里最高几分"的决定，逐行 reason
@@ -677,9 +717,17 @@ class IncrementalScanTest(unittest.TestCase):
 
 
 class ContractTest(unittest.TestCase):
-    def _plugin(self):
+    def _plugin(self, min_score=None, resources=None):
+        """插件实例替身：只摆这次用例要动的那几项，其余走类默认（= 全部内置源）。
+
+        min_score 直接赋值、不过 _clamp_min_score：有一条用例要的就是"阈值高于满分"，
+        看的是候选选不选得中，不是配置收敛（收敛归 test_min_score_clamped_*）。
+        """
         p = mls.MusicLibraryScraper()
-        p._mtw_base_url = "http://mtw:8002"
+        if min_score is not None:
+            p._min_score = min_score
+        if resources is not None:
+            p._active_resources = list(resources)
         return p
 
     def test_bad_cron_falls_back(self):
@@ -821,9 +869,8 @@ class ContractTest(unittest.TestCase):
         p.init_plugin({
             "enabled": True,
             "scraper_paths": "/music",
-            "mtw_base_url": "http://mtw:8002",
-            "mtw_username": "u",
-            "mtw_password": "secret",
+            "exclude_paths": "/music/noise",
+            "resources": ["netease", "qmusic"],
             "min_score": 2,
         })
         p._configs.clear()
@@ -836,40 +883,63 @@ class ContractTest(unittest.TestCase):
                 return payload
         return _Req()
 
-    def test_get_config_does_not_leak_password(self):
-        """GET /config 回显可编辑配置，但不带回密码：只给"存没存过"。
-
-        侧栏对话框没有密码可读也要能保存，靠的是 POST 那边"留空即保留"，
-        不是把密码发到页面上 —— 宿主那条链路本来就把明文配置交回前端。
-        """
-        got = self._configured().api_get_config(None)
-        self.assertNotIn("mtw_password", got)
-        self.assertTrue(got["mtw_password_set"])
-        self.assertEqual(got["mtw_username"], "u")
-        self.assertFalse(got["onlyonce"])
 
     def test_post_config_keeps_everything_not_in_the_payload(self):
-        """只改传上来的键：改一个分数不该顺手清空密码、库路径或 MTW 地址。
+        """只改传上来的键：改一个分数不该顺手清空库路径、排除项或源名单。
 
         这条路径绕开宿主「插件管理 → 配置」的整体替换，全量写回由插件自己做，
-        所以底必须先拿当前配置垫上；密码那格留空同样算"没改"（表单不回填密码）。
+        所以底必须先拿当前配置垫上。
         """
         p = self._configured()
-        res = asyncio.run(p.api_config(self._body({"min_score": 3, "mtw_password": ""})))
+        res = asyncio.run(p.api_config(self._body({"min_score": 3})))
         self.assertTrue(res["ok"])
         written = p._configs[-1]
         self.assertEqual(written["min_score"], 3)
-        self.assertEqual(written["mtw_password"], "secret")
-        self.assertEqual(written["mtw_base_url"], "http://mtw:8002")
         self.assertEqual(written["scraper_paths"], "/music")
+        self.assertEqual(written["exclude_paths"], "/music/noise")
+        self.assertEqual(written["resources"], ["netease", "qmusic"])
 
     def test_post_config_drops_unknown_keys(self):
-        """认不出来的键不写进配置：免得留下表单没定义、配置里却存在的野键。"""
+        """认不出来的键不写进配置：免得留下表单没定义、配置里却存在的野键。
+
+        MTW 那几项已经不再是配置（识别源全部由插件直连平台），历史配置里残留的
+        source_backend / mtw_base_url 传上来也必须被丢掉，否则下一次全量写回会
+        把已经废弃的键又养回去。
+        """
         p = self._configured()
-        asyncio.run(p.api_config(self._body({"mtw_password_set": True, "typo_key": 1})))
+        asyncio.run(p.api_config(self._body({
+            "typo_key": 1, "source_backend": "mtw",
+            "mtw_base_url": "http://mtw:8002", "mtw_password": "p",
+        })))
         written = p._configs[-1]
-        self.assertNotIn("typo_key", written)
-        self.assertNotIn("mtw_password_set", written)
+        for gone in ("typo_key", "source_backend", "mtw_base_url", "mtw_password"):
+            self.assertNotIn(gone, written)
+
+    def test_get_config_echoes_the_stored_value_not_the_effective_one(self):
+        """GET /config 回配置原值：回显"本轮生效的五个源"会让下一次保存把留空写成点名。
+
+        留空的意思是"全部源"，包括以后新加的源。对话框拿生效值起头，用户什么也没改
+        点一次保存，配置里就固化了当前这五个 —— 以后插件多接一个平台也不会轮到他。
+        """
+        p = mls.MusicLibraryScraper()
+        p.init_plugin({"enabled": True, "scraper_paths": "/music"})
+        res = p.api_get_config(None)
+        self.assertEqual(res["resources"], [])
+        self.assertEqual(p._active_resources, list(mls._DEFAULT_RESOURCES))
+        # 只读说明项（实际处理的扩展名）可以给界面看，但不能混进要回写的配置键
+        self.assertIn("audio_extensions", res)
+        self.assertNotIn("audio_extensions", p._config_snapshot())
+
+    def test_writeback_keeps_blank_resources_blank(self):
+        """回写要保住「留空」：onlyonce 回写与对话框保存都会整体替换这份配置。"""
+        p = mls.MusicLibraryScraper()
+        p.init_plugin({"enabled": True, "scraper_paths": "/music", "resources": []})
+        p.init_plugin({**p._config_snapshot(), "onlyonce": True})
+        self.assertEqual(p._configs[-1]["resources"], [])
+        # 点了名就要保住点名：这条规则只对"用户没选"生效
+        p.init_plugin({"enabled": True, "scraper_paths": "/music", "resources": ["migu"]})
+        p.init_plugin({**p._config_snapshot(), "onlyonce": True})
+        self.assertEqual(p._configs[-1]["resources"], ["migu"])
 
     def test_post_config_rejects_a_non_object_body(self):
         """请求体不是 JSON 对象时说一句能懂的话，而不是抛到宿主 API 层。"""
@@ -884,14 +954,6 @@ class ContractTest(unittest.TestCase):
             self.assertFalse(res["ok"])
         self.assertEqual(p._configs, [])
 
-    def test_post_config_clears_password_only_when_given_one(self):
-        """只有显式给了密码才替换：这一项改错了会让 MTW 模式整轮 401。"""
-        p = self._configured()
-        p._token = "上一个实例签发的"
-        asyncio.run(p.api_config(self._body({"mtw_password": "fresh"})))
-        self.assertEqual(p._configs[-1]["mtw_password"], "fresh")
-        # 换了凭据要丢掉缓存的令牌，继续带它请求只会白吃一次 401
-        self.assertIsNone(p._token)
 
     def test_data_page_translates_footer_and_status(self):
         """数据页不能漏 Vuetify 默认英文文案，且页脚文案必须走 Vuetify 3 的直传 props。
@@ -947,9 +1009,14 @@ class ContractTest(unittest.TestCase):
         self.assertIn("FLOW_STEPS", flow)
         self.assertIn("from './flow'", page)
         self.assertIn("from './flow'", cfg)
+        # 动画也只有一份：两个页面各画一套，节点顺序就会分叉
+        self.assertIn("./FlowPipeline.vue", page)
+        self.assertIn("./FlowPipeline.vue", cfg)
+        # 界面只画环节，不摊开说明文：长句一律在 docs
+        self.assertNotIn("desc:", flow)
         # 配置页先讲流程再讲具体项：这插件每个开关最后都改写音乐文件且不可回滚
         self.assertIn("pane === 'flow'", cfg)
-        self.assertLess(cfg.index("流程总览"), cfg.index("运行与写入"))
+        self.assertLess(cfg.index("'流程'"), cfg.index("'运行与写入'"))
         # 侧栏版式向宿主申请宽度（宿主对话框默认 60rem 装不下侧栏 + 分页表）
         self.assertIn("emit('layout'", page)
         self.assertIn("emit('layout'", cfg)
@@ -973,39 +1040,42 @@ class ContractTest(unittest.TestCase):
         self.assertIn('rows.sort(key=lambda r: r["path"])', src)
 
     def test_config_page_explains_choices(self):
-        """易误解的选项必须在配置页讲清楚：留空=全部源、选取排序规则、两档写入模式的后果。"""
+        """判据自足在原生表单，Vue 配置页只留最短提示 + 指向 docs —— 两边各有各的活。
+
+        宿主「插件管理 → 配置」渲染的就是原生表单：Vue 页精简了也不该让人在没有联邦页面
+        时读不到"留空=全部源""同分时取哪一份""目录结构兜底"这类判据。反过来 Vue 页不该
+        把判据摊成长篇说明文 —— 那正是这批文字该去 docs/ 的理由。
+        """
         plugin_dir = Path(mls.__file__).parent
+        comp = plugin_dir / "frontend" / "src" / "components"
         src = Path(mls.__file__).read_text(encoding="utf-8")
-        cfg = (plugin_dir / "frontend" / "src" / "components" / "Config.vue").read_text(
-            encoding="utf-8"
-        )
-        # 原生表单与 Vue 配置页都要有
-        self.assertIn("留空=当前来源全部", src)
-        self.assertIn("留空 = 全部源", cfg)
-        for phrase in ("只补缺", "强制覆盖", "宿主", "同分时", "目录结构兜底"):
-            self.assertIn(phrase, src)
+        cfg = (comp / "Config.vue").read_text(encoding="utf-8")
+        page = (comp / "Page.vue").read_text(encoding="utf-8")
+        flow = (comp / "flow.ts").read_text(encoding="utf-8")
+
+        notes = mls._FORM_NOTES
+        for phrase in ("留空即全部源", "只补缺", "强制覆盖", "宿主", "同分时",
+                       "目录结构兜底", "手工改过", "不会清空", "（1-3）", "回滚",
+                       "音频白名单", ".trickplay", "软链", "库内路径不出本机"):
+            self.assertIn(phrase, notes)
+        # 说明集中在一处、写在代码里，就不能只在 Vue 那一侧维护
+        self.assertIn("_FORM_NOTES", src)
+
+        # Vue 配置页：一眼能懂的短句 + 去 docs 的入口
+        for phrase in ("只补缺", "强制覆盖", "留空 = 全部源", "（1-3）", "宿主",
+                       ".trickplay", "无法回滚", "库内路径与目录结构不出本机",
+                       "docs/musiclibraryscraper.md"):
             self.assertIn(phrase, cfg)
-        # 覆盖后果不能只写"会覆盖"，要说清哪些字段会被替换、哪些不会
-        self.assertIn("手工改过", cfg)
-        self.assertIn("不会清空", cfg)
-        # 阈值范围要与服务端夹紧一致，不能再写 0-3 诱导用户填出不可逆的 0
-        for surface in (src, cfg):
-            self.assertNotIn("（0-3）", surface)
-            self.assertIn("（1-3）", surface)
-        for phrase in ("1-3", "回滚"):
-            self.assertIn(phrase, src)
-            self.assertIn(phrase, cfg)
-        # 宿主白名单这条要写在配置页：不写的话用户只会奇怪 .wv 怎么永远刮失败
-        for phrase in ("音频白名单", ".trickplay", "软链"):
-            self.assertIn(phrase, src)
-            self.assertIn(phrase, cfg)
-        # 识别来源两条路都要在两个表面说破：谁能用酷我/smart_tag、要不要 MTW，
-        # 只写在一处会让人配完才发现内置源没有那个源
-        for phrase in ("识别来源", "内置源", "免部署"):
-            self.assertIn(phrase, src)
-            self.assertIn(phrase, cfg)
-        # 隐私边界只能写在配置页上，用户选内置源时看的就是这里
-        self.assertIn("库内路径不出本机", cfg)
+        # 阈值范围要与服务端夹紧一致，写 0-3 会诱导用户填出不可逆的 0
+        for surface, name in ((src, "__init__"), (cfg, "Config.vue"), (notes, "_FORM_NOTES")):
+            self.assertNotIn("（0-3）", surface, name)
+
+        # MTW 已经整体退场：界面上再提一句，等于给用户留一条没有实现的路
+        for surface, name in ((cfg, "Config.vue"), (page, "Page.vue"), (flow, "flow.ts")):
+            self.assertNotIn("MTW", surface, name)
+            self.assertNotIn("Music Tag Web", surface, name)
+            self.assertNotIn("kuwo", surface, name)
+            self.assertNotIn("smart_tag", surface, name)
 
     def test_config_notes_are_consolidated(self):
         """说明集中在页面底部一个块里，不跟在单个配置项下面（persistent-hint 会撑坏排版）。"""
@@ -1018,15 +1088,20 @@ class ContractTest(unittest.TestCase):
         self.assertNotIn('"hint"', form)
 
     def test_reason_names_the_missing_field_in_ui(self):
-        """原因得说得出差在哪一项：光看 2/3 分分不清该降阈值还是该把文件排出扫描范围。"""
+        """原因得说得出差在哪一项：光看 2/3 分分不清该降阈值还是该把文件排出扫描范围。
+
+        界面只留一句能懂的提示（「未对上」去调分数，「本地无某项」降分数也救不回来），
+        逐条归因的长篇解释在 docs 与原生表单说明里 —— 流水线组件不该长成说明文。
+        """
         comp = Path(mls.__file__).parent / "frontend" / "src" / "components"
-        flow = (comp / "flow.ts").read_text(encoding="utf-8")
         page = (comp / "Page.vue").read_text(encoding="utf-8")
-        for phrase in ("曲名未对上", "本地无", "整张 CD"):
-            self.assertIn(phrase, flow)
-        # 概览那句提示不能只教人降阈值：本地缺这一项的文件降了也救不回来
         self.assertIn("本地无", page)
         self.assertIn("排出", page)
+        # 服务端真的把逐项判定写进原因里，界面上才有一句可说
+        src = Path(mls.__file__).read_text(encoding="utf-8")
+        self.assertIn("未对上", src)
+        self.assertIn("本地无", src)
+        self.assertIn('f"{detail}：{miss}"', src)
 
     def test_dead_select_mode_option_removed(self):
         """mtw_select_mode 从不进请求体、也不是 MTW 入参，属于死配置，不能复活。"""
@@ -1066,38 +1141,6 @@ class ContractTest(unittest.TestCase):
         self.assertIn("Version 3", (root / "LICENSE").read_text(encoding="utf-8"))
         self.assertIn("上游、许可与引用", readme)
 
-    def test_mtw_endpoints_use_apimt_prefix(self):
-        """MTW 的 Django 路由挂在 /apimt/ 下，写成 /api/ 会一律 404。"""
-        src = Path(mls.__file__).read_text(encoding="utf-8")
-        self.assertIn("/apimt/token/", src)
-        self.assertIn("/apimt/{endpoint}/", src)
-        self.assertIn('self._mtw_request("fetch_id3_by_title"', src)
-        self.assertNotIn('"/api/', src)
-        self.assertNotIn('/api/token/', src)
-        self.assertNotIn('/api/fetch_id3_by_title/', src)
-
-
-class MatchTest(unittest.TestCase):
-    """候选比对这些坑：繁简之外的空格/标点差异、文件名当搜索词、tag 读不到时的目录兜底。"""
-
-    def _plugin(self, min_score=3, resources="netease", backend="mtw"):
-        p = mls.MusicLibraryScraper()
-        p._min_score = min_score
-        # 故意传字符串：验证旧配置（单选）也能跑
-        p._mtw_resources = resources
-        p._mtw_base_url = "http://mtw:8002"
-        p._mtw_username = ""
-        p._mtw_password = ""
-        # 后端与真正要问的源分开指定：类默认值是内置源，而这批用例描述的是 MTW 那条链路，
-        # 不写清楚就会拿 MTW 形状的回答去喂内置源解析器，测出来的是形状不匹配而不是被测行为。
-        p._backend = backend
-        builtin = backend == "builtin"
-        p._active_resources = mls._normalize_resources(
-            resources,
-            known=mls._sources.RESOURCES if builtin else None,
-            default=mls._sources.RESOURCES if builtin else None,
-        )
-        return p
 
     def test_norm_text_strips_space_and_punctuation(self):
         self.assertEqual(mls._norm_text("你的陈奕迅 国语精选"), "你的陈奕迅国语精选")
@@ -1304,12 +1347,12 @@ class MatchTest(unittest.TestCase):
         fp.write_bytes(b"x")
         p = self._plugin(min_score=3)
         cands = [{"name": "黑面", "artist": "陈奕迅", "album": "黑白灰"}]
-        picked, sc = p._mtw_pick_best(fp, cands)
+        picked, sc = p._pick_best(fp, cands)
         self.assertEqual(sc, 3)
         self.assertIsNotNone(picked)
         # 阈值抬高到 4（满分 3）→ 不返回候选，但仍回报真实分数
         p2 = self._plugin(min_score=4)
-        picked2, sc2 = p2._mtw_pick_best(fp, cands)
+        picked2, sc2 = p2._pick_best(fp, cands)
         self.assertIsNone(picked2)
         self.assertEqual(sc2, 3)
 
@@ -1348,12 +1391,11 @@ class MatchTest(unittest.TestCase):
         fp = tmp / "陈奕迅" / "黑白灰" / "07 - 黑面.flac"
         fp.parent.mkdir(parents=True)
         fp.write_bytes(b"x")
-        p = self._plugin(min_score=3)
+        p = self._plugin(min_score=3, resources=["netease"])
 
         def _handler(url, body):
-            return _Resp(200, {"result": True, "data": {
-                "data": [{"name": "黑面", "artist": "陈奕迅", "album": "The Line-Up"}]
-            }})
+            return _Resp(200, _payload("netease", [
+                {"name": "黑面", "artist": "陈奕迅", "album": "The Line-Up"}]))
 
         orig = mls.RequestUtils
         mls.RequestUtils = _ru(_handler)
@@ -1367,7 +1409,7 @@ class MatchTest(unittest.TestCase):
         self.assertIn("专辑未对上", reason)
 
     def test_scrape_reason_distinguishes_no_local_title(self):
-        """本地读不出曲名时一个请求都不发，原因也不能写成"MTW 无候选"。"""
+        """本地读不出曲名时一个请求都不发，原因也不能写成"识别源无候选"。"""
         tmp = Path(tempfile.mkdtemp())
         fp = tmp / "07 - .flac"
         fp.write_bytes(b"x")
@@ -1376,7 +1418,7 @@ class MatchTest(unittest.TestCase):
 
         def _handler(url, body):
             asked.append(body)
-            return _Resp(200, {"result": True, "data": []})
+            return _Resp(200, _payload(_source_of(url), []))
 
         orig = mls.RequestUtils
         mls.RequestUtils = _ru(_handler)
@@ -1386,23 +1428,23 @@ class MatchTest(unittest.TestCase):
             mls.RequestUtils = orig
         self.assertFalse(okf)
         self.assertIn("本地读不出曲名", reason)
-        self.assertNotIn("MTW 无候选", reason)
+        self.assertNotIn(mls._NO_CANDIDATE_REASON, reason)
+        self.assertEqual(asked, [])
 
     def test_failed_file_leaves_a_log_line(self):
-        """失败不能只在账本里留痕：一轮问满 7 个源可能静默跑上百分钟，看着像卡死。"""
+        """失败不能只在账本里留痕：一轮问满全部源可能要上百分钟，看着像卡死。"""
         tmp = Path(tempfile.mkdtemp())
         fp = tmp / "陈奕迅" / "黑白灰" / "07 - 黑面.flac"
         fp.parent.mkdir(parents=True)
         fp.write_bytes(b"x")
-        p = self._plugin(min_score=3)
+        p = self._plugin(min_score=3, resources=["netease"])
         p._scraper_paths = str(tmp)
         p._exclude_paths = ""
         p._force_all = False
 
         def _handler(url, body):
-            return _Resp(200, {"result": True, "data": {
-                "data": [{"name": "乱码", "artist": "别人", "album": "别的"}]
-            }})
+            return _Resp(200, _payload("netease", [
+                {"name": "乱码", "artist": "别人", "album": "别的"}]))
 
         lines = []
         orig_ru, orig_log = mls.RequestUtils, mls.logger
@@ -1423,36 +1465,36 @@ class MatchTest(unittest.TestCase):
                         [l for l in lines if "未通过" in l])
 
     def test_fetch_candidates_queries_clean_title_not_filename(self):
-        """搜索词必须是清洗后的曲名；传 "07 - 黑面.flac" 只会召回噪音。"""
-        captured = {"n": 0}
+        """检索词必须是清洗后的「曲名-艺人」：传 "07 - 黑面.flac" 只会召回噪音。"""
+        captured = {}
 
         def _handler(url, body):
-            captured["n"] += 1
+            captured["n"] = captured.get("n", 0) + 1
             captured["url"] = url
             captured["body"] = body
-            return _Resp(200, {"result": True, "data": []})
+            return _Resp(200, _payload("netease", []))
 
         tmp = Path(tempfile.mkdtemp())
         fp = tmp / "陈奕迅" / "黑白灰" / "07 - 黑面.flac"
         fp.parent.mkdir(parents=True)
         fp.write_bytes(b"x")
-        p = self._plugin()
+        p = self._plugin(resources=["netease"])
         orig = mls.RequestUtils
         mls.RequestUtils = _ru(_handler)
         try:
-            cands, failure = p._mtw_fetch_candidates(fp)
+            cands, failure = p._fetch_candidates(fp)
         finally:
             mls.RequestUtils = orig
-        # 空候选是"可用响应 + 查无此曲"，不是 MTW 故障
+        # 空候选是"平台正常作答 + 查无此曲"，不是服务侧故障
         self.assertEqual(cands, [])
         self.assertIsNone(failure)
-        self.assertIn("/apimt/fetch_id3_by_title/", captured["url"])
-        self.assertEqual(captured["body"]["title"], "黑面")
-        self.assertEqual(captured["body"]["artist"], "陈奕迅")
-        self.assertEqual(captured["body"]["album"], "黑白灰")
-        self.assertEqual(captured["body"]["resource"], "netease")
-        # 旧的单字符串配置不能被当字符逐个遍历
+        self.assertIn("music.163.com", captured["url"])
+        # 一次一问：只发检索词，专辑与目录结构留在本机
         self.assertEqual(captured["n"], 1)
+        self.assertEqual(str(captured["body"]["s"]), "黑面-陈奕迅")
+        self.assertNotIn("黑白灰", str(captured["body"]))
+        self.assertNotIn("07 -", str(captured["body"]))
+        self.assertNotIn(str(fp.parent), str(captured["body"]))
 
     def test_normalize_resources(self):
         """多选值要能吃下字符串、分隔串、数组三种历史形状，空值回落全源。"""
@@ -1483,7 +1525,7 @@ class MatchTest(unittest.TestCase):
         self.assertEqual(mls._normalize_resources(["nope"]), list(mls._DEFAULT_RESOURCES))
 
     def test_partial_source_failure_is_not_an_outage(self):
-        """有源正常应答（哪怕是空候选）就是确定答案"曲库查不到"，不能报成 MTW 故障。
+        """有源正常应答（哪怕是空候选）就是确定答案"曲库查不到"，不能报成服务侧故障。
 
         musicbrainz 限流、咪咕 500 这类单源故障很常见；若据此记 transport 并熔断，
         全库会永远停在待处理，且永远烧不掉 retries。
@@ -1491,39 +1533,20 @@ class MatchTest(unittest.TestCase):
         fp = self._track()
 
         def _handler(url, body):
-            if body.get("resource") == "netease":
-                return _Resp(200, {"result": True, "data": []})
-            return _Resp(503, {"detail": "migu upstream error"})  # 这个源挂了
+            if "music.163.com" in url:
+                return _Resp(200, _payload("netease", []))
+            return _Resp(503, {"detail": "upstream error"})  # 这个源挂了
 
         p = self._plugin(resources=["netease", "qmusic"])
         orig = mls.RequestUtils
         mls.RequestUtils = _ru(_handler)
         try:
-            cands, failure = p._mtw_fetch_candidates(fp)
+            cands, failure = p._fetch_candidates(fp)
         finally:
             mls.RequestUtils = orig
         self.assertEqual(cands, [])
         self.assertIsNone(failure)
 
-    def test_fetch_candidates_unwraps_paged_data(self):
-        """MTW 有时把结果再包一层 {"data": {"data": [...]}}：内层也要认。"""
-        fp = self._track()
-
-        def _handler(url, body):
-            return _Resp(200, {"result": True,
-                               "data": {"data": [{"name": "黑面", "artist": "陈奕迅",
-                                                  "album": "黑白灰"}]}})
-
-        p = self._plugin(resources=["netease"])
-        orig = mls.RequestUtils
-        mls.RequestUtils = _ru(_handler)
-        try:
-            cands, failure = p._mtw_fetch_candidates(fp)
-        finally:
-            mls.RequestUtils = orig
-        self.assertIsNone(failure)
-        self.assertEqual(len(cands), 1)
-        self.assertEqual(cands[0]["resource"], "netease")
 
     def test_supported_audio_ext_follows_host_whitelist(self):
         """宿主写入链按 RMT_AUDIOEXT 过滤：它不收的扩展名不该进来白打 7 次请求。"""
@@ -1613,11 +1636,12 @@ class MatchTest(unittest.TestCase):
         self.assertEqual(clamp(1), 1)
         self.assertEqual(clamp(3), 3)
 
-    def _fake_mtw(self, by_resource, calls):
+    def _fake_sources(self, by_resource, calls):
+        """按 URL 认源、按源作答的桩；calls 记录被问到的源与顺序。"""
         def _handler(url, body):
-            resource = body["resource"]
+            resource = _source_of(url)
             calls.append(resource)
-            return _Resp(200, {"result": True, "data": by_resource.get(resource, [])})
+            return _Resp(200, _payload(resource, by_resource.get(resource, [])))
 
         return _ru(_handler)
 
@@ -1638,16 +1662,16 @@ class MatchTest(unittest.TestCase):
         calls = []
         p = self._plugin(min_score=3, resources=list(mls._DEFAULT_RESOURCES))
         orig = mls.RequestUtils
-        mls.RequestUtils = self._fake_mtw(by_resource, calls)
+        mls.RequestUtils = self._fake_sources(by_resource, calls)
         try:
-            cands, failure = p._mtw_fetch_candidates(fp)
+            cands, failure = p._fetch_candidates(fp)
         finally:
             mls.RequestUtils = orig
         self.assertIsNone(failure)
         self.assertEqual(calls, list(mls._DEFAULT_RESOURCES))
         self.assertEqual([c["resource"] for c in cands], list(mls._DEFAULT_RESOURCES))
         # 专辑名各源不同 → 全部只有 2 分，落到阈值以下
-        picked, score = p._mtw_pick_best(fp, cands)
+        picked, score = p._pick_best(fp, cands)
         self.assertIsNone(picked)
         self.assertEqual(score, 2)
 
@@ -1661,185 +1685,21 @@ class MatchTest(unittest.TestCase):
         calls = []
         p = self._plugin(min_score=3, resources=list(mls._DEFAULT_RESOURCES))
         orig = mls.RequestUtils
-        mls.RequestUtils = self._fake_mtw(by_resource, calls)
+        mls.RequestUtils = self._fake_sources(by_resource, calls)
         try:
-            cands, failure = p._mtw_fetch_candidates(fp)
+            cands, failure = p._fetch_candidates(fp)
         finally:
             mls.RequestUtils = orig
         self.assertIsNone(failure)
         self.assertEqual(calls, ["netease", "qmusic"])
-        picked, score = p._mtw_pick_best(fp, cands)
+        picked, score = p._pick_best(fp, cands)
         self.assertEqual((score, picked["resource"]), (3, "qmusic"))
 
-    def test_fetch_candidates_reports_mtw_failure_not_empty_result(self):
-        """MTW 挂了/令牌失效时不能报"无候选"：那会被记成文件失败并烧掉重试额度。"""
-        fp = self._track()
 
-        def _handler(url, body):
-            if "token" in url:
-                return _Resp(200, {"token": "t"})
-            # 请求发出去了但连上了个寂寞：post 只在 RequestException 时返回 None
-            return None
 
-        p = self._plugin(resources=["netease"])
-        p._mtw_username, p._mtw_password = "u", "p"
-        orig = mls.RequestUtils
-        mls.RequestUtils = _ru(_handler)
-        try:
-            cands, failure = p._mtw_fetch_candidates(fp)
-        finally:
-            mls.RequestUtils = orig
-        self.assertEqual(cands, [])
-        self.assertEqual(failure, mls._UNREACHABLE_REASON)
 
-    def test_fetch_candidates_reauth_once_on_token_expired(self):
-        """JWT 提前失效（HTTP 401 + DRF 错误体）：判成鉴权失败要强制重登一次再重试。
 
-        这一条同时钉住本轮修掉的那个坑：宿主 post_json 里 `if response:` 走的是
-        Response.__bool__（status < 400），401 的响应连状态码带错误体全被折成 None，
-        插件只会记成"MTW 不可达"，一路 401 到扫完、还顺带把熔断触发一次。
-        """
-        fp = self._track()
-        state = {"logins": 0, "calls": 0}
 
-        def _handler(url, body):
-            if "token" in url:
-                state["logins"] += 1
-                return _Resp(200, {"token": "tok%d" % state["logins"]})
-            state["calls"] += 1
-            if state["calls"] == 1:
-                # DRF SimpleJWT 的过期响应：真·401，不是 200 夹带错误体
-                return _Resp(401, {"detail": "Given token not valid for any token type",
-                                   "code": "token_not_valid"})
-            return _Resp(200, {"result": True, "data": [
-                {"name": "黑面", "artist": "陈奕迅", "album": "黑白灰"}]})
-
-        p = self._plugin(resources=["netease"])
-        p._mtw_username, p._mtw_password = "u", "p"
-        orig = mls.RequestUtils
-        mls.RequestUtils = _ru(_handler)
-        try:
-            cands, failure = p._mtw_fetch_candidates(fp)
-        finally:
-            mls.RequestUtils = orig
-        self.assertIsNone(failure)
-        self.assertEqual(len(cands), 1)
-        self.assertEqual(state["logins"], 2)
-
-    def test_mtw_post_maps_status_code_not_only_body(self):
-        """状态码才是故障归因的依据：401 是鉴权、5xx 是接口报错、连不上才是不可达。
-
-        宿主 RequestUtils.post_json 里那句 `if response:` 判的是 requests 的
-        Response.__bool__（等价 status_code < 400），非 2xx 连响应体都拿不到，所以
-        插件必须绕过它自己收 Response —— 这条就是钉住那个绕过还在。
-        """
-        # 整本源码里不许再出现对宿主那层的调用（注释也要避开这个写法，别改成绕路断言）
-        src = Path(mls.__file__).read_text(encoding="utf-8")
-        self.assertNotIn(".post_json(", src)
-        self.assertNotIn(".post_dict(", src)
-        self.assertIn(".post(url=url, json=body)", inspect.getsource(mls._mtw_post))
-
-        for status, want in ((401, mls._AUTH_REASON), (403, mls._AUTH_REASON),
-                             (500, mls._API_ERROR_REASON), (404, mls._API_ERROR_REASON)):
-            resp = _Resp(status, {"detail": "boom"})
-            with _patch_ru(lambda url, body: resp):
-                payload, reason = mls._mtw_post("http://mtw:8002/apimt/token/", {}, {})
-            self.assertEqual(reason, want, f"HTTP {status}")
-            self.assertEqual(payload, {"detail": "boom"}, "错误体要留着，别丢")
-            self.assertTrue(resp.closed, f"HTTP {status} 也得把连接关掉")
-
-        # 2xx 但解不出对象（网关/登录页截了）：不能当成"曲库说查不到"
-        with _patch_ru(lambda url, body: _Resp(200, "<html/>", bad_json=True)):
-            self.assertEqual(mls._mtw_post("u", {}, {})[1], mls._UNREACHABLE_REASON)
-        # 连不上：post 只在 RequestException 时返回 None
-        with _patch_ru(lambda url, body: None):
-            self.assertEqual(mls._mtw_post("u", {}, {})[1], mls._UNREACHABLE_REASON)
-        # 正常空候选是可用响应
-        with _patch_ru(lambda url, body: _Resp(200, {"result": True, "data": []})):
-            self.assertIsNone(mls._mtw_post("u", {}, {})[1])
-
-    def test_login_success_shape_is_not_judged_as_fetch_result(self):
-        """/apimt/token/ 的成功响应本来就没有 data 字段：拿检索结果的形状去兜底会把
-        一次成功登录说成"MTW 不可达"，日志与后续任何按 reason 分支的调用方都会跟着错。"""
-        with _patch_ru(lambda url, body: _Resp(200, {"token": "t", "expired_at": 0})):
-            payload, reason = mls._mtw_post(
-                "http://mtw:8002/apimt/token/", {}, {}, expect_data=False)
-        self.assertIsNone(reason)
-        self.assertEqual(payload["token"], "t")
-        # 检索接口仍然按形状兜底（200 夹带 DRF 错误体那种）
-        with _patch_ru(lambda url, body: _Resp(200, {"detail": "x", "code": "token_not_valid"})):
-            self.assertEqual(mls._mtw_post("u", {}, {})[1], mls._AUTH_REASON)
-
-    def test_api_error_does_not_relogin(self):
-        """接口报错（5xx）不是鉴权失败：不该顺手把令牌清掉重登一次。"""
-        fp = self._track()
-        state = {"logins": 0, "calls": 0}
-
-        def _handler(url, body):
-            if "token" in url:
-                state["logins"] += 1
-                return _Resp(200, {"token": "t"})
-            state["calls"] += 1
-            return _Resp(500, {"detail": "internal"})
-
-        p = self._plugin(resources=["netease"])
-        p._mtw_username, p._mtw_password = "u", "p"
-        orig = mls.RequestUtils
-        mls.RequestUtils = _ru(_handler)
-        try:
-            cands, failure = p._mtw_fetch_candidates(fp)
-        finally:
-            mls.RequestUtils = orig
-        self.assertEqual(cands, [])
-        self.assertEqual(failure, mls._API_ERROR_REASON)
-        self.assertEqual(state["calls"], 1)
-        self.assertEqual(state["logins"], 1)
-
-    def test_login_failure_is_backed_off(self):
-        """账密错 / MTW 关了 /apimt/token/：每个文件、每个源都会先登一次，
-        那是成倍增长的必然失败请求加一屏同样的错误日志。失败后要静默。"""
-        p = self._plugin(resources=["netease"])
-        p._mtw_username, p._mtw_password = "u", "wrong"
-        state = {"logins": 0, "errors": 0}
-        orig_error = mls.logger.error
-
-        def _handler(url, body):
-            if "token" in url:
-                state["logins"] += 1
-                return _Resp(401, {"detail": "no"})
-            return _Resp(200, {"result": True, "data": []})
-
-        mls.logger.error = lambda *a, **k: state.__setitem__(
-            "errors", state["errors"] + 1)
-        orig = mls.RequestUtils
-        mls.RequestUtils = _ru(_handler)
-        try:
-            for _ in range(200):
-                self.assertIsNone(p._mtw_token())
-            # 只登了一次，也只记了一条错误
-            self.assertEqual(state["logins"], 1)
-            self.assertEqual(state["errors"], 1)
-            # 静默期过了才再试一次（把时间戳往前挪，不用真的等 60 秒）
-            p.__dict__["_login_retry_at"] = time.time() - 1
-            self.assertIsNone(p._mtw_token())
-            self.assertEqual(state["logins"], 2)
-            # 登录成功后立刻作废静默期：下一次令牌真过期时能马上重登
-            mls.RequestUtils = _ru(lambda url, body: _Resp(200, {"token": "t"}))
-            p.__dict__["_login_retry_at"] = time.time() + 9999
-            p._token, p._token_expiry = None, 0.0
-            # 静默期没到就还是登不上（这是它的作用），到期后成功登录会把它清零
-            self.assertIsNone(p._mtw_token())
-            p.__dict__["_login_retry_at"] = time.time() - 1
-            self.assertEqual(p._mtw_token(), "t")
-            self.assertEqual(p.__dict__["_login_retry_at"], 0.0)
-        finally:
-            mls.logger.error = orig_error
-            mls.RequestUtils = orig
-
-    def test_configured_login_backoff_window_is_used(self):
-        """静默期是常量，别写成"下一次请求就再试"：一轮几千个文件要能挡住。"""
-        self.assertGreaterEqual(mls._LOGIN_BACKOFF, 30.0)
-        self.assertIn(mls._API_ERROR_REASON, mls._TRANSPORT_REASONS)
 
     def test_musicinfo_has_no_type_or_artist_init_arg(self):
         """宿主 MusicInfo 的 type 是 init=False，artist 也不是参数，传了会 TypeError。"""
@@ -1859,7 +1719,6 @@ class RobustnessTest(unittest.TestCase):
 
     def _plugin(self):
         p = mls.MusicLibraryScraper()
-        p._mtw_base_url = "http://mtw:8002"
         p._enabled = True
         p._cron = "0 3 * * 0"
         return p
@@ -1993,58 +1852,24 @@ class RobustnessTest(unittest.TestCase):
         self.assertFalse(only_outside["accepted"])
         self.assertEqual(only_outside["reason"], "out_of_library")
 
-    def test_token_expiry_follows_the_jwt(self):
-        """过期时间按令牌自己的 exp 算；拿不到就只缓存 1 小时，别再硬编 6 天。"""
-        import base64
-        import json as _json
 
-        exp = int(time.time()) + 7200
-        payload = base64.urlsafe_b64encode(
-            _json.dumps({"exp": exp}).encode()
-        ).decode().rstrip("=")
-        token = f"hdr.{payload}.sig"
-        self.assertEqual(mls._jwt_exp(token), float(exp))
-        self.assertEqual(mls._token_expiry_at(token, {"token": token}), float(exp))
-        # 响应体里给了过期时间就以它为准
-        self.assertEqual(
-            mls._token_expiry_at(token, {"token": token, "expired_at": exp + 60}),
-            float(exp + 60),
-        )
-        # 解不出声明：宁可短缓存，多登一次比整轮带着废 token 白跑便宜
-        self.assertLess(
-            mls._token_expiry_at("opaque", {"token": "opaque"}) - time.time(), 3700
-        )
-
-    def test_mtw_failure_classification(self):
-        """2xx 响应体仍要按形状兜底：空候选可用，认不出形状的不是"查无此曲"。
-
-        状态码那层归因在 _mtw_post（401/403 鉴权、其它 4xx/5xx 接口报错、连不上不可达），
-        这里只管 MTW 偶尔用 200 夹带 DRF 错误体的情况。
-        """
-        self.assertIsNone(mls._mtw_failure_reason({"result": True, "data": []}))
-        self.assertEqual(mls._mtw_failure_reason(None), mls._UNREACHABLE_REASON)
-        self.assertEqual(
-            mls._mtw_failure_reason({"detail": "Given token not valid",
-                                     "code": "token_not_valid"}),
-            mls._AUTH_REASON,
-        )
-        # 认不出形状的响应同样不能当成"查无此曲"
-        self.assertEqual(mls._mtw_failure_reason({"msg": "ok"}), mls._UNREACHABLE_REASON)
 
     def test_transport_reasons_are_the_documented_ones(self):
-        """扫描侧靠前缀判断要不要记 retries，两边用同一组常量、不能各写各的。
+        """扫描侧按 startswith 归类要不要记 retries，两边必须用同一组常量。
 
-        MTW 那三种故障（不可达 / 鉴权 / 接口报错）都不许算到文件头上：只有鉴权那一种
-        会触发强制重登，另外两种只喂熔断。内置源的同一种故障单列一条，且前缀不能撞
-        MTW —— 撞了 startswith 就把两条链路的账混成一类。
+        现在的故障只有一条"识别源不可达"；MTW 时代那三条留在 _TRANSPORT_REASONS 里
+        只为兼容升级前已写进账本的历史失败 —— 少了它们，同一类失败会被拆成两种记账
+        方式（旧的烧 retries、新的不烧）。「无候选」是平台正常作答后的结论，属于文件
+        失败，绝不能混进传输侧，否则全库永远停在待处理。
         """
-        for reason in (mls._UNREACHABLE_REASON, mls._AUTH_REASON, mls._API_ERROR_REASON):
-            self.assertIn(reason, mls._TRANSPORT_REASONS)
-            self.assertTrue(reason.startswith("MTW"))
-        builtin_reason = mls._BUILTIN_UNREACHABLE_REASON
-        self.assertIn(builtin_reason, mls._TRANSPORT_REASONS)
-        self.assertFalse(builtin_reason.startswith("MTW"))
-        self.assertEqual(len(mls._TRANSPORT_REASONS), 4)
+        self.assertEqual(mls._TRANSPORT_REASONS[0], mls._UNREACHABLE_REASON)
+        for legacy in ("MTW 不可达", "MTW 鉴权失败", "MTW 接口报错", "内置识别源不可达"):
+            self.assertIn(legacy, mls._LEGACY_TRANSPORT_REASONS)
+            self.assertIn(legacy, mls._TRANSPORT_REASONS)
+        self.assertNotIn(mls._NO_CANDIDATE_REASON, mls._TRANSPORT_REASONS)
+        # 新归因不能撞上 legacy 的前缀，否则两条链路的账混成一类
+        self.assertFalse(any(mls._UNREACHABLE_REASON.startswith(x)
+                             for x in mls._LEGACY_TRANSPORT_REASONS))
 
     def test_command_retry_uses_same_filter_as_api(self):
         """/music_scraper_retry 也要过一遍库内判定：否则照着账本里已删除、已挪出库的路径
@@ -2065,30 +1890,11 @@ class RobustnessTest(unittest.TestCase):
         self.assertEqual(kicked, [{"force": True, "paths": [str(tmp / "in.mp3")]}])
         self.assertIn("已不在库内", p.messages[-1]["text"])
 
-    def test_config_change_drops_stale_token(self):
-        """换 MTW 地址 / 换账号后手里那个令牌是上一个实例签发的：
-        继续带着它既白吃 401，也算把凭据发到新地址上。"""
-        p = self._plugin()
-        base = {
-            "enabled": True, "scraper_paths": "/music",
-            "mtw_base_url": "http://mtw-a:8002",
-            "mtw_username": "u", "mtw_password": "p",
-        }
-        p.init_plugin(base)
-        p._token, p._token_expiry = "tok", time.time() + 3600
-        p.init_plugin({**base, "mtw_base_url": "http://mtw-b:8002"})
-        self.assertIsNone(p._token)
-        self.assertEqual(p._token_expiry, 0.0)
-        # 保存一次没改过 MTW 的配置不该把人家的登录状态清掉（否则每次改 cron 都要重登）
-        p.init_plugin({**base, "mtw_base_url": "http://mtw-a:8002"})
-        p._token, p._token_expiry = "tok", time.time() + 3600
-        p.init_plugin({**base, "cron": "0 4 * * 0"})
-        self.assertEqual(p._token, "tok")
 
     def test_min_score_clamped_on_config_load(self):
         """min_score 走 init_plugin 时同样要收敛：配置页的 min/max 拦不住原生表单。"""
         p = self._plugin()
-        base = {"enabled": True, "scraper_paths": "/music", "mtw_base_url": "http://mtw:8002"}
+        base = {"enabled": True, "scraper_paths": "/music"}
         p.init_plugin({**base, "min_score": 0})
         self.assertEqual(p._min_score, 1)
         p.init_plugin({**base, "min_score": 9})
@@ -2096,32 +1902,6 @@ class RobustnessTest(unittest.TestCase):
         p.init_plugin({**base, "min_score": 2})
         self.assertEqual(p._min_score, 2)
 
-    def test_anonymous_mtw_warns_only_once(self):
-        """没配 MTW 账密时每个请求都会走匿名分支：一轮几千个文件不能把日志刷满。"""
-        p = self._plugin()
-        p._mtw_username, p._mtw_password = "", ""
-        warns = []
-        orig_warning = mls.logger.warning
-        orig_ru = mls.RequestUtils
-        mls.logger.warning = lambda *a, **k: warns.append(str(a))
-
-        try:
-            for _ in range(50):
-                self.assertIsNone(p._mtw_token())
-            self.assertEqual(len(warns), 1)
-            # 配上账密并登录成功后复位，之后又退回匿名时还要提示
-            mls.RequestUtils = _ru(lambda url, body: _Resp(200, {"token": "t"}))
-            p._mtw_username, p._mtw_password = "u", "p"
-            self.assertIsNotNone(p._mtw_token())
-            self.assertFalse(p.__dict__.get("_anon_warned"))
-            p._token, p._token_expiry = None, 0.0
-            p._mtw_password = ""
-            for _ in range(10):
-                self.assertIsNone(p._mtw_token())
-            self.assertEqual(len(warns), 2)
-        finally:
-            mls.logger.warning = orig_warning
-            mls.RequestUtils = orig_ru
 
     def test_corrupt_ledger_entry_does_not_crash_readers(self):
         """plugindata 可能被旧版本/手工编辑写成半对的样子：条目不是 dict 时
@@ -2213,10 +1993,12 @@ class RobustnessTest(unittest.TestCase):
         self.assertEqual(p.api_files(_Req({}))["total"], 1)
 
     def test_form_defaults_keep_resources_empty(self):
-        """原生表单不要把 7 个源预填上：留空=全部源才是配置页的口径。"""
-        _content, defaults = self._plugin().get_form()
-        self.assertEqual(defaults["mtw_resource"], [])
-        self.assertIn("留空即全部源", mls._FORM_NOTES)
+        """原生表单不要把 5 个源预填上：留空=全部源才是配置页的口径。"""
+        content, defaults = self._plugin().get_form()
+        self.assertEqual(defaults["resources"], [])
+        # 口径要写在用户看的那一项上，不能只写在代码注释里
+        self.assertIn("留空", str(content))
+        self.assertNotIn("mtw_resource", defaults)
 
     def test_onlyonce_writeback_carries_every_config_key(self):
         """宿主 update_config 是整体替换不是合并：只回写 onlyonce 会清掉其余配置。"""
@@ -2225,9 +2007,8 @@ class RobustnessTest(unittest.TestCase):
         config = {
             **defaults,
             "scraper_paths": "/music",
-            "mtw_base_url": "http://mtw:8002",
-            "mtw_username": "u",
-            "mtw_password": "p",
+            "resources": ["netease"],
+            "min_score": 2,
         }
         p.init_plugin(config)
         self.assertEqual(p._configs, [])  # 没勾选"立即运行一次"就不该回写
@@ -2238,11 +2019,11 @@ class RobustnessTest(unittest.TestCase):
 
 
 class BuiltinSourcesTest(unittest.TestCase):
-    """内置识别源：不部署 Music Tag Web 也要能刮完整份库。
+    """识别源：不部署任何额外服务也要能刮完整份库。
 
-    这批用例守的是三件事：候选字段映射真的能喂给 MusicInfo（否则免部署就是空话）、
-    平台改版/风控要说成"这个源没给答案"而不是"曲库里查不到"、以及内置源绝不把库内路径
-    发给平台（MTW 模式会带 full_path，内置模式没有那个必要）。
+    这批用例守的是三件事：各平台的字段映射真的能喂给 MusicInfo（否则改了键名就白刮）、
+    平台改版/风控要说成"这个源没给答案"而不是"曲库里查不到"、以及识别请求绝不把库内路径
+    或目录结构发出去（本机能算出来的比对项，没必要送到别人服务器上）。
     """
 
     _NETEASE = {
@@ -2296,20 +2077,10 @@ class BuiltinSourcesTest(unittest.TestCase):
         "musicbrainz.org": _MUSICBRAINZ,
     }
 
-    def _plugin(self, resources=None, backend="builtin", min_score=3):
+    def _plugin(self, resources=None, min_score=3):
         p = mls.MusicLibraryScraper()
         p._min_score = min_score
-        p._backend = backend
-        p._mtw_base_url = "http://mtw:8002" if backend == "mtw" else ""
-        p._mtw_username = ""
-        p._mtw_password = ""
-        p._mtw_resources = list(resources or mls._DEFAULT_RESOURCES)
-        builtin = backend == "builtin"
-        p._active_resources = mls._normalize_resources(
-            resources,
-            known=mls._sources.RESOURCES if builtin else None,
-            default=mls._sources.RESOURCES if builtin else None,
-        )
+        p._active_resources = mls._normalize_resources(resources)
         return p
 
     def _track(self, title="黑面", artist="陈奕迅", album="黑白灰"):
@@ -2333,7 +2104,7 @@ class BuiltinSourcesTest(unittest.TestCase):
 
     # ---------------- 检索词 ----------------
 
-    def test_build_keyword_follows_mtw_convention(self):
+    def test_build_keyword_keeps_title_and_artist_together(self):
         """曲名与艺人互不包含时用 "曲名-艺人" 提准，已包含就只发曲名。"""
         build = mls._sources.build_keyword
         self.assertEqual(build("黑面", "陈奕迅"), "黑面-陈奕迅")
@@ -2425,20 +2196,20 @@ class BuiltinSourcesTest(unittest.TestCase):
         self.assertIsNone(mls._sources.build_request("kuwo", "黑面-陈奕迅"))
         self.assertEqual(
             mls._sources.parse_candidates("kuwo", {}), ([], mls._sources.UNREACHABLE))
-        # 酷我与 smart_tag 只在 MTW 模式能问，这份边界要在源清单里说清楚
+        # 酷我与 smart_tag 插件没有实现，这份边界要在源清单里说清楚
         self.assertNotIn("kuwo", mls._sources.RESOURCES)
         self.assertNotIn("smart_tag", mls._sources.RESOURCES)
 
     # ---------------- 拉候选与后端派发 ----------------
 
-    def test_builtin_fetch_tags_resource_and_stops_at_perfect(self):
+    def test_fetch_tags_resource_and_stops_at_perfect(self):
         asked = []
         p = self._plugin(resources=list(mls._sources.RESOURCES))
         fp = self._track("晴天", "周杰伦", "叶惠美")
         orig = mls.RequestUtils
         mls.RequestUtils = self._answer(asked)
         try:
-            cands, failure = p._builtin_fetch_candidates(fp)
+            cands, failure = p._fetch_candidates(fp)
             # 满分候选（曲名+艺人+专辑全中）在第一个源就出现，后面的源不该再被问
             self.assertIsNone(failure)
             self.assertEqual([c["resource"] for c in cands], ["netease"])
@@ -2446,20 +2217,20 @@ class BuiltinSourcesTest(unittest.TestCase):
         finally:
             mls.RequestUtils = orig
 
-    def test_builtin_fetch_reports_transport_only_when_no_source_answered(self):
+    def test_fetch_reports_transport_only_when_no_source_answered(self):
         """全部源都连不上才是服务侧故障；只要有一个源答了空，就是"查不到"。"""
         p = self._plugin()
         fp = self._track("晴天")
         orig = mls.RequestUtils
         mls.RequestUtils = self._answer([], fail_urls=tuple(self._BY_URL.keys()))
         try:
-            cands, failure = p._builtin_fetch_candidates(fp)
+            cands, failure = p._fetch_candidates(fp)
         finally:
             mls.RequestUtils = orig
         self.assertEqual(cands, [])
-        self.assertEqual(failure, mls._BUILTIN_UNREACHABLE_REASON)
+        self.assertEqual(failure, mls._UNREACHABLE_REASON)
 
-    def test_builtin_shape_break_is_a_transport_fault_not_a_file_failure(self):
+    def test_shape_break_is_a_transport_fault_not_a_file_failure(self):
         """所有源都返回认不出的形状（平台一起改版）要说成服务侧故障：当成"查不到"会让
         整库烧满重试后永久跳过，而真正该做的是插件这边跟着改版把解析修好。"""
         p = self._plugin()
@@ -2467,11 +2238,11 @@ class BuiltinSourcesTest(unittest.TestCase):
         orig = mls.RequestUtils
         mls.RequestUtils = _ru(lambda url, body: _Resp(200, {"unexpected": True}))
         try:
-            cands, failure = p._builtin_fetch_candidates(fp)
+            cands, failure = p._fetch_candidates(fp)
         finally:
             mls.RequestUtils = orig
         self.assertEqual(cands, [])
-        self.assertEqual(failure, mls._BUILTIN_UNREACHABLE_REASON)
+        self.assertEqual(failure, mls._UNREACHABLE_REASON)
 
     def test_one_answered_source_makes_shape_breaks_a_file_failure(self):
         """有一个源正常答了空就是确定答案"查不到"：其余源改版不该拖成服务侧故障。"""
@@ -2486,21 +2257,21 @@ class BuiltinSourcesTest(unittest.TestCase):
         orig = mls.RequestUtils
         mls.RequestUtils = _ru(_handler)
         try:
-            cands, failure = p._builtin_fetch_candidates(fp)
+            cands, failure = p._fetch_candidates(fp)
         finally:
             mls.RequestUtils = orig
         self.assertEqual(cands, [])
         self.assertIsNone(failure)
 
-    def test_builtin_request_never_carries_the_library_path(self):
-        """MTW 模式会带 full_path；内置源只发检索词，库内目录结构不外传。"""
+    def test_request_never_carries_the_library_path(self):
+        """识别请求只发检索词：库内目录结构与完整路径不外传。"""
         asked = []
         p = self._plugin(resources=["netease"])
         fp = self._track("晴天")
         orig = mls.RequestUtils
         mls.RequestUtils = self._answer(asked)
         try:
-            p._builtin_fetch_candidates(fp)
+            p._fetch_candidates(fp)
         finally:
             mls.RequestUtils = orig
         self.assertTrue(asked)
@@ -2511,97 +2282,11 @@ class BuiltinSourcesTest(unittest.TestCase):
         # 检索词是清洗后的曲名与艺人
         self.assertIn("晴天", str(asked[0][1]))
 
-    def test_dispatcher_uses_mtw_only_when_backend_is_mtw(self):
-        p = self._plugin(backend="mtw")
-        seen = []
-        orig = p.__class__._mtw_fetch_candidates
-        orig_builtin = p.__class__._builtin_fetch_candidates
-        try:
-            p.__class__._mtw_fetch_candidates = lambda self, path, identity=None: (
-                seen.append("mtw") or ([], None))
-            p.__class__._builtin_fetch_candidates = lambda self, path, identity=None: (
-                seen.append("builtin") or ([], None))
-            p._fetch_candidates(self._track("晴天"))
-            p._backend = "builtin"
-            p._fetch_candidates(self._track("晴天"))
-        finally:
-            p.__class__._mtw_fetch_candidates = orig
-            p.__class__._builtin_fetch_candidates = orig_builtin
-        self.assertEqual(seen, ["mtw", "builtin"])
 
-    def test_auto_backend_follows_the_mtw_address(self):
-        """auto 是升级安全值：配过 MTW 地址的装机继续走 MTW，没配的走内置源。"""
-        _content, defaults = mls.MusicLibraryScraper().get_form()
-        base = {**defaults, "scraper_paths": "/music"}
-        with_mtw = mls.MusicLibraryScraper()
-        with_mtw.init_plugin({**base, "mtw_base_url": "http://mtw:8002"})
-        self.assertEqual(with_mtw._backend, "mtw")
-        without = mls.MusicLibraryScraper()
-        without.init_plugin(base)
-        self.assertEqual(without._backend, "builtin")
-        # 显式选择压过 auto 的判断：填着 MTW 地址也能强行用内置源
-        forced = mls.MusicLibraryScraper()
-        forced.init_plugin({**base, "mtw_base_url": "http://mtw:8002",
-                            "source_backend": "builtin"})
-        self.assertEqual(forced._backend, "builtin")
-        bad = mls.MusicLibraryScraper()
-        bad.init_plugin({**base, "source_backend": "nope"})
-        self.assertEqual(bad._source_backend, "auto")
 
-    def test_builtin_mode_never_touches_mtw_credentials(self):
-        """免部署的意义所在：没配 MTW 地址账密也能跑完整一轮，不戳 /apimt/token/。"""
-        asked = []
-        fp = self._track("晴天", "周杰伦", "叶惠美")
-        p = self._plugin(resources=["netease"], min_score=3)
-        p._scraper_paths = str(fp.parents[2])
-        p._exclude_paths = ""
-        p._force_all = False
-        orig_ru, orig_chain = mls.RequestUtils, mls._MusicScrapeChain
-        written = []
 
-        class _Chain:
-            def scrape_metadata(self, fileitem, mediainfo, overwrite=False):
-                written.append(mediainfo)
-                return True, "ok"
 
-        mls.RequestUtils = self._answer(asked)
-        mls._MusicScrapeChain = _Chain
-        try:
-            ok, reason, score, source = p._MusicLibraryScraper__scrape_file(fp)
-        finally:
-            mls.RequestUtils = orig_ru
-            mls._MusicScrapeChain = orig_chain
-        self.assertTrue(ok, reason)
-        self.assertEqual(source, "netease")
-        self.assertEqual(score, 3)
-        self.assertFalse(any("token" in url or "apimt" in url for url, _ in asked),
-                         [url for url, _ in asked])
-        # 候选真的变成了 MusicInfo：标题/艺人/专辑/封面都落进了写入链
-        info = written[0]
-        self.assertEqual((info.title, info.album), ("晴天", "叶惠美"))
-        self.assertEqual(info.artists, ["周杰伦", "杨瑞代"])
-        self.assertTrue(info.cover_url)
-
-    def test_no_candidate_reason_names_the_backend(self):
-        """两种后端的"查不到"要说成两句话，账本里的处置建议不一样。"""
-        orig = mls.RequestUtils
-        try:
-            p = self._plugin(resources=["netease"], backend="builtin")
-            mls.RequestUtils = _ru(lambda url, body: _Resp(200, {"result": {"songs": []}}))
-            ok, reason, _, _ = p._MusicLibraryScraper__scrape_file(self._track("晴天"))
-            self.assertFalse(ok)
-            self.assertEqual(reason, mls._BUILTIN_NO_CANDIDATE_REASON)
-
-            mtw = self._plugin(resources=["netease"], backend="mtw")
-            mls.RequestUtils = _ru(lambda url, body: _Resp(200, {"result": True, "data": []}))
-            ok, reason, _, _ = mtw._MusicLibraryScraper__scrape_file(self._track("晴天"))
-            self.assertFalse(ok)
-            # 存量账本里就是这句，升级不能把它改名改到统计分成两截
-            self.assertEqual(reason, "MTW 无候选")
-        finally:
-            mls.RequestUtils = orig
-
-    def test_builtin_scraper_keeps_only_supported_sources(self):
+    def test_scraper_keeps_only_supported_sources(self):
         """旧配置里的酷我/smart_tag 在内置源里要安静地摘掉，不能每个文件白打一次失败请求。"""
         p = self._plugin(resources=["kuwo", "netease", "smart_tag"])
         self.assertEqual(p._active_resources, ["netease"])
@@ -2609,8 +2294,8 @@ class BuiltinSourcesTest(unittest.TestCase):
         only_dropped = self._plugin(resources=["kuwo"])
         self.assertEqual(only_dropped._active_resources, list(mls._sources.RESOURCES))
 
-    def test_builtin_transport_failure_does_not_burn_retries(self):
-        """内置源全挂时的分类与 MTW 故障一致：不写 failed 账、不涨 retries、能熔断。"""
+    def test_transport_failure_does_not_burn_retries(self):
+        """识别源全挂时的分类与其他传输故障一致：不写 failed 账、不涨 retries、能熔断。"""
         names = [f"{i}.mp3" for i in range(mls._ABORT_AFTER_TRANSPORT)]
         tmp = Path(tempfile.mkdtemp())
         for name in names:
@@ -2632,18 +2317,3 @@ class BuiltinSourcesTest(unittest.TestCase):
         self.assertEqual(runs["transport"], mls._ABORT_AFTER_TRANSPORT)
         self.assertEqual(p._load_failed(), {})
 
-    def test_status_echoes_the_effective_backend(self):
-        """只回显 auto 等于什么都没回显：用户要看得见本轮到底在问平台还是问 MTW。"""
-        _content, defaults = mls.MusicLibraryScraper().get_form()
-        p = mls.MusicLibraryScraper()
-        p.init_plugin({**defaults, "scraper_paths": "/music"})
-        status = p._build_status()
-        self.assertEqual(status["config"]["source_backend"], "auto")
-        self.assertEqual(status["config"]["backend"], "builtin")
-        self.assertEqual(status["config"]["backend_label"], "内置源")
-        self.assertEqual(status["config"]["active_resource"], list(mls._sources.RESOURCES))
-        self.assertNotIn("mtw_password", status["config"])
-
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)

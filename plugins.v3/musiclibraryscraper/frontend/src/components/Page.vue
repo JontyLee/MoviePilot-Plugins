@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, inject } from 'vue'
-import { FLOW_STEPS } from './flow'
+import FlowPipeline from './FlowPipeline.vue'
+import { FLOW_STEPS, stageCounts } from './flow'
 
 interface HostToast {
   error(msg: string): unknown
@@ -68,11 +69,9 @@ const STATUS_TEXT: Record<string, string> = {
 const SOURCE_TEXT: Record<string, string> = {
   netease: '网易云',
   qmusic: 'QQ 音乐',
-  kuwo: '酷我',
   kugou: '酷狗',
   migu: '咪咕',
-  musicbrainz: 'MusicBrainz',
-  smart_tag: '智能'
+  musicbrainz: 'MusicBrainz'
 }
 
 function statusText(value: string) {
@@ -369,11 +368,13 @@ const navItems = computed(() => [
   }))
 ])
 
-// 生效的源清单以服务端给的 active_resource 为准：内置源不认酷我/smart_tag，
-// 回显配置原值会让人以为那两个源也在问。
+// 生效的源清单以服务端回显为准：不认识的源后端已经丢掉了，回显配置原值会让人
+// 以为那几个源也在被问。
 const sourceNames = computed(() =>
-  (cfg.value?.active_resource || []).map((s: string) => sourceText(s)).join(' → ') || '全部源'
+  (cfg.value?.resources || []).map((s: string) => sourceText(s)).join(' → ') || '全部源'
 )
+// 流水线上的数字来自本轮汇总折算（见 flow.ts 的 stageCounts）
+const stages = computed(() => stageCounts(runs.value))
 
 const activeBucket = computed(() => buckets.find(b => b.key === bucket.value))
 
@@ -391,9 +392,9 @@ onMounted(() => {
         <v-icon icon="mdi-music-circle-outline" size="22" />
       </v-avatar>
       <div class="mls-head-text">
-        <div class="text-h6">MusicTagWeb音乐库刮削</div>
+        <div class="text-h6">TagFlow音乐库刮削</div>
         <div class="text-caption text-medium-emphasis">
-          枚举库内音频 → 读本地身份 → 逐源检索 → 打分定阈值 → 宿主原生写入 → 记账
+          直连平台检索补标签 · 逐文件核对与补齐在下方分桶里
         </div>
       </div>
       <v-spacer />
@@ -432,6 +433,28 @@ onMounted(() => {
       <section class="mls-content">
         <!-- 概览：整体流转与结论先看，再进具体某一桶 -->
         <div v-if="view === 'overview'" class="mls-pane">
+          <!-- 流转动画占第一屏：在不在跑、跑到哪一环、各环落下多少，一眼看完。
+               逐项判据不在这里摊开，仓库 docs/musiclibraryscraper.md 才有地方写那些。 -->
+          <div class="mls-section">
+            <div class="mls-flow-head">
+              <div class="mls-section-title">本轮流转</div>
+              <div class="text-caption text-grey">
+                <template v-if="running">扫描进行中 · 光点走到哪一环就问到了哪一环</template>
+                <template v-else-if="runs.ts">
+                  静止的是上一轮：{{ fmtTime(runs.ts) }}，{{ (runs.force === undefined ? '只补缺' : (runs.force ? '强制覆盖' : '只补缺')) }}
+                  · 用时 {{ runs.duration_s ?? 0 }}s
+                </template>
+                <template v-else>还没跑过一轮 —— 下面勾一个按钮开跑</template>
+              </div>
+              <v-spacer />
+              <v-btn size="small" variant="tonal" color="info" :loading="busy"
+                     @click="scanNow(false)">增量扫描</v-btn>
+              <v-btn size="small" variant="tonal" color="warning" :loading="busy"
+                     @click="retryAllFailed">重试失败</v-btn>
+            </div>
+            <FlowPipeline :steps="FLOW_STEPS" :counts="stages" :running="running" variant="live" />
+          </div>
+
           <v-row dense>
             <v-col cols="6" md="3">
               <v-card variant="tonal" color="success">
@@ -473,19 +496,13 @@ onMounted(() => {
               <v-col cols="12" md="6">
                 <v-card variant="outlined" class="pa-3 mls-fill">
                   <div class="text-caption text-medium-emphasis mb-1">
-                    扫描时间 {{ fmtTime(runs.ts) }}
-                    <span v-if="cfg.cron">｜定时 {{ cfg.cron }}（下次 {{ cfg.cron_next }}）</span>
+                    扫描时间 {{ fmtTime(runs.ts) }}｜用时 {{ runs.duration_s ?? 0 }}s
                   </div>
-                  <div class="text-body-2">
-                    发现 {{ runs.scanned ?? 0 }}｜缓存跳过 {{ runs.from_cache ?? 0 }}｜已有tag跳过
-                    {{ runs.skipped_tagged ?? 0 }}
-                  </div>
-                  <div class="text-body-2">
-                    成功 {{ runs.ok ?? 0 }}｜失败 {{ runs.failed ?? 0 }}｜服务侧故障
-                    {{ runs.transport ?? 0 }}｜处理异常 {{ runs.error ?? 0 }}
+                  <div v-if="cfg.cron" class="text-caption text-grey">
+                    定时 {{ cfg.cron }}｜下次 {{ cfg.cron_next }}
                   </div>
                   <div v-if="runs.aborted" class="text-caption text-warning mt-1">
-                    识别来源连续故障，本轮已中止，未处理的留到下一轮
+                    识别源连续故障，本轮已中止，未处理的留到下一轮
                   </div>
                   <div v-if="lastTargeted.ts" class="text-caption text-grey mt-1">
                     最近定向重试 {{ fmtTime(lastTargeted.ts) }}：成功 {{ lastTargeted.ok ?? 0 }}｜失败
@@ -501,17 +518,8 @@ onMounted(() => {
                     {{ cfg.min_score }}｜{{ sourceNames }}
                   </div>
                   <div class="text-caption text-grey">
-                    识别来源 {{ cfg.backend_label || '自动' }}
-                    <template v-if="cfg.backend === 'builtin'">
-                      ｜直连平台检索，库内路径不外传
-                    </template>
-                    <template v-else>
-                      ｜MTW {{ cfg.mtw_base_url || '未配置' }}｜账密 {{ cfg.has_username ? '已配' : '未配' }}
-                    </template>
-                  </div>
-                  <div class="text-caption text-grey">
                     库路径 {{ (cfg.scraper_paths || []).length }} 个｜排除
-                    {{ (cfg.exclude_paths || []).length }} 个
+                    {{ (cfg.exclude_paths || []).length }} 个｜歌词{{ cfg.fill_lyrics ? '主动抓取' : '交给宿主' }}
                   </div>
                   <div class="text-caption text-grey">
                     实际处理的扩展名：{{ (cfg.audio_extensions || []).join(' / ') }}
@@ -530,24 +538,8 @@ onMounted(() => {
               </div>
             </v-card>
             <div class="text-caption text-grey mt-1">
-              原因里写了差哪一项：「曲名/艺人/专辑未对上」可以调「最低匹配分数」或改文件名；
-              「本地无某项」是文件本身没给出这个信息（整张 CD 压成一个 wav），降阈值也救不回来，
-              应该把它排出扫描范围。超限的用「重试全部失败」再试。
-            </div>
-          </div>
-
-          <div class="mls-section">
-            <div class="mls-section-title">流水线</div>
-            <div class="mls-flow">
-              <div v-for="(step, i) in FLOW_STEPS" :key="step.key" class="mls-flow-step">
-                <div class="mls-flow-index">{{ i + 1 }}</div>
-                <div class="mls-flow-body">
-                  <div class="text-body-2 font-weight-medium">
-                    <v-icon :icon="step.icon" size="16" class="mr-1" />{{ step.title }}
-                  </div>
-                  <div class="text-caption text-grey">{{ step.desc }}</div>
-                </div>
-              </div>
+              原因里写了差哪一项：「未对上」可以调分数或改文件名；「本地无某项」是文件本身没给出
+              这个信息，降分数也救不回来，该把它排出扫描范围。
             </div>
           </div>
 
@@ -687,14 +679,7 @@ onMounted(() => {
 .mls-reason { padding: 6px 10px; }
 .mls-reason-row { display: flex; align-items: center; gap: 10px; padding: 3px 0; }
 .mls-reason-text { flex: 1 1 auto; min-width: 0; font-size: 13px; }
-.mls-flow { display: flex; flex-direction: column; gap: 8px; }
-.mls-flow-step { display: flex; gap: 10px; align-items: flex-start; }
-.mls-flow-index {
-  flex: 0 0 22px; height: 22px; border-radius: 50%; font-size: 12px;
-  display: flex; align-items: center; justify-content: center; margin-top: 3px;
-  background: rgba(var(--v-theme-primary), .14); color: rgb(var(--v-theme-primary)); font-weight: 700;
-}
-.mls-flow-body { min-width: 0; }
+.mls-flow-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
 .mls-page .text-truncate {
   overflow: hidden;
   text-overflow: ellipsis;

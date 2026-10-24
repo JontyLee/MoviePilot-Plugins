@@ -1,265 +1,38 @@
 """
-musiclibraryscraper — MoviePilot v3 插件（插件名：MusicTagWeb音乐库刮削）
+musiclibraryscraper —— MoviePilot v3 插件（插件名：TagFlow音乐库刮削）
 
-音乐元数据有两个来源：插件内置的各平台公开检索接口（不必部署 Music Tag Web），或沿用
-Music Tag Web 的 /apimt/fetch_id3_by_title/（还能多问酷我与 smart_tag 两个源）。「识别来源」
-默认自动：配了 MTW 地址就走 MTW，没配就走内置源，老实升级的装机行为与 v0.3.x 完全一致。
-两条路拿到的候选折叠成同一形状，打分、阈值、写入、记账全都共用那一条链路；MP 侧始终走
-ScrapingChain 原生 MUSIC 写入。
+周期扫描音乐目录，为每个文件检索元数据，再沿用 MP 原生的音乐刮削链（ScrapingChain）写入
+标签与封面。元数据来自插件直连的各平台公开检索接口（网易云 / QQ音乐 / 酷狗 / 咪咕 /
+MusicBrainz，构造与解析在 sources.py）：不需要额外部署服务，也没有第二个后端可切。
 
-v0.2.0：
-- 增量扫描：done/failed 状态账（存 plugindata），mtime+size 命中即跳过，不再重复解析 tag。
-- 数据页：Vue 联邦交互页（Page.vue），展示 已处理/失败/待重试，支持逐行与批量重试。
-- 调度：改用宿主 get_service() 周期任务 + 一次性任务，插件不再自建 BackgroundScheduler。
-- 对外：get_api() 提供 /status /files /retry /scan；get_command() 提供状态与重试命令。
+一个文件从被扫到写标签，中间过四道判断，每道各由一个配置项决定：
+1. 要不要处理它 —— 宿主音频白名单 ∩ 插件支持列表、realpath 必须落在库内（指向库外的软链不碰）、
+   排除目录整棵剪掉；
+2. 拿什么身份去问 —— 优先读文件已有的 tag，缺哪项就按 艺人/专辑 (年)/NN - 曲名 的目录结构兜底，
+   只认严格位于音乐库之下的目录；发给平台的只有清洗后的「曲名-艺人」检索词，库内路径不出本机；
+3. 候选能不能用 —— 曲名 / 艺人 / 专辑 各 1 分（繁简与大小写归一后互相包含即算命中），按配置的
+   源顺序逐源问、某源出到 3/3 满分即停，最高分仍低于 min_score 就不写入；
+4. 要不要覆盖 —— 只补缺（四项齐全则按 mtime+size 记账跳过）或强制覆盖，最终取插件与宿主
+   「设置 → 媒体刮削」里更强的一方；歌词默认交给宿主的 LyricsChain。
 
-v0.2.1（修好 MTW 调用契约，之前一次都没真的刮成功过）：
-- 路径前缀 /api/ → /apimt/（MTW 的 Django 路由挂在 /apimt/ 下，旧写法一律 404）。
-- 检索关键词用清洗后的曲名（tag 优先、目录结构兜底），不再传 "01 - 轨迹.flac" 这种原始文件名 ——
-  MTW 的 fetch_id3_by_title 是拿 title 当搜索词用的，传文件名只会召回噪音。
-- 请求体补齐 title/artist/album/full_path/resource，与 MTW 前端调用完全一致。
-- 请求 helper 从 post_dict(jsondata=) 换成 post_json(json=)（宿主没有 post_dict 这个方法）。
-- 本地 tag 改由 mutagen 读取：MP 的 MetaInfoPath 对音频返回 MetaVideo，根本没有
-  artist/album，导致“已有 tag 跳过”永远判 False、匹配也无从下手。
-- 比对归一化改为直接复用宿主 app.domain.music.music_text_key（NFKD + casefold +
-  rust zhconv 繁转简），本地 NFKC 实现仅作宿主缺该函数时的兜底。注：MTW 的搜索侧
-  本身已做繁简归一（綿綿/绵绵 召回同一批），需要归一的只有插件的比对侧。
-- 补空模式的完成判据从 title+artist 收紧为 title+artist+album+内嵌封面：实测整库
-  1039 个文件的文字标签早已刮齐，只剩约 36% 缺封套图，旧判据会让插件永远空转。
+几条一直成立的判据，动代码前先读：
+- 「服务侧没给答案」和「曲库里查不到」是两件事。源连不上、被风控、响应形状不认识，都不写失败账、
+  不烧 retries，连续出现则熔断；只有源正常答了而候选不达标才记在文件头上。账本里存量的旧文案
+  （MTW 那三条）仍留在 _TRANSPORT_REASONS 里，否则升级后同一类失败会被拆成两种记账方式。
+- 写标签不可回滚，所以 min_score 在服务端收敛到 1-3、路径必须落在库内、宁可不匹配也不猜身份
+  （目录兜底猜不出来就留空，让它判「未达阈值」）。
+- 扫描只有一个入口：周期任务、/scan、/retry、「立即运行一次」都走带互斥的 guarded 入口。两本账
+  并发读写，后写完的会把先写的整本盖掉。
+- 单个文件崩掉不能带走整轮：宿主 ScrapingChain 外面包了一层，异常既不记成功也不记失败，
+  下一轮照原样再来。
+- update_config 是整体替换，任何写回配置的入口都要带齐全部键（见 _config_snapshot）。
 
-v0.3.0：
-- 识别源改为多选（mtw_resource 存数组，仍兼容旧的单字符串），留空 = 全部源：
-  netease / qmusic / kuwo / kugou / migu / musicbrainz / smart_tag。实测 qq、spotify、
-  acoustid、all 恒返回空候选，没列进默认。
-- 逐源按配置顺序查询并合并候选，候选上标记命中的源，写入与状态账都记真实来源；
-  某源已出满分（3/3）候选即停止后续查询，避免每个文件都打满 7 次请求。
-- 配置页把最容易误解的几件事讲清楚：元数据来源、识别源留空 = 全部源、只补缺 / 强制覆盖
-  分别会动到哪些字段，以及最终是否覆盖还要叠加宿主「媒体刮削」的音乐三项策略。
-- 更名 MusicTagWeb音乐库刮削、换 MTW 官方图标、说明里点明元数据来源。
-  目录名/类名/配置前缀保持不变，否则 config_data 与 plugindata 会整体失效。
-
-v0.3.1：
-- 配置说明改为集中式：全部收进页面底部一个说明块，选项本身只留标签，不再用 persistent-hint
-  跟在控件下面（排版被长提示撑坏）。
-- 补上「查询与选取」规则说明，回答"排序默认是什么规则"：按源顺序逐源查询，某源出 3/3 满分候选
-  即停；都没满分则合并全部候选取最高分；曲名/艺人/专辑 各 1 分（繁简与大小写归一后互相包含
-  即命中）；同分时按源顺序、同源内按 MTW 返回顺序取第一个；最高分低于 min_score 判失败。
-  匹配的本地身份优先读 tag，缺字段按 艺人/专辑 (年)/NN - 曲名 目录结构兜底。
-- 移除 mtw_select_mode：它只被解析和回显、从不进任何请求体，也不是 MTW 的入参（MTW 前端源码里
-  查不到这个概念），候选取舍一直由上面的打分规则决定，属于死配置。
-- 数据页页脚仍是英文的真因：Vuetify 3 的 VDataTable 没有 footerProps（那是 v2 的 API），
-  :footer-props 会被当成未知属性丢掉，页脚一直读 locale 默认值。v3 把 makeVDataTableFooterProps
-  平铺进 VDataTable 自身，所以 items-per-page-text / items-per-page-options / page-text
-  必须直接写在 <v-data-table> 上。
-- 图标改用 MTW 界面自带的 avator.webp，已下载进仓库 icons/，市场引用仓库 raw 地址而不是热链实例。
-
-v0.3.2（整体复盘后的健壮性修复）：
-- 扫描只有一个入口：宿主周期任务与一次性任务都改走带互斥的 _run_scan_guarded()。此前
-  get_service() 把 __scan 直接交给调度器，绕开了 _scan_running 标志，周 cron 与手动
-  /scan、/retry、"立即运行一次" 可以并发跑；两本账各自在开头读、结尾写，后写完的会把
-  先写的整本盖掉，已刮成功的记录退回未处理。
-- MTW 侧故障不再烧重试额度：响应异常/401/接口错误归类成"MTW 不可达"或"MTW 接口或鉴权失败"，
-  既不计入 MAX_RETRY、也不写 failed 账。此前 MTW 重启一次或 JWT 过期，一整轮会把整库每个文件
-  各记一次失败，连错 5 轮就全体永久跳过（mtime+size 不变就再也不碰）。
-- 连续 5 个文件栽在 MTW 故障上就中止本轮（熔断），不再往下白打请求；中止时不 prune 账本。
-- JWT 过期按令牌自身的 exp 声明（或 MTW 返回的 expired_at）计算，不再硬编 6 天；请求被判
-  鉴权失败时强制重登一次再重试。
-- 停止信号：stop_service() 不再 set() 完立刻 clear()（等于从没停过），扫描开始时才 clear；
-  信号量由类属性改为每实例独立。
-- 扫描每处理 25 个文件落一次账，长时间运行中途容器重启不再丢掉整轮进度。
-- /retry 只接受落在 scraper_paths 内、且不在 exclude_paths 内的路径，客户端传什么都改不了库外文件。
-- add_plugin_once_job 返回 False（调度器没在跑）时回落后台线程，不再假装"已提交"。
-- 数据页翻页：v-data-table 的 pageCount 由内存里的 items 长度算出，而 items 只是服务端返回的
-  当页（≤ limit 条），pageCount 恒为 1 → 下一页按钮永久禁用，这才是 "1 of 1" 的真因
-  （v0.3.1 只把文案翻成中文，功能仍是坏的）。改用 v-data-table-server，总条数交给 items-length。
-
-v0.3.3（第二轮复盘）：
-- MTW 故障的判据从"任一源失败"收紧为"没有任何源成功应答"：某个上游挂了（musicbrainz 限流、
-  咪咕 500）而其余源正常返回空候选时，那是"查无此曲"，要按文件失败记账；否则一轮里前 5 个文件
-  就熔断，整库永远停在"待处理"。
-- mtw_resource 只接受已知 7 源，未知值（旧配置残留的 qq/all、或 API 写坏的）直接丢弃并告警：
-  一个必然失败的源会放大成上面那条误判。
-- 枚举与 /retry 的扩展名改取「宿主 audio_extensions ∩ 本地列表」：宿主写入链自己会按可配置的
-  白名单过滤，.wv/.aif 不在其中，此前每个这类文件要先白打最多 7 次 MTW 请求、再收到
-  "刮削路径中没有支持的音频文件"，烧满 5 轮 retries 才永久跳过。交集结果缓存 5 分钟，
-  免得一次上千路径的重试要构建上千遍宿主配置快照。
-- min_score 在服务端 clamp 到 1-3：填 0/负数会让只对上曲名的候选整库重写标签（写进文件不可逆），
-  填 >3 则永远不达阈值、整库烧满 retries 永久跳过。配置页的 min/max 只是浏览器提示，挡不住 API。
-- 熔断不再豁免大批量定向重试：批次长度超过阈值时同样中止，否则 /retry 全部失败项在 MTW 真挂时
-  会把几千个文件 × 全部源打到底。
-- 定向重试的汇总改写 last_targeted，不再覆盖 runs：点一次行内"重试"就把整盘汇总刷成
-  scanned=1、pending=0，看起来像整库已经扫完。
-- 落账阈值从"每 25 次变更"改成"有变更且距上次 ≥60s"：plugindata 是单行 JSON，整本重序列化是
-  O(库大小)，5 万条目一轮能打上几千次全量写。
-- 每个文件的 tag 只解析一次（此前补空判定、拉候选、挑选各读一遍）。
-- "待处理"桶加 30s 短期缓存：它是全库遍历做差集，数据页翻页、搜索、刷新每次都重算一遍；
-  扫描开始与结束时作废，不会让界面上的数字滞后于账本。
-- force（绕过增量账）与 overwrite（覆盖已有标签）拆开传递：此前"全量覆盖"按钮只发 force，
-  标签仍按只补缺写入，用户以为在覆盖其实没有；定向重试则只绕过账本，不顺带替换手工改过的标签。
-- 换 MTW 地址或账密时丢弃缓存 JWT：那是上一个实例签发的，继续带着只会白吃 401。
-- /retry 命令入口（/music_scraper_retry）与 API 走同一套库内路径判据，不再照着账本里已删除、
-  已挪出库的路径白跑一轮（stat 失败直接跳过、账本原样留着，看着像"重试过了还是失败"）。
-- MTW 把结果再包一层 {"data": {"data": [...]}} 时不再被认成"拿不到结论"。
-- 未配置 MTW 账密时"将匿名请求"只告警一次：这是每个请求都会走的分支，此前一轮几千个
-  文件能把日志刷满几千行。
-- 读账本时把不是 dict 的条目归一成空 dict（旧版本/手工编辑/写坏一半的 plugindata）：
-  此前 prev.get() 会抛 AttributeError，从 /status 到整轮扫描一起崩。
-- 数据页：offset 越界（桶变小）时收敛到最后一页再取，不再显示"该桶暂无数据"；v-tabs 选中态
-  改绑 bucket（写死 model-value 时高亮停在旧标签）；批量重试与逐行重试统一走同一套提示。
-- 前端 tsconfig 不再把 vite.config.ts 同时列进主程序与引用工程：TS6305 会让 vue-tsc 门禁整体失败。
-- _enumerate_files 改用 os.walk(followlinks=False) 并在目录级剪枝 .trickplay：pathlib 的 **
-  会递归进软链目录，库内一个回环软链能让枚举永不返回、互斥槽被永久占住。
-  /files?bucket=pending 的 30s TTL 缓存同时覆盖数据页搜索框每停顿一次的重算。
-
-v0.5.0（有缺项从只读标记变成可操作的补齐入口）：
-- 扫描循环逐项统计 deficient 并随 summary 落盘，状态接口 counts.deficient 供前端挂数。
-  计数复用循环里已读出的 tags，不另调 _missing_fields：那会重复解析一遍标签，还要
-  为封面落盘多摸一轮文件系统。
-- 侧栏「有缺项」挂数字徽章，导航与状态列统一 info 配色：这一桶要人逐个进来补，
-  不标数量就看不出还剩多少没处理；和失败桶的 warning 拉开，避免误读成需要重跑。
-- 有缺项行的操作列由「重试」改为「编辑」，弹「补齐缺项」对话框按 _EDIT_FIELDS 补
-  曲名/艺人/专辑/年份/音轨号/歌词，走 POST /edit 单文件写回：这类文件不缺重扫，缺
-  的是某一项人工信息，整目录重跑并不会把它补出来。
-- /edit 只接受媒体库内路径，空白字段跳过不写，保存成功即失效 deficient 缓存、前端
-  刷新后该行摘掉缺项标记：识别源对不上的条目以人工判定为准，插件不再猜第二遍。
-
-v0.4.0（把识别源接进插件，使用者不必再为刮削部署 Music Tag Web）：
-- 内置识别源 sources.py：网易云 / QQ 音乐 / 酷狗 / 咪咕 / MusicBrainz 五个平台的公开检索接口
-  由插件自己直连。MTW 那几个源的真正客户端编译在 .so 里，抄不出来也不该抄 —— 它转调的就是
-  这批公开接口，按同一份契约重写一遍即可，请求与解析都在纯函数里（不碰网络，好测）。
-  候选一律折叠成 fetch_id3_by_title 的形状，所以打分、阈值、逐项判定、写标签那条链路一行没改。
-- 「识别来源」auto / builtin / mtw，默认 auto = 配了 MTW 地址就走 MTW、没配就走内置源。
-  默认不能写成 builtin：老实升级的装机会在一夜之间少掉酷我和 smart_tag，结果整体变样。
-  配置键仍叫 mtw_resource（改名会让已存配置一起失效），切换后端时两侧的源名单各存一份，
-  来回切换不抹掉用户配到一半的选项。
-- 内置源只发清洗后的「曲名-艺人」检索词，库内路径不出本机；MTW 模式按它的前端契约仍要带
-  full_path 作参考，所以「MTW 与 MP 必须挂同一份库」这条只在 MTW 模式成立。
-- 歌词不由插件请求：宿主的 LyricsChain 已经内置 lrclib 与 AMLL 两个提供方，插件再自己调一遍
-  平台歌词接口只会多打一批请求，还要抢宿主选定的歌词策略。
-- 不做酷我：实测它的 r.s 检索接口对曲名索引恒不返回命中，www 接口要带签名与 token，复杂度与
-  收益不成比例；需要酷我的继续用 MTW 模式（配置页按生效后端只列出可用的那几个源）。
-- 平台改版/风控与"曲库里查不到"必须分开：响应形状不认识、业务码不对、2xx 但解不出对象，
-  都说成"这个源没给答案"并继续问下一个源；只有没有任何源给出可解析答案时才算服务侧故障
-  （新增归因"内置识别源不可达"，与 MTW 那三条一样不写失败账、不烧重试额度、能熔断）。
-- 修掉免部署那条路真正走不通的地方：扫描入口硬要求 mtw_base_url，内置源模式下整轮静默跳过，
-  日志只留一句"未配置 mtw_base_url"。现在这条判据认来源。
-- 状态回显两份识别来源（配置值 + 本轮实际生效的那个），只回显 auto 等于什么都没回显；
-  数据页的源清单改显示实际要问的源，MTW 地址与账密只在 MTW 模式下占一行。
-- 出处与许可：内置源沿用 Music Tag Web（github.com/xhongc/music-tag-web ，GPL-3.0，本仓库
-  同为 GPL-3.0）对各平台公开接口的调用约定与候选形状，没有复制它的实现（真客户端编译在 .so
-  里）；MusicBrainz 只取核心数据（CC0）。整段说明在仓库 README 的「上游、许可与引用」。
-
-v0.3.8（真机 12 个失败项只说"差一分"，说不出差在哪一项）：
-- 失败原因要落到逐项判定：账本里 12 条失败全是"未达阈值（最低匹配分数 3）"+ 分数 2，看不出
-  到底是候选对不上，还是本地根本没这项可比 —— 而这两种要做的决定相反：前者放宽阈值或改文件名，
-  后者（整张 CD 压成一个 wav，目录里也没有曲名）降阈值救不回来，只能把它排出扫描范围。
-  _score_candidate 一直逐字段判过，只是把结果折成一个整数就丢了。现在拆成 hit / miss /
-  本地缺这项 三态（_field_hits），原因写成"未达阈值（最低匹配分数 3）：曲名未对上、本地无专辑"，
-  /status 的 failure_reasons 与数据页按它自动分类。
-- 本地读不出曲名的文件不再记成"MTW 无候选"：一个请求都没发过，写"无候选"会让人以为曲库里
-  查不到，其实是插件连该问什么都不知道。
-- 失败要逐行进日志：未达阈值与无候选此前完全静默（只有写标签失败才有一行），19 个文件的定向
-  重试里 12 个失败跑了 100 分钟没有一行输出，看着就是卡死。现在每个失败文件一行，带原因、
-  分数和第几次重试（共 MAX_RETRY 次）。
-
-v0.3.7（切换分桶看到的是同一批数据）：
-- 切换"已处理/失败待重试/待处理"看到同样一批行，根因不在后端的分桶 —— _collect_rows
-  三分支各走各的账，而是请求根本没带上桶名：宿主注入给插件的 api.get 只认第一个参数
-  （豆瓣中心的插件都是把 ?page=… 直接写进 URL 的），第二个对象被静静丢掉。于是三次点击
-  发出的都是裸 GET /files，后端按默认值回答 done 的第一页。参数改由前端自己编码拼进
-  URL，宿主的访问日志里现在能看到 /files?bucket=pending&limit=50&offset=0。
-- 数据页与配置页改成侧栏版式（参考豆瓣中心/PT监控室）：数据页左侧是 概览 + 三个桶，
-  概览先给整轮结果（四个计数、最近一轮、本轮生效的配置、失败原因分布、流水线）再进某一桶；
-  配置页左侧是 流程总览 / 运行与写入 / 识别与匹配 / 音乐库范围，先把"一个文件从被扫到写标签
-  经过哪些判断、各由哪个开关决定"讲完，再摆具体配置项。两页的流水线读同一份 flow.ts，
-  改了判据不会只改一个页面。
-- 两页都按 layout 事件向宿主申请宽度（配置 74rem、数据 86rem）：宿主对话框默认 60rem，
-  侧栏 + 表格会被挤成一团。
-
-v0.3.6（真机跑过一轮之后）：
-- 星期编号按宿主的调度器算，不是按 crontab：宿主把这段 cron 交给 APScheduler
-  （CronTrigger.from_crontab），它的星期是 0=周一…6=周日、上限 6；crontab 的 0/7=周日 在这里
-  一个是周一、一个直接校验失败。默认值 "0 3 * * 0" 因此实际跑在周一，而它写的是"每周日"；
-  用户按习惯写 "… * 7" 又被整条回落成默认，等于同时丢了日子和时刻。现在默认用名字
-  "0 3 * * sun"，单独的星期 7 就地换成 sun（保留其余字段），0-6 原样交给调度器不做猜测。
-- 生效的 cron 要连着"下次触发在周几"一起回显：光看表达式猜不出调度器读出来的日子，
-  注册时打一行、/status 与状态命令各带一条。数据页与命令的输出同时补 runs 的 error 档。
-- 失败原因要按原因聚合，逐行看 reason 做不出决定：调「最低匹配分数」、加识别源靠的是
-  "这一类有几个、这类里最高几分"，而账本一行一个文件、翻页翻不出这个数。/status 新增
-  failure_reasons（原因、个数、最高分、还有没有可重试的），数据页与状态命令直接给出
-  "阈值降 N 分可命中"这类结论。
-- 保存配置不再弹两条通知：配置页走插件自己的 Vue 组件而不是宿主内置表单，页面 emit('save')
-  后宿主收到配置、自己 PUT /plugin/{id}，成功再弹一条"已保存"。配置页此前也弹一条
-  "配置已保存"，一次保存就是两条；更糟的是这条发生在请求发出之前，保存失败时照样说"已保存"。
-  现在配置页只把配置交出去，成败与插件名由宿主一起报。
-- 真机验证：1039 个文件里 21 个的内嵌封面是 v0.3.5 判得出、此前判不出的（ID3 的 APIC 实际
-  键名带描述，如 "APIC:0"，而 DSF 这类容器连通用 pictures 接口都没有），反向没有一个是
-  新判据丢掉封面的。
-
-v0.3.5（第四轮复盘）：
-- 内嵌封面终于判得出来：补空判据是 title+artist+album+内嵌封面，而封面只按帧名
-  tags.get("APIC") 直取 —— APIC 是可重复帧，mutagen 的取法是 getall("APIC")（键还带描述），
-  APEv2 的封面 key 更是 "Cover Art (Front)"，压根不在那份表里。后果比判不出来更贵：
-  已经刮齐标签、只差封面的 MP3/APE 会被永远判成"没齐"，每轮重打最多 7 次 MTW 请求，
-  候选不达标还白涨 retries，五轮之后一个本来完整的文件被永久列成超限。改成一整套读法
-  （通用 pictures 接口 + getall + 键名前缀/全名匹配）。这条链路此前一条测试都没有：
-  测试环境没有 mutagen，_read_music_tags 恒返回空值、has_cover 恒为 False。
-- 目录兜底的身份不再拿库根的名字当专辑、拿库根的上一级当艺人：/media/music/01 - 轨迹.flac
-  会得到 album="music"、artist="media"，这两个假身份既被当搜索词发给 MTW，比对又是双向
-  包含（want in got 也算命中），一个目录名就能白送两分 —— min_score 放宽到 1-2 时足以把
-  错的艺人写进文件，而写标签不可回滚。现在只认严格落在 scraper_paths 之下的目录，
-  猜不出来就留空判"未达阈值"。
-- 账本里的 retries 要归一成整数：它是 int(prev.get("retries", 0)) 直接吃的值，写成 null、
-  "三次" 或旧版本的 dict 都会抛 TypeError，而抛在逐文件循环里等于整轮中止 —— 崩的位置由
-  账本键序决定，下一轮枚举走到同一条路径还是同一个位置，那之后的文件永远处理不到、
-  汇总永远不落账、/status 一起 500。v0.3.3 说的"读账本时把坏条目归一"只归一了外层不是
-  dict 的条目，字段级坏值仍然会崩。
-- 单个文件把插件或宿主打崩不再带走整轮：__scrape_file 直接调用宿主 ScrapingChain，外面
-  一层保护都没有。落账每 60 秒一次，一轮跑到第七千个文件崩掉等于前面六千多个判断白做，
-  槽位释放、下一轮从头再跑。现在一个文件的异常只影响它自己（不记成功也不记失败，
-  下一轮照原样再来），连着出现按环境异常熔断，汇总新增 error 一档。
-- 复位停止信号挪进锁内、占位之前：此前 clear() 落在锁外，置位 → 出锁 → clear 之间挤进来
-  的 stop_service 会被抹掉，而它想停的正是紧接着这一轮 —— 界面按了"停止"、日志里一句
-  "收到停止信号"都没有。
-- 枚举的停止信号要挡住外层库循环：内层 break 只退掉当前这个库的 os.walk，下一个库照走，
-  按了停止还在扫全盘，走完后还被当成"这一轮扫过的文件"写进汇总。
-- /files 不认识的桶名不再悄悄落到 done 那一档：回显仍是请求的那个名字，调用方拿到一批
-  "已处理"的行却以为是自己传的桶。现在明确回 unknown_bucket、空列表。
-- 熔断与待处理口径不变：MTW 故障与处理异常都不记在文件头上，汇总的"待处理"仍按账本算，
-  和数据页的桶一致（顺带删掉计数器时代留下的 max(0, pending)）。
-
-v0.3.4（第三轮复盘）：
-- MTW 的 HTTP 状态码重新可见：宿主 RequestUtils.post_json 里那句 `if response:` 判的是 requests
-  的 Response.__bool__（等价 status_code < 400），401/403/5xx 会连状态码带错误体一起被折成 None。
-  后果是"JWT 过期"和"MTW 重启了"在插件眼里长得一模一样 —— v0.3.2 写的那条"鉴权失败强制重登一次
-  再重试"实际永远走不到，过期令牌会被一路当成 MTW 不可达，还把熔断触发一次。改由插件自己
-  拿住 Response 归因：401/403 → 鉴权失败（重登重试），其它 4xx/5xx → 接口报错，连不上 → 不可达；
-  三者都不记到文件头上，但只有鉴权那一种会去重登。
-- 登录失败负缓存：账密错或 MTW 关掉了 /apimt/token/ 时，此前每个文件、每个源都要先登一次，
-  放大成几十万次的必然失败请求 + 一屏同样的错误日志。失败后 60 秒内直接按未登录处理；
-  登录成功或人改过账密时立刻作废这段静默期。
-- 宿主音频白名单区分"读不到"和"被清空"：此前两种都是空列表，于是 docstring 里承诺的
-  "宿主什么都不收就返回空集、不退回本地列表硬扫"根本没实现。现在读不到 → None → 按本地列表扫；
-  明确清空 → 交集为空 → 一个文件都不碰，并告警说明原因。
-- 软链文件也要收敛在库内：followlinks=False 只挡目录，库内一个指向库外的 .flac 软链照样会被
-  写标签（宿主按插件递过去的路径写文件），而 /retry 用 realpath 判定拒收的正是同一条路径。
-  枚举与 /retry 改用同一份 realpath 基准（_library_bounds + _target_in_library）；排除目录改按
-  realpath 整棵剪枝：把它配成别名或软链形式时，逐文件比字符串会整片漏掉，扫描照刮照写、
-  /retry 与待处理桶却拒收。被跳过的库外软链按数量报一条 warning 并写进配置页说明，
-  否则用户只看到"发现 N 个文件"比目录里少、查不出为什么。
-- 汇总里的"待处理"改为直接按账本算（这份文件列表里既不在 done 也不在 failed 的那些），
-  和数据页的待处理桶是同一个口径。此前它是计数器加减：MTW 故障的文件不落账所以要留着，
-  而上一轮记过失败、这一轮撞上故障的文件账本原样还在失败桶里，多算一份就两边对不上号。
-- /apimt/token/ 的成功响应不再按检索结果的形状兜底（它本来就没有 data 字段）：
-  一次成功登录会被说成"MTW 不可达"，日志和任何按 reason 分支的调用方都跟着错。
-- 投递一次性任务前先看一眼槽位：回调 3 秒后才跑、那时抢不到槽会静默跳过，此前 /scan 与
-  "立即运行一次"会对着界面报"已提交"、实际一轮都没跑。
-- 数据页所有列改 sortable:false：/files 恒按路径排序，留着表头箭头点一下只重排眼前这一页，
-  用户看到的是一张既不全、又和总条数对不上的表。
+目录名 / 类名 / 配置前缀 / 各项键名从 v0.1 起没动过：改它们会让已存配置与已积累的状态账一起失效，
+所以更名只发生在展示层。界面文案之外的判据细节见 docs/ 的使用说明，逐项变更历史见
+package.v3.json 的 history。
 """
 from __future__ import annotations
 
-import base64
 import json
 import os
 import re
@@ -283,7 +56,7 @@ from app.sdk.logging import logger
 from app.sdk.media import MusicInfo
 from app.sdk.network import RequestUtils
 
-# 内置识别源：端点与候选解析在 sources.py，本模块只负责发请求（沿用 RequestUtils 那一条缝）
+# 识别源：端点与候选解析在 sources.py，本模块只负责发请求（沿用 RequestUtils 那一条缝）
 from . import sources as _sources
 
 try:  # 宿主较新版本才有 SDK 调度门面；缺失时回退到后台线程
@@ -318,37 +91,29 @@ _MATCH_FIELDS = (("title", "曲名"), ("artist", "艺人"), ("album", "专辑"))
 _HIT = "hit"
 _MISS = "miss"
 _NO_LOCAL = "no_local"
-# MTW 实测能返回候选的识别源（顺序即查询顺序）：qq / spotify / acoustid / all 恒返回空，
-# 不要列进来。migu 单源给 20 条，musicbrainz 给繁体字形，其余各 10 条。
-_DEFAULT_RESOURCES = ("netease", "qmusic", "kuwo", "kugou", "migu", "musicbrainz", "smart_tag")
-# 识别来源。builtin 直连各平台公开检索接口，使用者不必为刮削单独部署 Music Tag Web；
-# mtw 沿用 v0.3.x 的行为。auto 是默认值，也是升级安全值：已配 MTW 地址的装机继续走 MTW，
-# 一行配置都不用改就能拿到和升级前完全一致的结果；没配 MTW 的人自动落到内置源。
-_SOURCE_BACKENDS = ("auto", "builtin", "mtw")
-_SOURCE_BACKEND_LABELS = {"builtin": "内置源", "mtw": "Music Tag Web"}
+# 识别源：sources.py 里那五个平台的公开匿名检索接口，顺序即默认查询顺序。
+# qq / spotify / acoustid / all / kuwo / smart_tag 都不在其中 —— 前四个恒返回空候选或不是
+# 文本检索源，酷我答不出专辑，smart_tag 没有对外接口（详见 sources.py 的模块说明）。
+_DEFAULT_RESOURCES = _sources.RESOURCES
 
-# MTW 侧故障的原因（连不上 / 鉴权失效 / 接口报错）。这类失败说明插件没学到任何关于该文件的信息，
-# 因此不计入 MAX_RETRY、也不写 failed 账：否则 MTW 重启一次就给整库每个文件记一笔失败，
-# 连错满 MAX_RETRY 轮后全体永久跳过，mtime+size 不变就再也刷不动。
-_UNREACHABLE_REASON = "MTW 不可达"
-_AUTH_REASON = "MTW 鉴权失败"
-_API_ERROR_REASON = "MTW 接口报错"
-# 内置源同样有一份"服务侧没给答案"的原因，与 MTW 那三条并列：所有源都连不上或被风控时，
-# 说这个文件查不到是错的，烧它一次重试额度更错。前缀刻意不撞 MTW —— 记账按
-# startswith(_TRANSPORT_REASONS) 分类，撞了就会把内置源的故障记成文件失败。
-_BUILTIN_UNREACHABLE_REASON = "内置识别源不可达"
-# 无候选的原因按后端各写一份：账本里存量的是 "MTW 无候选"，聚合统计不能因为升级而分成两截。
-_BUILTIN_NO_CANDIDATE_REASON = "内置源无候选"
-_TRANSPORT_REASONS = (_UNREACHABLE_REASON, _AUTH_REASON, _API_ERROR_REASON,
-                      _BUILTIN_UNREACHABLE_REASON)
-# 熔断：连续多少个文件栽在 MTW 故障上就中止本轮，别在 MTW 挂着的时段空打上千次请求。
+# "服务侧没给答案"的原因：连不上、被风控、响应形状不认识。这类失败说明插件对这个文件
+# 什么都没学到，因此不计入 MAX_RETRY、也不写 failed 账：否则平台限流一次就给整库每个文件
+# 记一笔失败，连错满 MAX_RETRY 轮后全体永久跳过，mtime+size 不变就再也刷不动。
+_UNREACHABLE_REASON = "识别源不可达"
+# 旧版本的同类文案留在判据里：账本存的是写下来那一刻的字符串，只认新名字会把升级前记下的
+# 故障重新当成文件失败去烧重试额度。
+_LEGACY_TRANSPORT_REASONS = ("MTW 不可达", "MTW 鉴权失败", "MTW 接口报错", "内置识别源不可达")
+_TRANSPORT_REASONS = (_UNREACHABLE_REASON,) + _LEGACY_TRANSPORT_REASONS
+# 无候选是确定答案「曲库里查不到」，与上面相反，要按文件失败记账。
+_NO_CANDIDATE_REASON = "识别源无候选"
+# v0.6.x 之前那几个 MTW 后端的配置键。识别源全部由插件直连平台之后它们不再被读取，
+# 只用来在升级后说明一次「你原来配的地址与账密去哪了」；下次保存配置（整体替换）就把它们清掉。
+_LEGACY_CONFIG_KEYS = ("source_backend", "mtw_base_url", "mtw_username", "mtw_password")
+# 熔断：连续多少个文件栽在「插件什么都没学到」上就中止本轮，别在平台风控的时段空打上千次请求。
 _ABORT_AFTER_TRANSPORT = 5
-# 登录失败后的静默期（秒）：账密错了或 MTW 关掉了 /apimt/token/ 时，每个源、每个文件都会
-# 再登一次 —— 一轮下来是几十万次的必然失败，还顺带把错误日志刷满。
-_LOGIN_BACKOFF = 60.0
-# 内置源单次检索的超时（秒）。平台接口比 MTW 更容易慢（限流时干脆挂着），
-# 每个文件最多问 5 个源，这个值直接决定一轮卡住时能白等多久。
-_BUILTIN_TIMEOUT = 10.0
+# 单次检索的超时（秒）。平台接口比自建服务更容易慢（限流时干脆挂着），而每个文件最多问五个源，
+# 这个值直接决定一轮卡住时能白等多久。
+_SEARCH_TIMEOUT = 10.0
 # 扫描中途落账的最小间隔（秒）：整轮动辄数小时，中途容器重启不该把进度全丢掉。
 # 按时间而不是按变更次数：plugindata 是单行 JSON，每次 save 都要把整本账重新序列化，
 # 固定"每 25 次落一次"在 5 万条目的库里会打出上千次全量写。
@@ -358,46 +123,25 @@ _PENDING_TTL = 30.0
 
 # 配置页底部的一段集中说明：来源、查询与选取规则、两档写入模式、宿主策略叠加。
 # 不跟在单个配置项下面，选项本身只留最短的标签，细节全部收在这里。
+# 这里是「原生表单」那一份，宿主插件管理页用的就是它，判据必须自足；
+# Vue 配置页只留短句，长文在 docs/musiclibraryscraper.md。
 _FORM_NOTES = (
-    "【元数据来源】识别来源=内置源时，插件直连各音乐平台的公开检索接口，不必为刮削单独部署 "
-    "Music Tag Web；识别来源=Music Tag Web 时沿用 v0.3.x 的行为，由 MTW 代为检索。"
-    "自动（默认）表示配了 MTW 地址就走 MTW、没配就走内置源 —— 老实升级的装机行为不变。\n"
-    "【侧栏入口】「整理」分区的那个入口就是这张数据页：勾上并启用插件后，主界面左侧「整理」下"
-    "会出现「音乐库刮削」，点进去直接看四桶与补齐缺项，不必再从插件管理页两层点进来。"
-    "它要管理权限才可见（这一区的插件都会动库里文件），关掉不影响周期扫描本身。\n"
-    "内置源可用：网易云 / QQ音乐 / 酷狗 / 咪咕 / MusicBrainz。酷我与 smart_tag 只有 MTW 模式能问"
-    "（酷我的检索接口对曲名索引恒不返回命中、www 接口要带签名，插件侧没有实现）。"
-    "识别源可多选，留空即全部源；不在当前来源可用清单里的源会被忽略，整份配置恰好只剩被忽略的"
-    "那几个时，退回使用当前来源的全部源并记一条日志，而不是静默产出「零候选」让人以为查不到。"
-    "歌词不由插件请求：命中后交给宿主刮削链，歌词按宿主设置的来源取（内置 lrclib / AMLL）。\n"
-    "【查询与选取】每个文件按这里的源顺序逐源查询，某源出现 3/3 满分候选就立刻停止，不再问后面的源；"
-    "都没满分则合并所有候选取最高分。分数为曲名 / 艺人 / 专辑 各 1 分（先做繁简与大小写归一，"
-    "互相包含即算命中）；同分时按源顺序、同源内按接口返回顺序取第一个。"
-    "最高分仍低于「最低匹配分数」（默认 3，即要求三项全中）就记为失败、不写入。"
-    "该项只接受 1-3，越界会被收回到边界值：调到 1-2 表示只对上曲名或艺人也照样改写标签，"
-    "标签是写进文件的、无法回滚；调到 3 以上则永远不会达标，整库都会被记成失败。"
-    "用于匹配的本地身份优先读文件已有的 tag，缺哪项就按 艺人/专辑 (年)/NN - 曲名 的目录结构兜底；"
-    "只有严格位于「音乐库路径」之下的目录才算艺人/专辑，库根本身的名字不参与猜测，"
-    "猜不出来就留空（宁可判未达阈值，也不拿目录名凑一个假身份去改写标签）。\n"
-    "【写入模式】只补缺：曲名+艺人+专辑+内嵌封面 四项齐全的文件按 mtime+size 记账直接跳过"
-    "（一个检索请求都不发），缺哪项补哪项，已有非空标签保持不动，手工修改不会被覆盖。"
-    "强制覆盖：每轮忽略增量账、全库重扫重问，候选与现有标签不同就重写，封面重新下载内嵌、"
-    "歌词强制重写，手工改过的曲名/艺人/专辑/年份/轨道号会被替换；候选里没有的字段不会清空，"
-    "插件不认识的自定义注释字段也不会删。\n"
-    "【叠加宿主策略】最终是否覆盖还取宿主「设置 → 媒体刮削」音乐三项策略与这里的较强者："
-    "宿主标签策略=覆盖时，即使这里选只补缺也会重写；=跳过时，两种模式都不写该项。"
-    "宿主默认 标签仅缺失、封面仅缺失、歌词更优才换。\n"
-    "【会处理的文件】只扫描宿主音频白名单（设置 → 媒体刮削 → 音频扩展名，默认 RMT_AUDIOEXT）"
-    "与本插件支持列表的交集：宿主不收的扩展名写标签时会被原生刮削链直接拒成"
-    "「刮削路径中没有支持的音频文件」，先排除掉才不会白打请求、又把文件记成失败并烧满重试次数。"
-    "Jellyfin 的 .trickplay 预览缓存目录整棵跳过；目录软链不跟随，避免回环目录把这一轮卡死。"
-    "指向库外的音频软链也会跳过并在日志里报数量 —— 写标签是按路径落到真实文件的，"
-    "让扫描改到音乐库之外的文件不可接受；确有需要请把它指向的目录也加进库路径。\n"
-    "【同一份库】只有识别来源走 MTW 时，MTW 与 MP 才需挂载同一份音乐库路径，"
-    "否则它按路径查到的元数据会写到另一个文件上；内置源不发库内路径，只把清洗后的检索词"
-    "（曲名与艺人）发给平台，标签由插件自己按本地路径写入。\n"
-    "【凭据】内置源不需要 MTW 地址与账密，那三项留空即可；MTW 密码在本机明文存储"
-    "（宿主保存插件配置的方式），插件不会把它写进日志、状态接口或数据页。"
+    "【识别源】插件直连 网易云 / QQ音乐 / 酷狗 / 咪咕 / MusicBrainz 的公开检索接口，不必部署"
+    "任何服务；多选留空即全部源。发给平台的只有清洗后的「曲名-艺人」，库内路径不出本机。\n"
+    "【怎么算命中】曲名 / 艺人 / 专辑 各 1 分（繁简与大小写归一、互相包含即算命中），按配置顺序"
+    "逐源查询、某源出到 3/3 满分即停；都没满分就合并全部候选取最高分，同分时按源顺序取先答的那一个。"
+    "最高分低于「最低匹配分数」（默认 3，即三项全中）就记失败、不写入。分数只在（1-3）之间生效，"
+    "越界按最近的一界执行；调到 1-2 表示只对上曲名或艺人也照样改写标签，而标签写进文件、无法回滚。\n"
+    "【本地身份从哪来】优先读文件已有的标签，缺哪项就按 艺人/专辑 (年)/NN - 曲名 的目录结构兜底；"
+    "只有严格位于音乐库路径之下的目录才算艺人/专辑，库根本身的名字不参与猜测 —— 猜不出来就留空，"
+    "宁可判「未达阈值」，也不拿目录名凑一个假身份去改写标签。\n"
+    "【写入模式】只补缺：曲名+艺人+专辑+内嵌封面四项齐全的文件按 mtime+size 跳过，缺哪项补哪项；"
+    "强制覆盖：每轮忽略增量账、全库重扫，手工改过的标签会被替换（候选里没有的字段不会清空）。"
+    "最终是否覆盖取这里与宿主「设置 → 媒体刮削」音乐三项策略中较强的一方；歌词默认交给宿主。\n"
+    "【会处理的文件】宿主音频白名单与本插件支持列表的交集；Jellyfin 的 .trickplay 缓存目录整棵"
+    "跳过，指向库外的软链不碰（写标签是按路径落到真实文件的）。\n"
+    "【侧栏入口】勾上并启用插件后，主界面「整理」下出现本页，逐文件核对与补齐缺项都在那里做。"
+    "逐项判据、失败归因与各源现状见仓库内 docs/musiclibraryscraper.md。"
 )
 
 # 各容器格式的 tag key：ID3 帧名 / MP4 atom / Vorbis 注释 / APEv2。
@@ -449,53 +193,58 @@ def _norm_text(value: Any) -> str:
     return _NORM_STRIP_RE.sub("", unicodedata.normalize("NFKC", text).casefold())
 
 
-def _normalize_resources(value: Any, warn: bool = False,
-                         known: Optional[Sequence[str]] = None,
-                         default: Optional[Sequence[str]] = None) -> List[str]:
-    """把 mtw_resource 归一成去重保序、且只含已知源的列表。
+def _resource_tokens(value: Any) -> List[str]:
+    """把识别源配置拆成去空白后的字符串项（不判断认不认识）。
 
-    配置项从单选改成了多选，但库里可能还存着旧的单字符串（"netease"），
-    也可能被前端写成逗号/分号分隔的串。直接对字符串迭代拿到的是字符，
-    所以任何入口都必须先过这里。空值回落到"全部源"。
-
-    未知值必须在这里就丢掉：一个必然报错的源（旧配置残留的 qq/all、或 API 写坏的数组）
-    会让每个文件都多打一次失败请求，而"有源失败"会被拉候选那边当成服务侧故障 ——
-    结果是整轮在前几个文件就熔断，全库永远停在待处理。
-
-    known/default 按识别来源分开：内置源没有酷我和 smart_tag，从 MTW 模式切过来的配置
-    里这两个名字要能被安静地摘掉，而整份配置只剩它们时不能静默产出"零候选"，
-    那会被记成"曲库里查不到"，所以退回到内置源全集并说明一次。
+    这一项从单选改成过多选，库里可能还存着旧的单字符串（"netease"），也可能被前端写成
+    逗号/分号分隔的串。直接对字符串迭代拿到的是字符，所以任何入口都必须先过这里。
     """
-    known_set = set(known if known is not None else _DEFAULT_RESOURCES)
-    all_names = list(default if default is not None else _DEFAULT_RESOURCES)
     if isinstance(value, str):
         raw: List[Any] = value.replace(",", ";").split(";")
     elif isinstance(value, (list, tuple, set)):
         raw = list(value)
     else:
         raw = []
+    return [str(item).strip() for item in raw if item is not None and str(item).strip()]
+
+
+def _resources_are_listed(value: Any) -> bool:
+    """配置里到底点没点源：决定回写要不要保住「留空」这个状态。
+
+    把留空展开成全部源再写回去，等于替用户显式选中了这五个 —— 以后插件再加一个源，
+    这份装机永远不会自动去问它，而界面上看是一片空白，没人会想到是某次保存写死的。
+    """
+    return bool(_resource_tokens(value))
+
+
+def _normalize_resources(value: Any, warn: bool = False) -> List[str]:
+    """把识别源配置归一成去重保序、且只含已知源的列表；空值回落到「全部源」。
+
+    未知值必须在这里就丢掉：一个必然报错的源（旧配置残留的 kuwo / smart_tag、或 API 写坏的
+    数组）会让每个文件都多打一次失败请求，而拉候选那边会把「有源没答」当成服务侧故障 ——
+    结果是整轮在前几个文件就熔断，全库永远停在待处理。
+
+    整份配置恰好只剩被忽略的那几个时，退回全部源而不是交出一个空名单：那会被记成
+    「曲库里查不到」，而真实的故障在插件自己的配置里。
+    """
     out: List[str] = []
     unknown: List[str] = []
-    for item in raw:
-        if item is None:
+    tokens = _resource_tokens(value)
+    for name in tokens:
+        if name in out:
             continue
-        name = str(item).strip()
-        if not name or name in out:
-            continue
-        if name in known_set:
+        if name in _DEFAULT_RESOURCES:
             out.append(name)
         elif name not in unknown:
             unknown.append(name)
     if unknown and warn:
         logger.warning(
             f"[music-scraper] 忽略不认识的识别源 {'、'.join(unknown)}"
-            f"（可用：{'、'.join(all_names)}）"
+            f"（可用：{'、'.join(_DEFAULT_RESOURCES)}）"
         )
-    if raw and not out and warn:
-        logger.warning(
-            "[music-scraper] 配置的识别源在当前识别来源里一个都没有，已改用全部内置源"
-        )
-    return out or all_names
+    if tokens and not out and warn:
+        logger.warning("[music-scraper] 配置的识别源没有一个可用，已改用全部识别源")
+    return out or list(_DEFAULT_RESOURCES)
 
 
 def _host_audio_extensions() -> Optional[List[str]]:
@@ -503,7 +252,7 @@ def _host_audio_extensions() -> Optional[List[str]]:
 
     ScrapingChain 在写标签前会按这份白名单过滤文件，不在里面的直接返回
     "刮削路径中没有支持的音频文件"。插件要先看它一眼，否则每个不收的扩展名都要
-    先白打最多 7 次 MTW 请求、再被记一次刮削失败，烧满 retries 才永久跳过。
+    先白打满全部识别源、再被记一次刮削失败，烧满 retries 才永久跳过。
 
     读不到（宿主改版、配置还没加载）与"读到了但一个都不收"必须分开：前者只能按插件
     自己的列表扫，后者是真的什么都不该扫。两者都返回空列表时，调用方无法区分，
@@ -562,108 +311,6 @@ def _supported_audio_ext() -> Tuple[str, ...]:
     return exts
 
 
-def _epoch_of(value: Any) -> Optional[float]:
-    """把秒/毫秒时间戳或 ISO 日期串换算成 epoch 秒，认不出来返回 None。"""
-    if value is None or isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        # 秒级与毫秒级都可能：1e11 秒是公元 5138 年，超过就按毫秒处理
-        return float(value / 1000) if value > 1e11 else float(value)
-    text = str(value).strip()
-    if not text:
-        return None
-    if re.fullmatch(r"\d{10,13}", text):
-        return _epoch_of(int(text))
-    try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return None
-
-
-def _jwt_exp(token: str) -> Optional[float]:
-    """只解 JWT 载荷里的 exp，不验签：令牌是本机从 MTW 拿的，验签要服务端密钥、没必要。"""
-    try:
-        segment = str(token).split(".")[1]
-        segment += "=" * (-len(segment) % 4)
-        claims = json.loads(base64.urlsafe_b64decode(segment.encode()))
-    except Exception:
-        return None
-    return _epoch_of(claims.get("exp") if isinstance(claims, dict) else None)
-
-
-def _token_expiry_at(token: str, payload: Dict[str, Any]) -> float:
-    """令牌什么时候过期按它自己的声明算，不再硬编 6 天。
-
-    MTW 的 JWT 生命周期是服务端配置：换密钥、改过期设置、管理员踢人都可能让它提前失效。
-    猜长了就会长期带着一个废 token 跑完整轮，每个文件都"无候选"，还一路记成刮削失败；
-    取不到声明时宁可只缓存 1 小时，多登一次比整轮白跑便宜。
-    """
-    for key in ("expired_at", "expires_at", "expiry", "expire", "exp"):
-        epoch = _epoch_of(payload.get(key)) if isinstance(payload, dict) else None
-        if epoch:
-            return epoch
-    return _jwt_exp(token) or (time.time() + 3600)
-
-
-def _mtw_failure_reason(resp: Any) -> Optional[str]:
-    """判断这份 2xx 响应体是不是"没给出结论"，返回故障原因；None 表示可用（含空候选）。
-
-    状态码那层由 _mtw_post 先看，这里只按响应体形状兜底：MTW 偶尔用 200 夹带 DRF 错误体
-    （带 detail/code，JWT 失效就是 {"detail": "...", "code": "token_not_valid"}），
-    正常检索结果一定带 data 数组。空候选是 {"data": []}，属于可用响应。
-    """
-    if resp is None:
-        return _UNREACHABLE_REASON
-    if not isinstance(resp, dict):
-        return _UNREACHABLE_REASON
-    # data 是 list（检索结果）或 dict（分页包一层）都算拿到结论；拉候选那边两种形状都会解。
-    if isinstance(resp.get("data"), (list, dict)):
-        return None
-    if any(key in resp for key in ("detail", "error", "exception", "code")):
-        return _AUTH_REASON
-    return _UNREACHABLE_REASON
-
-
-def _mtw_post(url: str, body: Dict[str, Any], headers: Dict[str, str],
-              expect_data: bool = True) -> Tuple[Any, Optional[str]]:
-    """POST 一次 MTW 接口，返回 (响应体, 故障原因)。
-
-    不能直接用 RequestUtils.post_json：宿主那句 `if response:` 判的是 requests 的
-    Response.__bool__（等价于 status_code < 400），于是 401、500 的响应连同一个错误体
-    一起被折成 None。插件分不清"MTW 重启了"（该熔断、不该给文件记账）和"JWT 过期了"
-    （该重登一次再重试），只能把两者一律记成不可达，强制重登那条路永远走不到。
-    这里自己拿住 Response 看状态码，非 2xx 也尽量把 JSON 错误体解出来。
-
-    expect_data=False 给 /apimt/token/ 用：那份响应本来就没有 data 字段
-    （{"token": "...", ...}），按检索结果的形状去兜底判会把一次成功登录说成"不可达"。
-    """
-    resp = RequestUtils(headers=headers).post(url=url, json=body)
-    if resp is None:
-        return None, _UNREACHABLE_REASON
-    try:
-        status = int(getattr(resp, "status_code", 0) or 0)
-        try:
-            payload = resp.json()
-        except Exception:
-            payload = None
-    finally:
-        # post_json 会自己 close，改用 post 之后连接得我们自己收。
-        try:
-            resp.close()
-        except Exception:
-            pass
-    if status in (401, 403):
-        return payload, _AUTH_REASON
-    if status >= 400:
-        return payload, _API_ERROR_REASON
-    if not isinstance(payload, dict):
-        # 2xx 但解不出对象：多半是被网关或登录页截了，不是曲库给的答案
-        return payload, _UNREACHABLE_REASON
-    if not expect_data:
-        return payload, None
-    return payload, _mtw_failure_reason(payload)
-
-
 def _first_tag_value(tags, keys) -> str:
     """从 mutagen 标签容器里按候选 key 取第一个非空文本。"""
     for key in keys:
@@ -693,7 +340,7 @@ def _has_embedded_cover(audio: Any, tags: Any) -> bool:
     不能只按帧名 `tags.get("APIC")` 判 ID3：APIC 是可重复帧，mutagen 取这类帧的口径是
     `getall("APIC")`（键还可能带描述）；APEv2 的封面 key 是 "Cover Art (Front)"，
     根本不在按帧名罗列的那份表里。判错的代价不对称 —— 已经有封面的文件被判成没封面，
-    补空模式就永远认为它"没刮齐"：每轮重打最多 7 次 MTW 请求，还因为候选不达标白涨
+    补空模式就永远认为它"没刮齐"：每轮重打满全部识别源，还因为候选不达标白涨
     retries，几轮之后一个本来完整的文件被永久列成超限。
     """
     # mutagen 的通用图片接口：文件对象（FLAC/OGG/MP4/APE…）和 tag 容器（ID3）两处都可能暴露
@@ -928,7 +575,7 @@ def _path_identity(path: Path, roots: Sequence[Path] = ()) -> Dict[str, str]:
     roots 给定时只认严格落在库根之下的目录：库根自己以及它上面的层级不是专辑/艺人目录。
     不 clamp 的话 /media/music/01 - 轨迹.flac 会得到 album="music"、
     /media/music/周杰伦/01 - x.flac 会得到 artist="media" —— 这种凭空造出来的名字
-    既会被当搜索词发给 MTW，比对又是双向包含（want in got 也算命中），一个目录名
+    既会被当检索词发给平台，比对又是双向包含（want in got 也算命中），一个目录名
     就可能白送一个匹配分；把 min_score 放宽到 1-2 时，够格的文件会被按错艺人改标签，
     而写进文件的标签没法回滚。宁可留空判「未达阈值」，也不要假身份。
     """
@@ -955,7 +602,7 @@ def _local_identity(path: Path, tags: Optional[Dict[str, Any]] = None,
                     roots: Sequence[Path] = ()) -> Dict[str, Any]:
     """本地身份：tag 优先，缺失字段用目录结构兜底。
 
-    MTW 的 fetch_id3_by_title 是把 title 当搜索关键词用的，传原始文件名
+    各平台的检索接口都是拿曲名当关键词用的，传原始文件名
     （"01 - 轨迹.flac"）只会召回一堆噪音，必须先清洗成干净曲名。
 
     tags 由调用方传入时不再重复解析文件：mutagen 读一次不便宜，一轮里补空判定、
@@ -992,21 +639,20 @@ class _MusicScrapeChain(ScrapingChain):
 
 
 class MusicLibraryScraper(_PluginBase):
-    """扫描音乐库，按识别来源拉候选（内置源直连平台，或交给 Music Tag Web），
-    交由 MP ScrapingChain 完成写入。
+    """扫描音乐库，按识别源检索候选，交由 MP ScrapingChain 完成写入。
 
     目录名 / 类名 / 配置前缀沿用 v0.2.x：MP 的 config_data 以 plugin_config_prefix 为键、
-    plugindata 以类名为键，改名会让已配置的 MTW 地址账密和已积累的刮削状态账一起失效。
+    plugindata 以类名为键，改它们会让已存配置和已积累的状态账一起失效，所以更名只动展示层。
     """
 
-    plugin_name = "MusicTagWeb音乐库刮削"
+    plugin_name = "TagFlow音乐库刮削"
     plugin_desc = (
-        "定时扫描音乐目录，元数据取自内置实现的多源识别"
-        "（网易云 / QQ / 酷狗 / 咪咕 / MusicBrainz，免部署 Music Tag Web），"
-        "也可切回 MTW 由它代为检索；再沿用 MP 原生音乐刮削链路写入标签与封面。"
+        "定时扫描音乐目录，元数据取自插件直连的各平台公开检索接口"
+        "（网易云 / QQ音乐 / 酷狗 / 咪咕 / MusicBrainz），再沿用 MP 原生音乐刮削链路写入标签与封面；"
+        "侧栏「整理」下常驻数据页，失败与有缺项逐文件可查可补。"
     )
-    plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/avator.webp"
-    plugin_version = "0.6.0"
+    plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/tagflow.svg"
+    plugin_version = "0.7.0"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "musiclibraryscraper_"
@@ -1023,22 +669,14 @@ class MusicLibraryScraper(_PluginBase):
     _scraper_paths: str = ""
     _exclude_paths: str = ""
     _force_all: bool = False
-    _mtw_base_url: str = ""
-    _mtw_username: str = ""
-    _mtw_password: str = ""
-    _mtw_resources: List[str] = list(_DEFAULT_RESOURCES)
-    # 当前识别来源下真正要问的源（内置源与 MTW 的源名单不同，酷我和 smart_tag 只在 MTW 模式有）
-    _active_resources: List[str] = list(_sources.RESOURCES)
-    # 识别来源配置值（auto/builtin/mtw）与本轮实际生效的那一个
-    _source_backend: str = "auto"
-    _backend: str = "builtin"
+    # 本轮真正要问的源（配置留空即全部源）
+    _active_resources: List[str] = list(_DEFAULT_RESOURCES)
+    # 配置里到底点没点源：回写要保住「留空」，见 _resources_are_listed。
+    # 默认 False（= 留空）：没配过源的安装就该回写成"全部源"，而不是替它点名五个。
+    _resources_listed: bool = False
     _min_score: int = 3
     # 是否允许在本地已有/候选自带的歌词之外，主动去识别源拉歌词回填
     _fill_lyrics: bool = False
-
-    # MTW 令牌缓存
-    _token: Optional[str] = None
-    _token_expiry: float = 0.0
 
     # 失败自动重试上限：retries 达到该值后，定时扫描不再自动重试（仅手动重试）。
     MAX_RETRY: int = 5
@@ -1054,7 +692,6 @@ class MusicLibraryScraper(_PluginBase):
         self.__dict__.setdefault("_deficient_cache", None)
 
         if config:
-            previous_mtw = (self._mtw_base_url, self._mtw_username, self._mtw_password)
             self._enabled = bool(config.get("enabled"))
             # 缺键按开：升级过来的装机没有这一项，默认关会让入口"升级完就消失"，
             # 而它本来什么也没改变过，只是多了一个入口。
@@ -1064,41 +701,26 @@ class MusicLibraryScraper(_PluginBase):
             self._scraper_paths = config.get("scraper_paths") or ""
             self._exclude_paths = config.get("exclude_paths") or ""
             self._force_all = config.get("mode") == "force_all"
-            self._mtw_base_url = (config.get("mtw_base_url") or "").rstrip("/")
-            self._mtw_username = config.get("mtw_username") or ""
-            self._mtw_password = config.get("mtw_password") or ""
-            # warn=True：只在配置入口告警一次，不要每个文件拉候选时都刷一遍日志
-            # 存的是 MTW 那套源名单（含酷我/smart_tag），切到内置源时不顺手删掉用户的选项，
-            # 来回切换后端不该把人配了一半的源列表改没。
-            self._mtw_resources = _normalize_resources(config.get("mtw_resource"))
-            self._source_backend = self._resolve_backend_choice(config.get("source_backend"))
-            self._backend = self._effective_backend()
-            self._active_resources = _normalize_resources(
-                config.get("mtw_resource"), warn=True,
-                known=_sources.RESOURCES if self._backend == "builtin" else None,
-                default=_sources.RESOURCES if self._backend == "builtin" else None,
-            )
-            if self._backend == "mtw" and not self._mtw_base_url:
-                logger.warning(
-                    "[music-scraper] 识别来源要求走 MTW，但没有配 MTW 地址："
-                    "本轮每个文件都会记成 MTW 不可达并很快熔断，请填地址或把识别来源改成内置源"
-                )
+            # warn=True：只在配置入口告警一次，不要每个文件拉候选时都刷一遍日志。
+            # 这一项改名为 resources（MTW 那套源名单已经不在了），读侧留一次兼容：
+            # 老装机配过的多选名单不该因为改名整个退回全部源。
+            raw_resources = config.get("resources") or config.get("mtw_resource")
+            self._resources_listed = _resources_are_listed(raw_resources)
+            self._active_resources = _normalize_resources(raw_resources, warn=True)
             self._min_score = self._clamp_min_score(config.get("min_score"))
             self._fill_lyrics = bool(config.get("fill_lyrics"))
-            if (self._mtw_base_url, self._mtw_username, self._mtw_password) != previous_mtw:
-                # 换地址/换账号后手里那个令牌是上一个实例签发的：
-                # 继续带它请求既会白吃一次 401，也算把凭据发到新的地址上。
-                self._mtw_drop_token()
-                # 人刚改过账密，登录静默期里那条新凭据永远试不到：一并作废。
-                self.__dict__["_login_retry_at"] = 0.0
+            if any(key in config for key in _LEGACY_CONFIG_KEYS):
+                logger.warning(
+                    "[music-scraper] 识别源已全部由插件直连平台，不再支持 Music Tag Web 后端："
+                    "配置里的 MTW 地址与账密将被忽略，下次保存配置时一并清掉"
+                )
 
         # 勾选“立即运行一次”：回写配置关闭该开关，并投递一次性扫描。
         if self._onlyonce:
             self._onlyonce = False
             # update_config 是整体替换而不是合并（宿主 PluginInstanceOper.save_config_data
             # 直接 record.config_data = deepcopy(config_data)），所以必须把全量配置写回去，
-            # 只写 {"onlyonce": False} 会把其余配置一起清掉。密码本来就在这份配置里，
-            # 明文落 systemconfig 是 MP 存储插件配置的方式，插件侧无法在不丢配置的前提下回避。
+            # 只写 {"onlyonce": False} 会把其余配置一起清掉。
             self.update_config(self._config_snapshot())
             self._kick_scan()
 
@@ -1116,41 +738,13 @@ class MusicLibraryScraper(_PluginBase):
             "scraper_paths": self._scraper_paths,
             "exclude_paths": self._exclude_paths,
             "mode": "force_all" if self._force_all else "",
-            "mtw_base_url": self._mtw_base_url,
-            "mtw_username": self._mtw_username,
-            "mtw_password": self._mtw_password,
-            # 配置键保持单数，值自 v0.3.0 起是数组（读侧兼容旧的单字符串）
-            "mtw_resource": self._mtw_resources,
-            "source_backend": self._source_backend,
+            # 配置键用复数，值一直是数组（读侧兼容旧的单字符串与旧的 mtw_resource 键）。
+            # 用户没点名就回写空数组：把 _active_resources 那五个展开写回去，"留空=全部源"
+            # 这条规则会在第一次回写时变成"显式选中这五个"，以后新增的源永远轮不到。
+            "resources": list(self._active_resources) if self._resources_listed else [],
             "min_score": self._min_score,
             "fill_lyrics": self._fill_lyrics,
         }
-
-    @staticmethod
-    def _resolve_backend_choice(raw: Any) -> str:
-        """识别来源只接受 auto/builtin/mtw，认不出来就回 auto。
-
-        回 auto 而不是猜一个具体后端：auto 的语义是"配了 MTW 就用 MTW"，
-        写坏了配置的老装机至少能保住升级前那套行为。
-        """
-        name = str(raw or "").strip().lower()
-        if name in _SOURCE_BACKENDS:
-            return name
-        if name:
-            logger.warning(
-                f"[music-scraper] 忽略不认识的识别来源 {name!r}，按自动（auto）执行"
-            )
-        return "auto"
-
-    def _effective_backend(self) -> str:
-        """把 auto 落定成实际后端：配了 MTW 地址就继续走 MTW，否则走内置源。
-
-        auto 是默认值，为的是升级不掉已有部署 —— 那些装机本来就是冲着 MTW 来的，
-        默认改成内置源会让它们的结果一夜之间变样（源少了酷我和 smart_tag）。
-        """
-        if self._source_backend in ("builtin", "mtw"):
-            return self._source_backend
-        return "mtw" if self._mtw_base_url else "builtin"
 
     @staticmethod
     def _clamp_min_score(raw: Any) -> int:
@@ -1258,10 +852,7 @@ class MusicLibraryScraper(_PluginBase):
                 f"{stats['counts']['pending_unknown']}\n"
                 + self._reason_lines(stats)
                 + f"定时 {stats['config']['cron']}｜下次 {stats['config']['cron_next']}"
-                + (
-                    f"\n识别来源 {stats['config']['backend_label']}"
-                    f"｜源 {'、'.join(stats['config']['active_resource']) or '未配置'}"
-                )
+                + f"\n识别源 {'、'.join(stats['config']['resources']) or '未配置'}"
                 + (
                     f"\n最近定向重试：{stats['last_targeted'].get('ts')}"
                     f"，成功 {stats['last_targeted'].get('ok', 0)}"
@@ -1460,26 +1051,28 @@ class MusicLibraryScraper(_PluginBase):
                 "reason": None if started else "busy"}
 
     def api_get_config(self, request: Request) -> Dict[str, Any]:
-        """GET /config —— 可编辑配置，不含密码。
+        """GET /config —— 当前可编辑配置。
 
         侧栏全页里的配置对话框要用它起头：宿主只把 api/pluginId/navKey 三个 props
         交给 ./AppPage，initialConfig 那条链路在这个挂载方式下拿不到，只能插件自己回。
-        密码不回显（与 /status 同一个承诺：不写进日志、状态接口或数据页），
-        另给 mtw_password_set 说明存没存过，页面上那格留空就是不改。
+        这份配置里没有凭据（识别源是各平台的匿名检索接口），回显的就是全部真相。
+
+        回的是「存下来的配置原值」而不是本轮生效值：多选留空的意思是"全部源"，
+        把 _active_resources 那五个源回显回去，对话框会把它当成用户显式选中的名单，
+        下一次保存就把"留空"这条规则写没了。audio_extensions 是只读说明项，
+        POST 那边按配置键过滤，传回来也会被丢掉。
         """
         config = dict(self._config_snapshot())
-        password = str(config.pop("mtw_password") or "")
         config["onlyonce"] = False
-        config["mtw_password_set"] = bool(password)
+        config["audio_extensions"] = list(_supported_audio_ext())
         return config
 
     async def api_config(self, request: Request) -> Dict[str, Any]:
-        """POST /config —— 只改传上来的键；密码留空表示保留原值。
+        """POST /config —— 只改传上来的键，其余按当前配置原样带着。
 
-        这条路径绕开了宿主「插件管理 → 配置」的整体替换：先拿当前全量做底、
-        按键覆盖，再交给 init_plugin 走同一套归一化（cron 兜底、min_score 收界、
-        源名单过滤、换 MTW 地址丢令牌都在那里），最后整体写回。
-        请求里认不出来的键不会被写进配置，免得留下表单没定义却存在于配置里的野键。
+        这条路径绕开了宿主「插件管理 → 配置」的整体替换：先拿当前全量做底、按键覆盖，
+        再交给 init_plugin 走同一套归一化（cron 兜底、min_score 收界、源名单过滤都在那里），
+        最后整体写回。请求里认不出来的键不会被写进配置，免得留下表单没定义却存在于配置里的野键。
         """
         try:
             payload = await request.json()
@@ -1487,12 +1080,9 @@ class MusicLibraryScraper(_PluginBase):
             return {"ok": False, "message": "请求体不是合法的 JSON"}
         if not isinstance(payload, dict):
             return {"ok": False, "message": "请求体要是一个 JSON 对象"}
-        known = set(self._config_snapshot()) | {"mtw_password_set"}
+        known = set(self._config_snapshot())
         merged = {**self._config_snapshot(),
                   **{key: value for key, value in payload.items() if key in known}}
-        merged.pop("mtw_password_set", None)
-        if not str(merged.get("mtw_password") or "").strip():
-            merged["mtw_password"] = self._mtw_password
         self.init_plugin(merged)
         self.update_config(self._config_snapshot())
         # enabled 决定宿主要不要登记这个插件，cron 决定什么时候跑：改过任何一个
@@ -1603,28 +1193,9 @@ class MusicLibraryScraper(_PluginBase):
                     ]},
                     {"component": "VRow", "content": [
                         {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                            {"component": "VSelect", "props": {
-                                "model": "source_backend", "label": "识别来源",
-                                "items": [
-                                    {"title": "自动（配了 MTW 地址走 MTW，否则内置源）", "value": "auto"},
-                                    {"title": "内置源（免部署 Music Tag Web）", "value": "builtin"},
-                                    {"title": "Music Tag Web", "value": "mtw"},
-                                ]
-                            }}
-                        ]},
-                    ]},
-                    {"component": "VRow", "content": [
-                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                             {"component": "VCronField", "props": {
                                 "model": "cron", "label": "执行周期", "placeholder":
                                 "5 位 cron；星期 0=周一…6=周日、7=周日，留空默认 0 3 * * sun"
-                            }}
-                        ]},
-                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                            {"component": "VTextField", "props": {
-                                "model": "mtw_base_url",
-                                "label": "Music Tag Web 地址（MTW 模式必填）",
-                                "placeholder": "http://192.168.x.x:8001；内置源留空即可"
                             }}
                         ]},
                         {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
@@ -1633,35 +1204,24 @@ class MusicLibraryScraper(_PluginBase):
                                 "min": 1, "max": 3, "placeholder": "默认 3"
                             }}
                         ]},
+                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                            {"component": "VSwitch", "props": {
+                                "model": "fill_lyrics", "label": "识别源补歌词（默认交给宿主）"
+                            }}
+                        ]},
                     ]},
                     {"component": "VRow", "content": [
                         {"component": "VCol", "props": {"cols": 12}, "content": [
                             {"component": "VSelect", "props": {
-                                "model": "mtw_resource", "label": "识别源（可多选，留空=当前来源全部）",
+                                "model": "resources", "label": "识别源（可多选，留空=全部）",
                                 "multiple": True, "chips": True, "closable": True,
                                 "items": [
                                     {"title": "网易云 netease", "value": "netease"},
                                     {"title": "QQ 音乐 qmusic", "value": "qmusic"},
-                                    {"title": "酷我 kuwo", "value": "kuwo"},
                                     {"title": "酷狗 kugou", "value": "kugou"},
                                     {"title": "咪咕 migu", "value": "migu"},
                                     {"title": "MusicBrainz", "value": "musicbrainz"},
-                                    {"title": "智能 smart_tag", "value": "smart_tag"},
                                 ]
-                            }}
-                        ]},
-                    ]},
-                    {"component": "VRow", "content": [
-                        {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                            {"component": "VTextField", "props": {
-                                "model": "mtw_username", "label": "MTW 用户名（内置源留空）",
-                                "type": "text"
-                            }}
-                        ]},
-                        {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                            {"component": "VTextField", "props": {
-                                "model": "mtw_password", "label": "MTW 密码",
-                                "type": "password", "placeholder": "仅本机保存，不入 git"
                             }}
                         ]},
                     ]},
@@ -1700,15 +1260,9 @@ class MusicLibraryScraper(_PluginBase):
             "cron": _DEFAULT_CRON,
             "scraper_paths": "",
             "exclude_paths": "",
-            "mtw_base_url": "",
-            # 识别来源默认 auto：配了 MTW 地址的装机继续走 MTW，没配的走内置源。
-            # 不要把默认写成 builtin —— 那会让老实升级的人一夜之间少掉酷我与 smart_tag。
-            "source_backend": "auto",
-            "mtw_username": "",
-            "mtw_password": "",
-            # 留空 = 全部源（读侧 _normalize_resources 保证），不要把 7 个源预填进去：
-            # 预填会让两个配置页长得不一样，也和说明文案对不上。
-            "mtw_resource": [],
+            # 留空 = 全部源（读侧 _normalize_resources 保证）。不要把五个源预填进去：
+            # 预填了就没有「留空即全部」这条规则，配置页和说明也对不上。
+            "resources": [],
             "min_score": 3,
             # writeback 一定会带这个键（onlyonce 回写里就有），defaults 不声明它，
             # 回写后就成了「表单没定义却在配置里存在」的野键，整体替换的护栏也拦不住。
@@ -2040,10 +1594,6 @@ class MusicLibraryScraper(_PluginBase):
         if not self._scraper_paths:
             logger.warning("[music-scraper] 未配置 scraper_paths，跳过")
             return
-        if self._backend == "mtw" and not self._mtw_base_url:
-            # 内置源不需要 MTW 地址，这条判断要认来源：否则免部署的那条路整轮静默跳过
-            logger.warning("[music-scraper] 识别来源是 Music Tag Web 但未配置 mtw_base_url，跳过")
-            return
 
         started = time.time()
         # 账本要变了，pending 桶的缓存立刻作废（它靠 done/failed 做差集）
@@ -2073,9 +1623,9 @@ class MusicLibraryScraper(_PluginBase):
         live_keys = set()  # 整盘扫描时实际存在（stat 成功）的文件，供 prune 用
         dirty = False  # 自上次落账以来两本账有没有变更
         last_flush = time.time()
-        # 连续"插件没学到任何东西"的文件数：MTW 故障或单文件异常都算
+        # 连续"插件没学到任何东西"的文件数：识别源故障或单文件异常都算
         transport_streak = 0
-        # 定向重试的批次也可能很大（/retry 全部失败项）：MTW 真挂着时一样要熔断，
+        # 定向重试的批次也可能很大（/retry 全部失败项）：平台整体风控时一样要熔断，
         # 否则几千个文件 × 全部源会一路打到底。只有小批次才值得整批跑完。
         may_abort = len(files) > _ABORT_AFTER_TRANSPORT
 
@@ -2152,14 +1702,14 @@ class MusicLibraryScraper(_PluginBase):
                 continue
 
             if reason.startswith(_TRANSPORT_REASONS):
-                # MTW 侧故障：插件没学到任何关于这个文件的信息，所以既不写 failed 账、
+                # 识别源没给出结论：插件没学到任何关于这个文件的信息，所以既不写 failed 账、
                 # 也不涨 retries，原样留着下一轮再处理。连续踩满就熔断中止本轮。
                 transport += 1
                 transport_streak += 1
                 if may_abort and transport_streak >= _ABORT_AFTER_TRANSPORT:
                     logger.warning(
-                        f"[music-scraper] 连续 {transport_streak} 个文件是 MTW 故障，"
-                        f"判为 MTW 整体不可用，本轮中止"
+                        f"[music-scraper] 连续 {transport_streak} 个文件的识别源都没有给出答案，"
+                        f"判为识别源整体不可用，本轮中止"
                     )
                     aborted = True
                     break
@@ -2209,7 +1759,7 @@ class MusicLibraryScraper(_PluginBase):
 
         # "待处理"要和同一时刻数据页的待处理桶是同一个口径，否则两边对不上号、
         # 看着像有文件凭空消失。桶是"这份文件列表里既不在 done 也不在 failed 的那些"，
-        # 这里就直接照它算：MTW 故障、处理异常的文件都不落账所以仍然待处理，熔断/停止
+        # 这里就直接照它算：识别源故障、处理异常的文件都不落账所以仍然待处理，熔断/停止
         # 没走到的也一样，上一轮已经记过失败的则回到失败桶（用计数器加减时很容易漏一种）。
         pending = sum(
             1 for fp in files
@@ -2243,7 +1793,7 @@ class MusicLibraryScraper(_PluginBase):
         logger.info(
             f"[music-scraper] {'定向重试' if targeted else '扫描'}完成："
             f"命中缓存 {from_cache}，已有tag {skipped_tagged}，"
-            f"成功 {ok}，失败 {failed_n}，超限跳过 {exhausted}，MTW 故障 {transport}"
+            f"成功 {ok}，失败 {failed_n}，超限跳过 {exhausted}，识别源故障 {transport}"
             f"{'，处理异常 ' + str(errors) if errors else ''}"
             f"{'（本轮熔断中止，未处理的下轮再来）' if aborted else ''}"
             f"（{summary['duration_s']}s）"
@@ -2266,7 +1816,7 @@ class MusicLibraryScraper(_PluginBase):
         """处理单个文件，返回 (是否成功, 失败原因, 命中分数, 命中来源)。"""
         identity = _local_identity(path, tags, roots=self._identity_roots())
         if not identity["title"]:
-            # 和"MTW 无候选"分开：那种是问过了、曲库里确实查不到，这种是一次都没问 ——
+            # 和"识别源无候选"分开：那种是问过了、曲库里确实查不到，这种是一次都没问 ——
             # 该做的是把这类文件（整张 CD 压成一个 wav）排出扫描范围，不是放宽阈值。
             return False, "本地读不出曲名（tag 与目录结构都没给出）", None, ""
         candidates, failure = self._fetch_candidates(path, identity=identity)
@@ -2274,10 +1824,8 @@ class MusicLibraryScraper(_PluginBase):
             # 服务侧故障：不能算这个文件的锅，调用方按原因前缀区分后不记 retries。
             return False, failure, None, ""
         if not candidates:
-            return False, (
-                "MTW 无候选" if self._backend == "mtw" else _BUILTIN_NO_CANDIDATE_REASON
-            ), None, ""
-        picked, score, hits = self._mtw_best_candidate(path, candidates, identity=identity)
+            return False, _NO_CANDIDATE_REASON, None, ""
+        picked, score, hits = self._best_candidate(path, candidates, identity=identity)
         if not picked or score < self._min_score:
             # 分数不够时把"差在哪一项"一起写进原因：2/3 分本身不够用来看该改文件名、
             # 该放宽阈值，还是该把这类文件排出扫描范围 —— 曲名没对上和本地根本没有曲名，
@@ -2286,8 +1834,8 @@ class MusicLibraryScraper(_PluginBase):
             detail = f"未达阈值（最低匹配分数 {self._min_score}）"
             return False, f"{detail}：{miss}" if miss else detail, score, ""
         source = str(picked.get("resource") or "").strip()
-        if self._fill_lyrics and self._backend == "builtin" and not _candidate_has_lyric(picked):
-            lyric = self._builtin_fetch_lyric(source, picked)
+        if self._fill_lyrics and not _candidate_has_lyric(picked):
+            lyric = self._fetch_lyric(source, picked)
             if lyric:
                 picked["lyrics"] = lyric
         info = self._candidate_to_musicinfo(picked, path)
@@ -2312,7 +1860,7 @@ class MusicLibraryScraper(_PluginBase):
             overwrite=overwrite,
         )
         if ok:
-            logger.info(f"[music-scraper] 刮削成功: {path.name} → {info.title}（{source or 'MTW'}）")
+            logger.info(f"[music-scraper] 刮削成功: {path.name} → {info.title}（{source or '未知源'}）")
             return True, "", score, source
         logger.warning(f"[music-scraper] 刮削失败: {path.name} — {msg}")
         return False, f"写入失败：{msg}", score, source
@@ -2378,20 +1926,13 @@ class MusicLibraryScraper(_PluginBase):
                 "show_sidebar_nav": self._show_sidebar_nav,
                 "scraper_paths": self._scraper_paths,
                 "exclude_paths": self._exclude_paths,
-                # 识别来源回显两份：配置值（可能是 auto）和本轮真正生效的那个。
-                # 只回显 auto 等于什么都没回显 —— 用户看不出自己到底在问平台还是在问 MTW。
-                "source_backend": self._source_backend,
-                "backend": self._backend,
-                "backend_label": _SOURCE_BACKEND_LABELS.get(self._backend, self._backend),
-                "mtw_base_url": self._mtw_base_url,
-                "mtw_resource": self._mtw_resources,
-                "active_resource": self._active_resources,
+                # 本轮实际要问的源（配置留空即全部）：回显生效的那一份，不是配置原样
+                "resources": self._active_resources,
                 "min_score": self._min_score,
+                "fill_lyrics": self._fill_lyrics,
                 # 实际会处理的扩展名（本地候选列表 ∩ 宿主白名单）：宿主把某个格式移出
                 # 白名单时，这里能立刻看出来插件已经不再碰它。
                 "audio_extensions": list(_supported_audio_ext()),
-                "has_username": bool(self._mtw_username),
-                # 绝不回传密码。
             },
             "recent_failed": recent_failed,
         }
@@ -2481,84 +2022,8 @@ class MusicLibraryScraper(_PluginBase):
             missing.append("lyrics")
         return missing
 
-    # ---------------- MTW HTTP 客户端 ----------------
-
-    def _mtw_headers(self) -> Dict[str, str]:
-        token = self._mtw_token()
-        return {"Authorization": f"JWT {token}"} if token else {}
-
-    def _mtw_token(self) -> Optional[str]:
-        if self._token and time.time() < self._token_expiry - 60:
-            return self._token
-        if not (self._mtw_username and self._mtw_password):
-            # 每个请求都会走这个分支，一轮几千个文件能把日志刷满：只说一次
-            if not self.__dict__.get("_anon_warned"):
-                self.__dict__["_anon_warned"] = True
-                logger.warning("[music-scraper] 未配置 MTW 账密，将匿名请求（可能失败）")
-            return None
-        self.__dict__["_anon_warned"] = False
-        # 每个文件、每个源都要先问一次令牌。账密错 / MTW 把 /apimt/token/ 关了的时候，
-        # 这就是成倍增长的必然失败请求外加一屏一样的错误日志：静默期内直接按未登录处理。
-        if time.time() < float(self.__dict__.get("_login_retry_at") or 0.0):
-            return None
-        resp, reason = _mtw_post(
-            f"{self._mtw_base_url}/apimt/token/",
-            {"username": self._mtw_username, "password": self._mtw_password},
-            {"Content-Type": "application/json"},
-            expect_data=False,
-        )
-        token = resp.get("token") if isinstance(resp, dict) else None
-        if not token:
-            self.__dict__["_login_retry_at"] = time.time() + _LOGIN_BACKOFF
-            # 不回显响应体，避免 MTW 的错误信息里夹带的敏感内容进日志。
-            logger.error(
-                f"[music-scraper] MTW JWT 获取失败（{reason or '响应里没有 token'}），"
-                f"{int(_LOGIN_BACKOFF)} 秒内不再尝试登录；检查 MTW 地址与账密"
-            )
-            return None
-        self.__dict__["_login_retry_at"] = 0.0
-        self._token = token
-        self._token_expiry = _token_expiry_at(token, resp)
-        return self._token
-
-    def _mtw_drop_token(self):
-        """丢掉缓存的令牌，下次请求重新登录。
-
-        只清令牌、不清登录静默期：登录本身还在失败时，401 重试路径再去戳一次
-        /apimt/token/ 只会把失败请求放大成每个源一次。
-        """
-        self._token = None
-        self._token_expiry = 0.0
-
-    def _mtw_request(self, endpoint: str, body: Dict[str, Any],
-                     auth_retry: bool = True) -> Tuple[Any, Optional[str]]:
-        """POST MTW 的 /apimt/<endpoint>/，返回 (响应体, 故障原因)。
-
-        故障原因非空表示这次请求没能给出结论（不可达 / 鉴权 / 接口报错），调用方不能把它
-        当成"这个文件查不到"。鉴权失败（HTTP 401/403）会强制重登一次再重试，覆盖 MTW 换密钥、
-        轮换 JWT、管理员踢人这些让缓存令牌提前失效的情况。
-        """
-        resp, reason = _mtw_post(
-            f"{self._mtw_base_url}/apimt/{endpoint}/",
-            body,
-            {"Content-Type": "application/json", **self._mtw_headers()},
-        )
-        if reason == _AUTH_REASON and auth_retry:
-            self._mtw_drop_token()
-            if self._mtw_token():
-                return self._mtw_request(endpoint, body, auth_retry=False)
-        return resp, reason
-
-    def _fetch_candidates(self, path: Path,
-                          identity: Optional[Dict[str, Any]] = None
-                          ) -> Tuple[List[dict], Optional[str]]:
-        """按当前识别来源拉候选：内置源直连平台，MTW 走它自己的检索接口。"""
-        if self._backend == "mtw":
-            return self._mtw_fetch_candidates(path, identity=identity)
-        return self._builtin_fetch_candidates(path, identity=identity)
-
     @staticmethod
-    def _builtin_request(spec: Dict[str, Any]) -> Tuple[Any, Optional[str]]:
+    def _source_request(spec: Dict[str, Any]) -> Tuple[Any, Optional[str]]:
         """按 sources.build_request 的描述发一次请求，返回 (响应体, 故障标记)。
 
         状态码自己拿：宿主 RequestUtils.get 会把非 2xx 折成 None，限流(429)、风控(403)
@@ -2568,12 +2033,12 @@ class MusicLibraryScraper(_PluginBase):
         ru = RequestUtils(headers=dict(spec.get("headers") or {}))
         try:
             if spec.get("json") is not None:
-                resp = ru.post(url=spec["url"], json=spec["json"], timeout=_BUILTIN_TIMEOUT)
+                resp = ru.post(url=spec["url"], json=spec["json"], timeout=_SEARCH_TIMEOUT)
             else:
                 resp = ru.get_res(url=spec["url"], params=spec.get("params") or {},
-                                  timeout=_BUILTIN_TIMEOUT)
+                                  timeout=_SEARCH_TIMEOUT)
         except Exception as error:
-            logger.warning(f"[music-scraper] 内置源请求异常：{spec.get('url')} — {error}")
+            logger.warning(f"[music-scraper] 识别源请求异常：{spec.get('url')} — {error}")
             return None, _sources.UNREACHABLE
         if resp is None:
             return None, _sources.UNREACHABLE
@@ -2595,14 +2060,13 @@ class MusicLibraryScraper(_PluginBase):
             return payload, _sources.UNREACHABLE
         return payload, None
 
-    def _builtin_fetch_candidates(self, path: Path,
+    def _fetch_candidates(self, path: Path,
                                   identity: Optional[Dict[str, Any]] = None
                                   ) -> Tuple[List[dict], Optional[str]]:
         """逐个直连平台检索接口拉候选，返回 (候选, 服务侧故障原因)。
 
-        与 MTW 那条路同构，行为要能一比一对上：按源顺序问，某源出到满分候选就立刻停止；
-        只有在**没有任何源给出可解析答案**时才回报故障，否则一个源正常返回空列表就是
-        "这份曲库查不到"的确定答案，要按文件失败记账。
+        按源顺序问，某源出到满分候选就立刻停止；只有在**没有任何源给出可解析答案**时才回报
+        故障，否则一个源正常返回空列表就是"这份曲库查不到"的确定答案，要按文件失败记账。
         """
         if identity is None:
             identity = _local_identity(path, roots=self._identity_roots())
@@ -2617,7 +2081,7 @@ class MusicLibraryScraper(_PluginBase):
             spec = _sources.build_request(resource, keyword)
             if not spec:
                 continue
-            payload, error = self._builtin_request(spec)
+            payload, error = self._source_request(spec)
             if error:
                 continue
             candidates, parse_error = _sources.parse_candidates(resource, payload)
@@ -2636,72 +2100,18 @@ class MusicLibraryScraper(_PluginBase):
             if best_score >= _MAX_SCORE:
                 break
         if not merged and not answered:
-            return [], _BUILTIN_UNREACHABLE_REASON
-        return merged, None
-
-    def _mtw_fetch_candidates(self, path: Path,
-                              identity: Optional[Dict[str, Any]] = None
-                              ) -> Tuple[List[dict], Optional[str]]:
-        """按配置的源依次向 MTW 拉候选并合并，返回 (候选, MTW 侧故障原因)。
-
-        默认全源：单源 top10 经常整批是翻唱/钢琴版（实测 min_score=3 只能过 57%），
-        换源比放宽阈值安全。某源已经出过满分候选就不再往下问，控制请求量。
-
-        故障原因只在**没有任何源成功应答**时才回报。只要有一个源正常返回（哪怕是空列表），
-        那就是"这份曲库查不到"的确定答案，要按文件失败记账：否则某一个上游挂了
-        （musicbrainz 限流、咪咕 500）就会让整轮在前几个文件就熔断，全库永远停在待处理。
-        """
-        if identity is None:
-            identity = _local_identity(path, roots=self._identity_roots())
-        if not identity["title"]:
-            return [], None
-        want = _want_from(identity)
-        merged: List[dict] = []
-        failure: Optional[str] = None
-        answered = 0
-        best_score = 0
-        for resource in _normalize_resources(self._mtw_resources):
-            # MTW 前端契约：title/artist/album 取自本地 tag，full_path 仅作参考
-            body = {
-                "resource": resource,
-                "title": identity["title"],
-                "artist": identity["artist"],
-                "album": identity["album"],
-                "full_path": str(path),
-            }
-            resp, reason = self._mtw_request("fetch_id3_by_title", body)
-            if reason:
-                failure = reason
-                continue
-            answered += 1
-            data = resp.get("data") if isinstance(resp, dict) else None
-            if isinstance(data, dict) and "data" in data:
-                data = data["data"]
-            if not isinstance(data, list):
-                continue
-            for c in data:
-                if not isinstance(c, dict):
-                    continue
-                # 以本插件的请求参数为准标记来源，MTW 回什么都不信
-                c["resource"] = resource
-                merged.append(c)
-                if best_score < _MAX_SCORE:
-                    best_score = max(best_score, self._score_candidate(c, want))
-            if best_score >= _MAX_SCORE:
-                break
-        if not merged and failure and not answered:
-            return [], failure
+            return [], _UNREACHABLE_REASON
         return merged, None
 
     # ---------------- 候选匹配 & 字段映射 ----------------
 
-    def _mtw_pick_best(self, path: Path, candidates: List[dict],
+    def _pick_best(self, path: Path, candidates: List[dict],
                        identity: Optional[Dict[str, Any]] = None
                        ) -> Tuple[Optional[dict], int]:
-        best, best_score, _ = self._mtw_best_candidate(path, candidates, identity=identity)
+        best, best_score, _ = self._best_candidate(path, candidates, identity=identity)
         return (best if best_score >= self._min_score else None), best_score
 
-    def _mtw_best_candidate(self, path: Path, candidates: List[dict],
+    def _best_candidate(self, path: Path, candidates: List[dict],
                             identity: Optional[Dict[str, Any]] = None
                             ) -> Tuple[Optional[dict], int, Optional[Dict[str, str]]]:
         """返回 (分最高的候选, 分数, 该候选的逐项判定)。
@@ -2723,7 +2133,7 @@ class MusicLibraryScraper(_PluginBase):
 
     @staticmethod
     def _field_hits(c: dict, want: dict) -> Dict[str, str]:
-        """MTW utils.match_song 简化版：曲名 / 艺人 / 专辑 逐项判定。
+        """沿用 Music Tag Web 的 utils.match_song 约定：曲名 / 艺人 / 专辑 逐项判定。
 
         每项是 hit（对上）/ miss（有得比但没对上）/ no_local（本地缺这项，永远比不了）。
         三者必须分开：no_local 记 0 分是"信息不全"，把它说成"没对上"会让人去改文件名，
@@ -2788,11 +2198,11 @@ class MusicLibraryScraper(_PluginBase):
 
     @staticmethod
     def _score_candidate(c: dict, want: dict) -> int:
-        """MTW utils.match_song 简化版：title / artist / album 各 0/1。"""
+        """沿用 Music Tag Web 的 utils.match_song 约定：title / artist / album 各 0/1。"""
         hits = MusicLibraryScraper._field_hits(c, want)
         return sum(1 for state in hits.values() if state == _HIT)
 
-    def _builtin_fetch_lyric(self, source: str, picked: dict) -> Optional[str]:
+    def _fetch_lyric(self, source: str, picked: dict) -> Optional[str]:
         if not _sources.supports_lyrics(source):
             return None
         song_id = str(picked.get("id") or picked.get("song_id") or picked.get("mid") or "").strip()
@@ -2801,15 +2211,15 @@ class MusicLibraryScraper(_PluginBase):
         spec = _sources.build_lyric_request(source, song_id)
         if not spec:
             return None
-        payload, err = self._builtin_request(spec)
+        payload, err = self._source_request(spec)
         if err or not payload:
             return None
         return _sources.parse_lyric(source, payload)
 
     def _candidate_to_musicinfo(self, c: dict, path: Path) -> Optional[MusicInfo]:
-        """把 MTW 候选折叠成 MP MusicInfo。
+        """把候选折叠成 MP MusicInfo。
 
-        MTW 各源（netease / qmusic / kuwo / kugou / migu）在候选里字段命名不完全一致，
+        各源（netease / qmusic / kugou / migu / musicbrainz）在候选里字段命名不完全一致，
         常见差异：artist 是字符串而非 list、album 是字符串而非 dict、cover 字段位于
         顶层 album_img / pic / album.picUrl；year 常见是 "YYYY-MM-DD" 完整日期串。
         lyrics 已经在候选里返回，不再二次调 fetch_lyric。
@@ -2916,9 +2326,9 @@ class MusicLibraryScraper(_PluginBase):
             lyrics=lyrics,
             genres=genres,
             raw_data={
-                "mtw_resource": source,
-                "mtw_song_id": song_id,
-                "mtw_candidate": c,
+                "source": source,
+                "song_id": song_id,
+                "candidate": c,
             },
             field_sources={
                 "title": "remote",

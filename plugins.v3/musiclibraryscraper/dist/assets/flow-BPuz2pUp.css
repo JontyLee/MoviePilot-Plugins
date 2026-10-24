@@ -1,0 +1,111 @@
+
+/* 只写本组件自己的类名：插件页只能给自己的类定样式，全局 v- / mdi- 选择器会被构建门禁删掉。 */
+.tfp[data-v-2b8e88d0] {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  overflow-x: auto;
+  padding: 4px 2px 8px;
+}
+.tfp-node[data-v-2b8e88d0] {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 92px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 2px;
+}
+.tfp-ring[data-v-2b8e88d0] {
+  position: absolute;
+  top: 3px;
+  left: 50%;
+  width: 42px;
+  height: 42px;
+  margin-left: -21px;
+  border-radius: 50%;
+  border: 2px solid rgba(var(--v-theme-primary), .55);
+  opacity: 0;
+  pointer-events: none;
+}
+.is-running .tfp-ring[data-v-2b8e88d0] {
+  animation: tfp-bloom-2b8e88d0 var(--tfp-cycle) linear var(--tfp-delay) infinite;
+}
+.tfp-title[data-v-2b8e88d0] { font-size: 13px; font-weight: 600; line-height: 1.3;
+}
+.tfp-caption[data-v-2b8e88d0] { font-size: 11px; color: rgba(var(--v-theme-on-surface), .62); line-height: 1.35;
+}
+.tfp-knobs[data-v-2b8e88d0] { font-size: 11px; color: rgb(var(--v-theme-primary)); opacity: .8;
+}
+.tfp-count[data-v-2b8e88d0] {
+  font-size: 16px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: rgb(var(--v-theme-primary));
+}
+.tfp-live .tfp-count[data-v-2b8e88d0] { min-height: 20px;
+}
+.tfp-link[data-v-2b8e88d0] {
+  position: relative;
+  flex: 0 0 26px;
+  /* 连线是"轨道"，不是色块：只有头像中线那一条 5px，节点才读得出是串起来的 */
+  align-self: flex-start;
+  height: 5px;
+  margin-top: 18px;
+  background: linear-gradient(90deg,
+    rgba(var(--v-theme-primary), .12), rgba(var(--v-theme-primary), .3));
+  border-radius: 3px;
+  overflow: hidden;
+}
+.tfp-pulse[data-v-2b8e88d0] {
+  position: absolute;
+  top: 0;
+  left: -40%;
+  width: 40%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgb(var(--v-theme-primary)));
+  border-radius: 3px;
+  opacity: 0;
+}
+.is-running .tfp-pulse[data-v-2b8e88d0] {
+  animation: tfp-travel-2b8e88d0 var(--tfp-cycle) linear var(--tfp-delay) infinite;
+}
+.tfp-config .tfp-link[data-v-2b8e88d0] { opacity: .7;
+}
+@keyframes tfp-travel-2b8e88d0 {
+0% { left: -40%; opacity: 0;
+}
+6% { opacity: 1;
+}
+26% { left: 100%; opacity: 0;
+}
+100% { left: 100%; opacity: 0;
+}
+}
+@keyframes tfp-bloom-2b8e88d0 {
+0% { transform: scale(.85); opacity: 0;
+}
+4% { opacity: .9;
+}
+22% { transform: scale(1.25); opacity: 0;
+}
+100% { transform: scale(1.25); opacity: 0;
+}
+}
+/* 跟随系统的"减少动态效果"：动画只是"在跑"的辅助表达，关掉后静态样式仍然说得出同一条链。 */
+@media (prefers-reduced-motion: reduce) {
+.is-running .tfp-pulse[data-v-2b8e88d0],
+  .is-running .tfp-ring[data-v-2b8e88d0] { animation: none;
+}
+.tfp-pulse[data-v-2b8e88d0] { opacity: 0;
+}
+.is-running .tfp-ring[data-v-2b8e88d0] { opacity: .55; transform: none;
+}
+}
+@media (max-width: 760px) {
+.tfp-link[data-v-2b8e88d0] { flex-basis: 12px;
+}
+.tfp-node[data-v-2b8e88d0] { min-width: 74px;
+}
+}
