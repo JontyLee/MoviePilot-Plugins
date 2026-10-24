@@ -198,8 +198,8 @@ class IncrementalScanTest(unittest.TestCase):
         def fake_scrape(fp, tags=None, overwrite=False):
             counters["scrape"] += 1
             if files[Path(fp).name] == "ok":
-                return (True, "", 3, "qmusic")
-            return (False, "无候选", None, "")
+                return (True, "", 3, "qmusic", {})
+            return (False, "无候选", None, "", {})
 
         def fake_tag(fp, tags=None):
             counters["tag"] += 1
@@ -272,7 +272,7 @@ class IncrementalScanTest(unittest.TestCase):
 
         def always_ok(fp, tags=None, overwrite=False):
             c["scrape"] += 1
-            return (True, "", 3, "netease")
+            return (True, "", 3, "netease", {})
 
         setattr(p, _SCRAPE, always_ok)
         c["scrape"] = 0
@@ -297,7 +297,7 @@ class IncrementalScanTest(unittest.TestCase):
 
         def outage(fp, tags=None, overwrite=False):
             counters["scrape"] += 1
-            return (False, reason or mls._UNREACHABLE_REASON, None, "")
+            return (False, reason or mls._UNREACHABLE_REASON, None, "", {})
 
         setattr(p, _SCRAPE, outage)
         if existing_failed:
@@ -411,7 +411,7 @@ class IncrementalScanTest(unittest.TestCase):
             c["scrape"] += 1
             if Path(fp).name == "2.mp3":
                 raise RuntimeError("宿主内部异常")
-            return (True, "", 3, "netease")
+            return (True, "", 3, "netease", {})
 
         setattr(p, _SCRAPE, flaky)
         self._scan(p)
@@ -567,7 +567,7 @@ class IncrementalScanTest(unittest.TestCase):
 
         def record(fp, tags=None, overwrite=False):
             seen.append(overwrite)
-            return (True, "", 3, "netease")
+            return (True, "", 3, "netease", {})
 
         p, tmp, c = self._plugin({"z.mp3": "ok"})
         setattr(p, _SCRAPE, record)
@@ -598,7 +598,7 @@ class IncrementalScanTest(unittest.TestCase):
         def with_tags(fp, tags=None, overwrite=False):
             # 补空判定已经把解析结果传进来了，身份匹配必须复用而不是重读
             assert tags is not None
-            return (True, "", 3, "netease")
+            return (True, "", 3, "netease", {})
 
         def complete(fp, tags=None):
             assert tags is not None
@@ -824,8 +824,11 @@ class ContractTest(unittest.TestCase):
         p = self._plugin()
         apis = p.get_api()
         self.assertEqual({a["path"] for a in apis},
-                         {"/status", "/files", "/retry", "/scan", "/edit", "/config"})
+                         {"/status", "/files", "/file", "/retry", "/scan", "/edit", "/config"})
         self.assertTrue(all(a["auth"] == "bear" for a in apis))
+        # /file 也走 bear：它按路径读任意库内文件的 tag 文本，无认证的读接口等于把
+        # 音乐库内容和路径结构挂在一个公开 URL 上。
+        self.assertEqual({a["path"] for a in apis if a["auth"] != "bear"}, set())
 
     def test_sidebar_nav_is_an_organize_entry(self):
         """入口落在「整理」而不是「发现」：这一区的插件都会动库里文件。
@@ -1022,7 +1025,7 @@ class ContractTest(unittest.TestCase):
         self.assertIn("emit('layout'", cfg)
 
     def test_data_page_columns_are_not_sortable(self):
-        """/files 恒按路径排序，表头留着箭头就是骗人：点一下只重排眼前这一页 50 条。
+        """顺序只有服务端那一种，表头留着箭头就是骗人：点一下只重排眼前这一页 50 条。
 
         真要排序得把 sort 参数透传给服务端并在 rows.sort 里按列取键；库里几千上万条时
         "按大小排序"只排当前页，用户看到的是一张既不全、又和总数对不上的表。
@@ -1035,9 +1038,11 @@ class ContractTest(unittest.TestCase):
         for col in cols:
             self.assertIn("sortable: false", col, col)
 
-        # 服务端确实只有路径这一种顺序（改动这里时，上面那条要一起重看）
+        # 服务端确实只有那两种固定顺序（done 改写优先、其余按路径）——改动这里时，
+        # 上面那条要一起重看
         src = Path(mls.__file__).read_text(encoding="utf-8")
         self.assertIn('rows.sort(key=lambda r: r["path"])', src)
+        self.assertIn('rows.sort(key=lambda r: 0 if r.get("set") else 1)', src)
 
     def test_config_page_explains_choices(self):
         """判据自足在原生表单，Vue 配置页只留最短提示 + 指向 docs —— 两边各有各的活。
@@ -1234,8 +1239,11 @@ class ContractTest(unittest.TestCase):
             {
                 "title": "", "artist": "", "album": "", "year": "", "tracknumber": "",
                 "duration": None, "has_cover": False, "has_lyrics": False,
+                "lyrics": "", "unreadable": True,
             },
         )
+        # unreadable 必须跟着标出来：算改写差集那条链路靠它分辨"文件真没 tag"和"这次根本
+        # 没读出来"，把读失败当成读到空值会把所有字段说成被清空。
 
     def test_cover_detected_through_id3_repeated_frame(self):
         """ID3 的 APIC 是可重复帧，mutagen 的取法是 getall("APIC")，按键直取会落空。
@@ -1400,7 +1408,7 @@ class ContractTest(unittest.TestCase):
         orig = mls.RequestUtils
         mls.RequestUtils = _ru(_handler)
         try:
-            okf, reason, score, _ = p._MusicLibraryScraper__scrape_file(fp)
+            okf, reason, score, _, _ = p._MusicLibraryScraper__scrape_file(fp)
         finally:
             mls.RequestUtils = orig
         self.assertFalse(okf)
@@ -1423,7 +1431,7 @@ class ContractTest(unittest.TestCase):
         orig = mls.RequestUtils
         mls.RequestUtils = _ru(_handler)
         try:
-            okf, reason, _, _ = p._MusicLibraryScraper__scrape_file(fp)
+            okf, reason, _, _, _ = p._MusicLibraryScraper__scrape_file(fp)
         finally:
             mls.RequestUtils = orig
         self.assertFalse(okf)
@@ -2317,3 +2325,313 @@ class BuiltinSourcesTest(unittest.TestCase):
         self.assertEqual(runs["transport"], mls._ABORT_AFTER_TRANSPORT)
         self.assertEqual(p._load_failed(), {})
 
+
+class RewriteLedgerTest(unittest.TestCase):
+    """改写记录（done 账里的 set）与文件详情接口 /file。
+
+    这一档存在的理由：「已处理」里绝大多数文件不是本插件写的，用户要看得见他到底改了谁、
+    把哪一项从什么改成了什么；补齐弹层要预填文件里已有的值，也不能靠 /files 的行（那些
+    行里没有 tag 值）。两条都靠写入前后各读一次 tag 算出的差集，所以差集怎么算、怎么留、
+    怎么给出去都要有断言守着。
+    """
+
+    @contextlib.contextmanager
+    def _patched(self, **values):
+        """临时换掉插件的模块级函数，退出全部还原（漏一个会污染后面的用例）。"""
+        orig = {name: getattr(mls, name) for name in values}
+        for name, value in values.items():
+            setattr(mls, name, value)
+        try:
+            yield
+        finally:
+            for name, value in orig.items():
+                setattr(mls, name, value)
+
+    def _tags(self, **over):
+        base = {"title": "黑面", "artist": "陈奕迅", "album": "", "year": "",
+                "tracknumber": "", "duration": None, "has_cover": False,
+                "has_lyrics": False, "lyrics": "", "unreadable": False}
+        base.update(over)
+        return base
+
+    # ---------------- 差集本身 ----------------
+
+    def test_diff_only_lists_changed_fields(self):
+        diff = mls._tag_diff(self._tags(), self._tags(album="The Line-Up", year="2003"))
+        self.assertEqual(diff, {"album": ["", "The Line-Up"], "year": ["", "2003"]})
+        # 没动的字段一条都不记：详情里挂一堆"曲名从黑面改成黑面"就没人看了
+        self.assertNotIn("title", diff)
+        self.assertNotIn("artist", diff)
+
+    def test_diff_marks_cover_and_lyrics_presence(self):
+        diff = mls._tag_diff(
+            self._tags(), self._tags(has_cover=True, has_lyrics=True, lyrics="词：林夕"))
+        self.assertEqual(diff["cover"], ["无", "有"])
+        self.assertEqual(diff["lyrics"], ["无", "有"])
+        # 只记有无、不整段存歌词：账本是单行 JSON，一轮几百条
+
+    def test_diff_is_empty_when_either_read_failed(self):
+        """读失败不能算成"所有字段都被清空"，否则一次 mutagen 抖动就凭空多出一批改写记录。"""
+        self.assertEqual(mls._tag_diff(self._tags(unreadable=True), self._tags()), {})
+        self.assertEqual(mls._tag_diff(self._tags(), self._tags(unreadable=True)), {})
+        self.assertEqual(mls._tag_diff(None, self._tags()), {})
+        self.assertEqual(mls._tag_diff(self._tags(), None), {})
+
+    def test_diff_clips_long_values(self):
+        long = "呀" * (mls._DIFF_VALUE_MAX + 50)
+        diff = mls._tag_diff(self._tags(), self._tags(title=long))
+        self.assertEqual(diff["title"][0], "黑面")
+        self.assertEqual(len(diff["title"][1]), mls._DIFF_VALUE_MAX + 1)
+        self.assertTrue(diff["title"][1].endswith("…"))
+
+    # ---------------- 记账 ----------------
+
+    def _library(self, outcomes):
+        """{文件名: 差集 dict 或 None}；None 表示这个文件抓取失败。"""
+        tmp = Path(tempfile.mkdtemp())
+        for name in outcomes:
+            (tmp / name).write_bytes(b"x" * 100)
+        p = mls.MusicLibraryScraper()
+        p._scraper_paths = str(tmp)
+        p._exclude_paths = ""
+        p._active_resources = ["netease"]
+        p._force_all = False
+        p._min_score = 3
+        state = {"complete": False}
+
+        def fake_scrape(fp, tags=None, overwrite=False):
+            diff = outcomes[Path(fp).name]
+            if diff is None:
+                return (False, "无候选", None, "", {})
+            return (True, "", 3, "qmusic", diff)
+
+        setattr(p, _SCRAPE, fake_scrape)
+        setattr(p, _HAS_TAGS, lambda fp, tags=None: state["complete"])
+        return p, tmp, state
+
+    def test_scan_records_diff_and_counts_written(self):
+        # b 成功但文件一个字没变（宿主判已齐、或覆盖策略没动手）
+        p, tmp, _ = self._library({"a.mp3": {"album": ["", "The Line-Up"]}, "b.mp3": {}})
+        getattr(p, _SCAN)()
+        done = p.get_data("done")
+        self.assertEqual(done[str(tmp / "a.mp3")]["set"], {"album": ["", "The Line-Up"]})
+        self.assertTrue(done[str(tmp / "a.mp3")]["set_ts"])
+        # 没改动文件的成功项不挂 set 键："这条被插件写过"必须是真的
+        self.assertNotIn("set", done[str(tmp / "b.mp3")])
+        self.assertEqual(p.get_data("runs")["written"], 1)
+
+    def test_rewrite_record_survives_later_rounds(self):
+        """下一轮走"已齐、跳过"时要把改写记录抄下来 —— 那是历史事实，不是本轮结论。"""
+        diff = {"cover": ["无", "有"]}
+        p, tmp, state = self._library({"a.mp3": diff})
+        getattr(p, _SCAN)()
+        first = p.get_data("done")[str(tmp / "a.mp3")]
+        state["complete"] = True
+        getattr(p, _SCAN)()
+        second = p.get_data("done")[str(tmp / "a.mp3")]
+        self.assertEqual(second["set"], diff)
+        self.assertEqual(second["set_ts"], first["set_ts"])
+        # 跳过的那一轮没有改写任何人，汇总里 rewritten 必须是 0
+        self.assertEqual(p.get_data("runs")["written"], 0)
+
+    # ---------------- /files 的序与筛 ----------------
+
+    def _files_req(self, query):
+        class _Req:
+            def __init__(self, q):
+                self.query_params = q
+        return _Req(query)
+
+    def _book(self, entries):
+        p = mls.MusicLibraryScraper()
+        p.save_data("done", entries)
+        return p
+
+    def test_done_bucket_orders_rewritten_first(self):
+        p = self._book({
+            "/m/plain1.mp3": {"mtime": 1, "size": 1, "ts": "2026-10-01 10:00:00", "source": "netease"},
+            "/m/written_old.mp3": {"mtime": 1, "size": 1, "ts": "2026-10-02 10:00:00",
+                                   "source": "netease", "set": {"year": ["", "2003"]},
+                                   "set_ts": "2026-10-02 10:00:00"},
+            "/m/plain2.mp3": {"mtime": 1, "size": 1, "ts": "2026-10-09 10:00:00", "source": "netease"},
+            "/m/written_new.mp3": {"mtime": 1, "size": 1, "ts": "2026-10-05 10:00:00",
+                                   "source": "qmusic", "set": {"title": ["老", "新"]},
+                                   "set_ts": "2026-10-05 10:00:00"},
+        })
+        data = p.api_files(self._files_req({"bucket": "done"}))
+        self.assertEqual(
+            [r["path"] for r in data["items"]],
+            ["/m/written_new.mp3", "/m/written_old.mp3", "/m/plain2.mp3", "/m/plain1.mp3"])
+        # 改写段内按最近一次改动倒序，未改写段内按写时间倒序
+        self.assertEqual(data["items"][0]["set"], {"title": ["老", "新"]})
+        filtered = p.api_files(self._files_req({"bucket": "done", "written": "1"}))
+        # 分页用的 total 是筛过的条数，否则前端页脚按整桶算页数、翻到第二页就空了
+        self.assertEqual(filtered["total"], 2)
+        self.assertEqual([r["path"] for r in filtered["items"]],
+                         ["/m/written_new.mp3", "/m/written_old.mp3"])
+        self.assertEqual(data["total"], 4)
+
+    def test_other_buckets_ignore_written_filter(self):
+        """written 只对 done 有意义：失败桶没有改写记录，硬筛会变成空列表骗人。"""
+        p = mls.MusicLibraryScraper()
+        p.save_data("failed", {"/m/a.mp3": {"retries": 1, "last_ts": "t", "reason": "无候选"}})
+        self.assertEqual(p.api_files(self._files_req({"bucket": "failed", "written": "1"}))["total"], 1)
+
+    def test_status_counts_rewritten(self):
+        p = self._book({
+            "/m/a.mp3": {"mtime": 1, "size": 1, "ts": "t", "source": "netease",
+                         "set": {"year": ["", "2003"]}},
+            "/m/b.mp3": {"mtime": 1, "size": 1, "ts": "t", "source": "netease"},
+        })
+        status = p._build_status()
+        self.assertEqual(status["counts"]["rewritten"], 1)
+        self.assertEqual(status["counts"]["done"], 2)
+
+    # ---------------- /file ----------------
+
+    def test_api_file_guards(self):
+        tmp = Path(tempfile.mkdtemp())
+        here = tmp / "a.mp3"
+        here.write_bytes(b"x" * 100)
+        gone = tmp / "gone.mp3"
+
+        def plugin(in_library):
+            p = mls.MusicLibraryScraper()
+            # _is_library_path 真实语义就包含"是个存在的音频文件"，桩只再放开扩展名判定
+            p._is_library_path = lambda path: in_library and Path(path).is_file()
+            return p
+
+        self.assertEqual(plugin(True).api_file(self._files_req({}))["reason"], "no_path")
+        # 库外：这是"有人拿这个接口当任意文件读"，必须拒
+        self.assertEqual(plugin(False).api_file(
+            self._files_req({"path": str(here)}))["reason"], "out_of_library")
+        # 库内但文件已经不在（扫描后被移走）：说成"库外"会让人去翻配置，其实是账本过期
+        self.assertEqual(plugin(True).api_file(
+            self._files_req({"path": str(gone)}))["reason"], "not_found")
+
+    def test_api_file_prefills_existing_values(self):
+        payload = self._tags(album="The Line-Up", has_cover=True,
+                             has_lyrics=True, lyrics="词：林夕\n曲：江志仁")
+        tmp = Path(tempfile.mkdtemp())
+        fp = tmp / "a.mp3"
+        fp.write_bytes(b"x" * 100)
+        key = str(fp)
+        p = mls.MusicLibraryScraper()
+        p._is_library_path = lambda path: True
+        p.save_data("done", {key: {"ts": "2026-10-05 10:00:00", "source": "qmusic",
+                                   "set": {"album": ["", "The Line-Up"]},
+                                   "set_ts": "2026-10-05 10:00:00"}})
+        with self._patched(_read_music_tags=lambda path, with_lyrics_text=False: dict(payload),
+                           _sibling_lyric=lambda path: ""):
+            res = p.api_file(self._files_req({"path": key}))
+        self.assertTrue(res["accepted"])
+        self.assertEqual(res["tags"]["album"], "The Line-Up")
+        self.assertEqual(res["tags"]["lyrics"], "词：林夕\n曲：江志仁")
+        self.assertEqual(res["lyrics_from"], "embedded")
+        # 缺哪几项单独给出：弹层据此标"缺项"，已有值照样带过去
+        self.assertEqual(res["missing"], ["year", "tracknumber"])
+        self.assertEqual(res["rewrote"], {"album": ["", "The Line-Up"]})
+        self.assertEqual(res["set_ts"], "2026-10-05 10:00:00")
+        self.assertEqual(res["source"], "qmusic")
+
+    def test_api_file_falls_back_to_sibling_lrc(self):
+        payload = self._tags(has_lyrics=False)
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "a.mp3").write_bytes(b"x" * 100)
+        (tmp / "a.lrc").write_text("[00:01.00]黑面", encoding="utf-8")
+        p = mls.MusicLibraryScraper()
+        p._is_library_path = lambda path: True
+        with self._patched(_read_music_tags=lambda path, with_lyrics_text=False: dict(payload)):
+            res = p.api_file(self._files_req({"path": str(tmp / "a.mp3")}))
+        self.assertEqual(res["tags"]["lyrics"], "[00:01.00]黑面")
+        self.assertEqual(res["lyrics_from"], "sibling")
+        # 有同名 .lrc 就不算缺歌词，判据与 _missing_fields 同一份
+        self.assertNotIn("lyrics", res["missing"])
+
+    def test_api_file_reports_unreadable(self):
+        p = mls.MusicLibraryScraper()
+        p._is_library_path = lambda path: True
+        with self._patched(
+                _read_music_tags=lambda path, with_lyrics_text=False: self._tags(unreadable=True)):
+            res = p.api_file(self._files_req({"path": "/m/a.mp3"}))
+        self.assertFalse(res["accepted"])
+        self.assertEqual(res["reason"], "unreadable")
+
+    # ---------------- 手工编辑也入账 ----------------
+
+    def _body(self, payload):
+        class _Req:
+            async def json(_self):
+                return payload
+        return _Req()
+
+    def test_manual_edit_is_recorded_as_rewrite(self):
+        """手工补齐也算本插件改写：不记进 done，在这页改过的文件就找不回来了。"""
+        tmp = Path(tempfile.mkdtemp())
+        fp = tmp / "a.mp3"
+        fp.write_bytes(b"x" * 100)
+        p = mls.MusicLibraryScraper()
+        p._is_library_path = lambda path: True
+        reads = [self._tags(), self._tags(album="The Line-Up", year="2003")]
+        with self._patched(
+                _read_music_tags=lambda path, with_lyrics_text=False: reads.pop(0),
+                _write_music_tags=lambda path, fields: True):
+            res = asyncio.run(p.api_edit(self._body({
+                "path": str(fp), "fields": {"album": "The Line-Up", "year": "2003"}})))
+        self.assertTrue(res["accepted"])
+        entry = p.get_data("done")[str(fp)]
+        self.assertEqual(entry["set"], {"album": ["", "The Line-Up"], "year": ["", "2003"]})
+        self.assertTrue(entry["set_ts"])
+        # 没有扫描记录可沿用来源时标 manual，数据页才不会把人工填的都说成某个源刮的
+        self.assertEqual(entry["source"], "manual")
+
+    def test_manual_edit_merges_into_existing_record(self):
+        tmp = Path(tempfile.mkdtemp())
+        fp = tmp / "a.mp3"
+        fp.write_bytes(b"x" * 100)
+        key = str(fp)
+        p = mls.MusicLibraryScraper()
+        p._is_library_path = lambda path: True
+        p.save_data("done", {key: {"mtime": 1, "size": 100, "ts": "t", "source": "qmusic",
+                                   "set": {"cover": ["无", "有"]}, "set_ts": "t"}})
+        reads = [self._tags(), self._tags(year="2003")]
+        with self._patched(
+                _read_music_tags=lambda path, with_lyrics_text=False: reads.pop(0),
+                _write_music_tags=lambda path, fields: True):
+            asyncio.run(p.api_edit(self._body({"path": key, "fields": {"year": "2003"}})))
+        entry = p.get_data("done")[key]
+        # 旧的改写记录不能被一次编辑抹掉，来源也不该跟着变成 manual
+        self.assertEqual(entry["set"], {"cover": ["无", "有"], "year": ["", "2003"]})
+        self.assertEqual(entry["source"], "qmusic")
+
+    def test_edit_failure_writes_no_record(self):
+        tmp = Path(tempfile.mkdtemp())
+        fp = tmp / "a.mp3"
+        fp.write_bytes(b"x" * 100)
+        p = mls.MusicLibraryScraper()
+        p._is_library_path = lambda path: True
+        with self._patched(
+                _read_music_tags=lambda path, with_lyrics_text=False: self._tags(),
+                _write_music_tags=lambda path, fields: False):
+            res = asyncio.run(p.api_edit(self._body({"path": str(fp), "fields": {"year": "2003"}})))
+        self.assertEqual(res["reason"], "write_failed")
+        # 半写入状态不能说成"改过了"：账本一个字都不动
+        self.assertIsNone(p.get_data("done"))
+
+    def test_data_page_wires_the_rewrite_ledger(self):
+        """界面契约三条：改写优先能筛、点开看得见差集、编辑弹层先回填再只提交改动。
+
+        服务端每一项都有对应实现，前端漏接一条就整条链路白做 —— 断言源码而不是产物，
+        是为了换组件、换取数方式时这条提醒会响，而不是等用户发现弹层又是空的。
+        """
+        page = (Path(mls.__file__).parent / "frontend" / "src" / "components" / "Page.vue"
+                ).read_text(encoding="utf-8")
+        self.assertIn("written: writtenOnly.value ? '1' : ''", page)
+        self.assertIn("/file${query({ path })}", page)
+        self.assertIn("detailSets()", page)
+        self.assertIn("item.set", page)
+        # 回填用的是 /file 的现值，不是行上根本不存在的 tag 字段
+        self.assertIn("title: tags.title || ''", page)
+        self.assertNotIn("title: row.title", page)
+        # 只提交真正动过的项：整表原样发回去会把人没碰的值又盖一遍
+        self.assertIn("for (const key of editChanged.value)", page)

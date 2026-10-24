@@ -3,7 +3,7 @@ import { s as stageCounts, F as FlowPipeline, a as FLOW_STEPS, _ as _export_sfc 
 
 const {defineComponent:_defineComponent} = await importShared('vue');
 
-const {resolveComponent:_resolveComponent,createVNode:_createVNode,withCtx:_withCtx,createElementVNode:_createElementVNode,createTextVNode:_createTextVNode,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,renderList:_renderList,Fragment:_Fragment,createElementBlock:_createElementBlock,toDisplayString:_toDisplayString,unref:_unref} = await importShared('vue');
+const {resolveComponent:_resolveComponent,createVNode:_createVNode,withCtx:_withCtx,createElementVNode:_createElementVNode,createTextVNode:_createTextVNode,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode,renderList:_renderList,Fragment:_Fragment,createElementBlock:_createElementBlock,toDisplayString:_toDisplayString,unref:_unref,withModifiers:_withModifiers} = await importShared('vue');
 
 const _hoisted_1 = { class: "mls-head" };
 const _hoisted_2 = { class: "mls-body" };
@@ -58,17 +58,70 @@ const _hoisted_30 = {
 };
 const _hoisted_31 = {
   key: 0,
+  class: "mt-1"
+};
+const _hoisted_32 = { class: "text-caption text-primary ml-1" };
+const _hoisted_33 = {
+  key: 0,
   class: "text-caption"
 };
-const _hoisted_32 = {
+const _hoisted_34 = {
   key: 1,
-  class: "text-caption text-grey"
+  class: "text-caption"
 };
-const _hoisted_33 = {
+const _hoisted_35 = {
   key: 2,
   class: "text-caption text-grey"
 };
-const _hoisted_34 = { key: 3 };
+const _hoisted_36 = {
+  key: 3,
+  class: "text-caption text-grey"
+};
+const _hoisted_37 = { key: 4 };
+const _hoisted_38 = { class: "mls-dlg-head" };
+const _hoisted_39 = { class: "mls-dlg-head-text" };
+const _hoisted_40 = { class: "text-subtitle-1" };
+const _hoisted_41 = { class: "text-caption text-grey text-truncate" };
+const _hoisted_42 = { class: "text-no-wrap" };
+const _hoisted_43 = { class: "mls-diff-old" };
+const _hoisted_44 = { class: "mls-diff-new" };
+const _hoisted_45 = {
+  key: 1,
+  class: "text-caption text-grey mb-4"
+};
+const _hoisted_46 = {
+  key: 2,
+  class: "text-caption text-grey mt-n3 mb-4"
+};
+const _hoisted_47 = { class: "mls-kv" };
+const _hoisted_48 = { class: "text-caption text-grey" };
+const _hoisted_49 = { class: "mls-kv-value" };
+const _hoisted_50 = { class: "mls-kv" };
+const _hoisted_51 = { class: "mls-kv-value" };
+const _hoisted_52 = { class: "mls-kv" };
+const _hoisted_53 = { class: "mls-kv-value" };
+const _hoisted_54 = {
+  key: 3,
+  class: "text-caption text-grey mt-2"
+};
+const _hoisted_55 = { class: "mls-dlg-head" };
+const _hoisted_56 = { class: "mls-dlg-head-text" };
+const _hoisted_57 = { class: "text-caption text-grey text-truncate" };
+const _hoisted_58 = {
+  key: 1,
+  class: "mls-chips mb-3"
+};
+const _hoisted_59 = {
+  key: 2,
+  class: "text-caption text-grey mb-3"
+};
+const _hoisted_60 = { class: "mls-lyrics mt-2" };
+const _hoisted_61 = { class: "d-flex align-center" };
+const _hoisted_62 = {
+  key: 0,
+  class: "text-caption text-grey mt-3"
+};
+const _hoisted_63 = { class: "text-caption text-grey" };
 const {ref,onMounted,computed,inject} = await importShared('vue');
 const _sfc_main = /* @__PURE__ */ _defineComponent({
   __name: "Page",
@@ -97,6 +150,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
     const page = ref(1);
     const limit = ref(50);
     const offset = ref(0);
+    const writtenOnly = ref(false);
     let searchTimer = null;
     const buckets = [
       { key: "done", label: "已处理", icon: "mdi-check-circle-outline", hint: "已经写好标签的文件（本轮与往轮累计）" },
@@ -129,6 +183,28 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
     function sourceText(value) {
       return SOURCE_TEXT[value] || value;
     }
+    const FIELD_TEXT = {
+      title: "曲名",
+      artist: "艺人",
+      album: "专辑",
+      year: "年份",
+      tracknumber: "音轨号",
+      cover: "封面",
+      lyrics: "歌词"
+    };
+    function fieldText(value) {
+      return FIELD_TEXT[value] || value;
+    }
+    const EDIT_FIELDS = [
+      { key: "title", cols: "12 md-6" },
+      { key: "artist", cols: "12 md-6" },
+      { key: "album", cols: "12 md-4" },
+      { key: "year", cols: "6 md-4" },
+      { key: "tracknumber", cols: "6 md-4" }
+    ];
+    function changedFieldNames(set) {
+      return Object.keys(set || {}).map(fieldText).join("·");
+    }
     function notify(msg, color = "info") {
       if (toast) {
         const fn = toast[color] || toast.info;
@@ -160,7 +236,9 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
             bucket: bucket.value,
             limit: limit.value,
             offset: offset.value,
-            search: search.value
+            search: search.value,
+            // 空值由 query() 丢掉，等于不筛；只对 done 桶出现在界面上，后端也只在 done 应用
+            written: writtenOnly.value ? "1" : ""
           })}`
         );
         rows.value = data?.items || [];
@@ -195,6 +273,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
         search.value = "";
         page.value = 1;
         offset.value = 0;
+        writtenOnly.value = false;
       }
       loadFiles();
     }
@@ -260,30 +339,67 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
         busy.value = false;
       }
     }
+    async function loadFile(path) {
+      try {
+        const res = await props.api.get(`${base.value}/file${query({ path })}`);
+        if (res?.accepted) return res;
+        if (res?.reason === "not_found") notify("这个文件已经不在了，账本里的记录已过期", "warning");
+        else if (res?.reason === "unreadable") notify("读不出这个文件的标签，可能不是音频或容器不认识", "warning");
+        else if (res?.reason === "out_of_library") notify("该文件不在配置的音乐库范围内", "warning");
+        else notify("读取文件详情失败", "error");
+      } catch (e) {
+        notify(`读取文件详情失败：${e?.message || e}`, "error");
+      }
+      return null;
+    }
     const editDialog = ref(false);
+    const editLoading = ref(false);
     const editRow = ref(null);
     const editForm = ref({ title: "", artist: "", album: "", year: "", tracknumber: "", lyrics: "" });
-    function openEdit(row) {
+    const editBase = ref({});
+    const editMissing = ref([]);
+    const editHasCover = ref(true);
+    const editLyricsFrom = ref("");
+    const editChanged = computed(
+      () => Object.entries(editForm.value).filter(([key, value]) => String(value ?? "").trim() && String(value ?? "").trim() !== (editBase.value[key] || "")).map(([key]) => key)
+    );
+    async function openEdit(row) {
       editRow.value = row;
-      editForm.value = {
-        title: row.title ?? "",
-        artist: row.artist ?? "",
-        album: row.album ?? "",
-        year: row.year ?? "",
-        tracknumber: row.tracknumber ?? "",
-        lyrics: row.lyrics ?? ""
-      };
+      editForm.value = { title: "", artist: "", album: "", year: "", tracknumber: "", lyrics: "" };
+      editBase.value = {};
+      editMissing.value = row.missing || [];
+      editHasCover.value = !editMissing.value.includes("cover");
+      editLyricsFrom.value = "";
       editDialog.value = true;
+      editLoading.value = true;
+      try {
+        const detail2 = await loadFile(row.path);
+        if (!detail2) return;
+        const tags = detail2.tags || {};
+        editForm.value = {
+          title: tags.title || "",
+          artist: tags.artist || "",
+          album: tags.album || "",
+          year: tags.year || "",
+          tracknumber: tags.tracknumber || "",
+          lyrics: tags.lyrics || ""
+        };
+        editBase.value = { ...editForm.value };
+        editMissing.value = detail2.missing || [];
+        editHasCover.value = !!detail2.has_cover;
+        editLyricsFrom.value = detail2.lyrics_from || "";
+      } finally {
+        editLoading.value = false;
+      }
     }
     async function submitEdit() {
       if (!editRow.value) return;
       const fields = {};
-      for (const [key, value] of Object.entries(editForm.value)) {
-        const text = String(value ?? "").trim();
-        if (text) fields[key] = text;
+      for (const key of editChanged.value) {
+        fields[key] = String(editForm.value[key] ?? "").trim();
       }
       if (!Object.keys(fields).length) {
-        notify("没有可写入的字段", "warning");
+        notify("没有需要写入的改动", "warning");
         return;
       }
       busy.value = true;
@@ -293,7 +409,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
           fields
         });
         if (res?.accepted) {
-          notify("已保存并清除缺项标记", "success");
+          notify(`已写入 ${Object.keys(fields).length} 项`, "success");
           editDialog.value = false;
           await refresh();
         } else if (res?.reason === "out_of_library") {
@@ -312,6 +428,35 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       } finally {
         busy.value = false;
       }
+    }
+    const detailDialog = ref(false);
+    const detailLoading = ref(false);
+    const detail = ref(null);
+    const detailRow = ref(null);
+    async function openDetail(row) {
+      detailRow.value = row;
+      detail.value = null;
+      detailDialog.value = true;
+      detailLoading.value = true;
+      try {
+        detail.value = await loadFile(row.path);
+      } finally {
+        detailLoading.value = false;
+      }
+    }
+    function onRowClick(event, args) {
+      const target = event.target;
+      if (target?.closest?.("button")) return;
+      const item = args?.item ?? args;
+      if (item?.path) openDetail(item);
+    }
+    function onWrittenFilterChange() {
+      page.value = 1;
+      offset.value = 0;
+      loadFiles();
+    }
+    function detailSets() {
+      return detail.value?.rewrote || detailRow.value?.set || {};
     }
     function onPage(nextPage) {
       page.value = Math.max(1, nextPage);
@@ -400,11 +545,12 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       const _component_v_text_field = _resolveComponent("v-text-field");
       const _component_v_data_table_server = _resolveComponent("v-data-table-server");
       const _component_v_snackbar = _resolveComponent("v-snackbar");
-      const _component_v_card_title = _resolveComponent("v-card-title");
-      const _component_v_card_subtitle = _resolveComponent("v-card-subtitle");
-      const _component_v_textarea = _resolveComponent("v-textarea");
+      const _component_v_progress_linear = _resolveComponent("v-progress-linear");
+      const _component_v_table = _resolveComponent("v-table");
       const _component_v_card_actions = _resolveComponent("v-card-actions");
       const _component_v_dialog = _resolveComponent("v-dialog");
+      const _component_v_textarea = _resolveComponent("v-textarea");
+      const _component_v_form = _resolveComponent("v-form");
       return _openBlock(), _createBlock(_component_v_card, {
         flat: "",
         class: "mls-page"
@@ -426,7 +572,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               ]),
               _: 1
             }),
-            _cache[19] || (_cache[19] = _createElementVNode("div", { class: "mls-head-text" }, [
+            _cache[20] || (_cache[20] = _createElementVNode("div", { class: "mls-head-text" }, [
               _createElementVNode("div", { class: "text-h6" }, "TagFlow音乐库刮削"),
               _createElementVNode("div", { class: "text-caption text-medium-emphasis" }, " 直连平台检索补标签 · 逐文件核对与补齐在下方分桶里 ")
             ], -1)),
@@ -439,7 +585,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               "prepend-icon": "mdi-progress-clock",
               class: "mr-2"
             }, {
-              default: _withCtx(() => [..._cache[16] || (_cache[16] = [
+              default: _withCtx(() => [..._cache[17] || (_cache[17] = [
                 _createTextVNode(" 扫描进行中 ", -1)
               ])]),
               _: 1
@@ -452,7 +598,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               "prepend-icon": "mdi-cog-outline",
               onClick: _cache[0] || (_cache[0] = ($event) => emit("switch"))
             }, {
-              default: _withCtx(() => [..._cache[17] || (_cache[17] = [
+              default: _withCtx(() => [..._cache[18] || (_cache[18] = [
                 _createTextVNode("配置", -1)
               ])]),
               _: 1
@@ -465,7 +611,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               "prepend-icon": "mdi-refresh",
               onClick: refresh
             }, {
-              default: _withCtx(() => [..._cache[18] || (_cache[18] = [
+              default: _withCtx(() => [..._cache[19] || (_cache[19] = [
                 _createTextVNode("刷新", -1)
               ])]),
               _: 1
@@ -527,7 +673,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               view.value === "overview" ? (_openBlock(), _createElementBlock("div", _hoisted_5, [
                 _createElementVNode("div", _hoisted_6, [
                   _createElementVNode("div", _hoisted_7, [
-                    _cache[22] || (_cache[22] = _createElementVNode("div", { class: "mls-section-title" }, "本轮流转", -1)),
+                    _cache[23] || (_cache[23] = _createElementVNode("div", { class: "mls-section-title" }, "本轮流转", -1)),
                     _createElementVNode("div", _hoisted_8, [
                       running.value ? (_openBlock(), _createElementBlock(_Fragment, { key: 0 }, [
                         _createTextVNode("扫描进行中 · 光点走到哪一环就问到了哪一环")
@@ -545,7 +691,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       loading: busy.value,
                       onClick: _cache[1] || (_cache[1] = ($event) => scanNow(false))
                     }, {
-                      default: _withCtx(() => [..._cache[20] || (_cache[20] = [
+                      default: _withCtx(() => [..._cache[21] || (_cache[21] = [
                         _createTextVNode("增量扫描", -1)
                       ])]),
                       _: 1
@@ -557,7 +703,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       loading: busy.value,
                       onClick: retryAllFailed
                     }, {
-                      default: _withCtx(() => [..._cache[21] || (_cache[21] = [
+                      default: _withCtx(() => [..._cache[22] || (_cache[22] = [
                         _createTextVNode("重试失败", -1)
                       ])]),
                       _: 1
@@ -584,7 +730,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                           default: _withCtx(() => [
                             _createVNode(_component_v_card_text, { class: "py-2" }, {
                               default: _withCtx(() => [
-                                _cache[23] || (_cache[23] = _createElementVNode("div", { class: "text-caption" }, "已处理", -1)),
+                                _cache[24] || (_cache[24] = _createElementVNode("div", { class: "text-caption" }, "已处理", -1)),
                                 _createElementVNode("div", _hoisted_9, _toDisplayString(counts.value.done ?? 0), 1)
                               ]),
                               _: 1
@@ -607,7 +753,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                           default: _withCtx(() => [
                             _createVNode(_component_v_card_text, { class: "py-2" }, {
                               default: _withCtx(() => [
-                                _cache[24] || (_cache[24] = _createElementVNode("div", { class: "text-caption" }, "待重试", -1)),
+                                _cache[25] || (_cache[25] = _createElementVNode("div", { class: "text-caption" }, "待重试", -1)),
                                 _createElementVNode("div", _hoisted_10, _toDisplayString(counts.value.retryable ?? 0), 1)
                               ]),
                               _: 1
@@ -630,7 +776,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                           default: _withCtx(() => [
                             _createVNode(_component_v_card_text, { class: "py-2" }, {
                               default: _withCtx(() => [
-                                _cache[25] || (_cache[25] = _createElementVNode("div", { class: "text-caption" }, "超限放弃", -1)),
+                                _cache[26] || (_cache[26] = _createElementVNode("div", { class: "text-caption" }, "超限放弃", -1)),
                                 _createElementVNode("div", _hoisted_11, _toDisplayString(counts.value.exhausted ?? 0), 1)
                               ]),
                               _: 1
@@ -653,7 +799,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                           default: _withCtx(() => [
                             _createVNode(_component_v_card_text, { class: "py-2" }, {
                               default: _withCtx(() => [
-                                _cache[26] || (_cache[26] = _createElementVNode("div", { class: "text-caption" }, "待处理", -1)),
+                                _cache[27] || (_cache[27] = _createElementVNode("div", { class: "text-caption" }, "待处理", -1)),
                                 _createElementVNode("div", _hoisted_12, _toDisplayString(counts.value.pending_unknown ?? 0), 1)
                               ]),
                               _: 1
@@ -668,7 +814,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   _: 1
                 }),
                 _createElementVNode("div", _hoisted_13, [
-                  _cache[28] || (_cache[28] = _createElementVNode("div", { class: "mls-section-title" }, "最近一轮", -1)),
+                  _cache[29] || (_cache[29] = _createElementVNode("div", { class: "mls-section-title" }, "最近一轮", -1)),
                   _createVNode(_component_v_row, { dense: "" }, {
                     default: _withCtx(() => [
                       _createVNode(_component_v_col, {
@@ -701,7 +847,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                             class: "pa-3 mls-fill"
                           }, {
                             default: _withCtx(() => [
-                              _cache[27] || (_cache[27] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mb-1" }, "本轮生效的配置", -1)),
+                              _cache[28] || (_cache[28] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mb-1" }, "本轮生效的配置", -1)),
                               _createElementVNode("div", _hoisted_18, _toDisplayString(cfg.value.mode === "force_all" ? "强制覆盖" : "只补缺") + "｜最低匹配分数 " + _toDisplayString(cfg.value.min_score) + "｜" + _toDisplayString(sourceNames.value), 1),
                               _createElementVNode("div", _hoisted_19, " 库路径 " + _toDisplayString((cfg.value.scraper_paths || []).length) + " 个｜排除 " + _toDisplayString((cfg.value.exclude_paths || []).length) + " 个｜歌词" + _toDisplayString(cfg.value.fill_lyrics ? "主动抓取" : "交给宿主"), 1),
                               _createElementVNode("div", _hoisted_20, " 实际处理的扩展名：" + _toDisplayString((cfg.value.audio_extensions || []).join(" / ")), 1)
@@ -716,7 +862,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   })
                 ]),
                 failureReasons.value.length ? (_openBlock(), _createElementBlock("div", _hoisted_21, [
-                  _cache[29] || (_cache[29] = _createElementVNode("div", { class: "mls-section-title" }, "失败原因分布", -1)),
+                  _cache[30] || (_cache[30] = _createElementVNode("div", { class: "mls-section-title" }, "失败原因分布", -1)),
                   _createVNode(_component_v_card, {
                     variant: "outlined",
                     class: "mls-reason"
@@ -734,7 +880,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     ]),
                     _: 1
                   }),
-                  _cache[30] || (_cache[30] = _createElementVNode("div", { class: "text-caption text-grey mt-1" }, " 原因里写了差哪一项：「未对上」可以调分数或改文件名；「本地无某项」是文件本身没给出 这个信息，降分数也救不回来，该把它排出扫描范围。 ", -1))
+                  _cache[31] || (_cache[31] = _createElementVNode("div", { class: "text-caption text-grey mt-1" }, " 原因里写了差哪一项：「未对上」可以调分数或改文件名；「本地无某项」是文件本身没给出 这个信息，降分数也救不回来，该把它排出扫描范围。 ", -1))
                 ])) : _createCommentVNode("", true),
                 _createElementVNode("div", _hoisted_24, [
                   _createVNode(_component_v_spacer),
@@ -745,7 +891,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     loading: busy.value,
                     onClick: retryAllFailed
                   }, {
-                    default: _withCtx(() => [..._cache[31] || (_cache[31] = [
+                    default: _withCtx(() => [..._cache[32] || (_cache[32] = [
                       _createTextVNode("重试全部失败", -1)
                     ])]),
                     _: 1
@@ -757,7 +903,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     loading: busy.value,
                     onClick: _cache[2] || (_cache[2] = ($event) => scanNow(false))
                   }, {
-                    default: _withCtx(() => [..._cache[32] || (_cache[32] = [
+                    default: _withCtx(() => [..._cache[33] || (_cache[33] = [
                       _createTextVNode("增量扫描", -1)
                     ])]),
                     _: 1
@@ -769,7 +915,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     loading: busy.value,
                     onClick: _cache[3] || (_cache[3] = ($event) => scanNow(true))
                   }, {
-                    default: _withCtx(() => [..._cache[33] || (_cache[33] = [
+                    default: _withCtx(() => [..._cache[34] || (_cache[34] = [
                       _createTextVNode("全量覆盖", -1)
                     ])]),
                     _: 1
@@ -795,15 +941,32 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     style: { "max-width": "260px" },
                     clearable: ""
                   }, null, 8, ["modelValue"]),
-                  bucket.value === "failed" ? (_openBlock(), _createBlock(_component_v_btn, {
+                  bucket.value === "done" ? (_openBlock(), _createBlock(_component_v_btn, {
                     key: 0,
+                    size: "small",
+                    variant: "tonal",
+                    color: writtenOnly.value ? "primary" : "default",
+                    class: "text-none",
+                    "prepend-icon": writtenOnly.value ? "mdi-filter" : "mdi-filter-outline",
+                    onClick: _cache[5] || (_cache[5] = ($event) => {
+                      writtenOnly.value = !writtenOnly.value;
+                      onWrittenFilterChange();
+                    })
+                  }, {
+                    default: _withCtx(() => [
+                      _createTextVNode(" 只看本插件改写" + _toDisplayString(writtenOnly.value ? "" : `（${counts.value.rewritten ?? 0}）`), 1)
+                    ]),
+                    _: 1
+                  }, 8, ["color", "prepend-icon"])) : _createCommentVNode("", true),
+                  bucket.value === "failed" ? (_openBlock(), _createBlock(_component_v_btn, {
+                    key: 1,
                     size: "small",
                     variant: "tonal",
                     color: "warning",
                     loading: busy.value,
                     onClick: retryAllFailed
                   }, {
-                    default: _withCtx(() => [..._cache[34] || (_cache[34] = [
+                    default: _withCtx(() => [..._cache[35] || (_cache[35] = [
                       _createTextVNode("重试全部失败", -1)
                     ])]),
                     _: 1
@@ -813,9 +976,9 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     variant: "tonal",
                     color: "info",
                     loading: busy.value,
-                    onClick: _cache[5] || (_cache[5] = ($event) => scanNow(false))
+                    onClick: _cache[6] || (_cache[6] = ($event) => scanNow(false))
                   }, {
-                    default: _withCtx(() => [..._cache[35] || (_cache[35] = [
+                    default: _withCtx(() => [..._cache[36] || (_cache[36] = [
                       _createTextVNode("增量扫描", -1)
                     ])]),
                     _: 1
@@ -825,9 +988,9 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     variant: "tonal",
                     color: "error",
                     loading: busy.value,
-                    onClick: _cache[6] || (_cache[6] = ($event) => scanNow(true))
+                    onClick: _cache[7] || (_cache[7] = ($event) => scanNow(true))
                   }, {
-                    default: _withCtx(() => [..._cache[36] || (_cache[36] = [
+                    default: _withCtx(() => [..._cache[37] || (_cache[37] = [
                       _createTextVNode("全量覆盖", -1)
                     ])]),
                     _: 1
@@ -841,7 +1004,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     { title: "重试", key: "retries", width: 70, sortable: false },
                     { title: "大小", key: "size", width: 90, sortable: false },
                     { title: "修改时间", key: "mtime", width: 180, sortable: false },
-                    { title: "操作", key: "actions", sortable: false, width: 140 }
+                    { title: "操作", key: "actions", sortable: false, width: 170 }
                   ],
                   items: rows.value,
                   "items-length": total.value,
@@ -852,7 +1015,8 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   page: page.value,
                   "items-per-page": limit.value,
                   density: "compact",
-                  class: "elevation-1",
+                  class: "elevation-1 mls-table",
+                  "onClick:row": onRowClick,
                   "onUpdate:page": onPage,
                   "onUpdate:itemsPerPage": onItemsPerPage
                 }, {
@@ -860,7 +1024,21 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     _createElementVNode("div", {
                       title: item.path
                     }, _toDisplayString(item.name), 9, _hoisted_29),
-                    _createElementVNode("div", _hoisted_30, _toDisplayString(item.path), 1)
+                    _createElementVNode("div", _hoisted_30, _toDisplayString(item.path), 1),
+                    item.set ? (_openBlock(), _createElementBlock("div", _hoisted_31, [
+                      _createVNode(_component_v_chip, {
+                        size: "x-small",
+                        variant: "tonal",
+                        color: "primary",
+                        "prepend-icon": "mdi-pen-plus"
+                      }, {
+                        default: _withCtx(() => [
+                          _createTextVNode(" 改写 " + _toDisplayString(Object.keys(item.set).length) + " 项 ", 1)
+                        ]),
+                        _: 2
+                      }, 1024),
+                      _createElementVNode("span", _hoisted_32, _toDisplayString(changedFieldNames(item.set)), 1)
+                    ])) : _createCommentVNode("", true)
                   ]),
                   "item.status": _withCtx(({ item }) => [
                     _createVNode(_component_v_chip, {
@@ -875,8 +1053,8 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     }, 1032, ["color"])
                   ]),
                   "item.reason": _withCtx(({ item }) => [
-                    item.reason ? (_openBlock(), _createElementBlock("span", _hoisted_31, _toDisplayString(item.reason), 1)) : _createCommentVNode("", true),
-                    item.score != null ? (_openBlock(), _createElementBlock("span", _hoisted_32, " · 分数 " + _toDisplayString(item.score), 1)) : item.source ? (_openBlock(), _createElementBlock("span", _hoisted_33, " · " + _toDisplayString(sourceText(item.source)), 1)) : !item.reason ? (_openBlock(), _createElementBlock("span", _hoisted_34, "-")) : _createCommentVNode("", true)
+                    item.missing?.length ? (_openBlock(), _createElementBlock("span", _hoisted_33, _toDisplayString(item.missing.map(fieldText).join("、")), 1)) : item.reason ? (_openBlock(), _createElementBlock("span", _hoisted_34, _toDisplayString(item.reason), 1)) : _createCommentVNode("", true),
+                    item.score != null ? (_openBlock(), _createElementBlock("span", _hoisted_35, " · 分数 " + _toDisplayString(item.score), 1)) : item.source ? (_openBlock(), _createElementBlock("span", _hoisted_36, " · " + _toDisplayString(sourceText(item.source)), 1)) : !item.reason && !item.missing?.length ? (_openBlock(), _createElementBlock("span", _hoisted_37, "-")) : _createCommentVNode("", true)
                   ]),
                   "item.mtime": _withCtx(({ item }) => [
                     _createTextVNode(_toDisplayString(fmtTime(item.mtime)), 1)
@@ -893,7 +1071,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       loading: busy.value,
                       onClick: ($event) => openEdit(item)
                     }, {
-                      default: _withCtx(() => [..._cache[37] || (_cache[37] = [
+                      default: _withCtx(() => [..._cache[38] || (_cache[38] = [
                         _createTextVNode("编辑", -1)
                       ])]),
                       _: 1
@@ -905,13 +1083,23 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       loading: busy.value,
                       onClick: ($event) => retryRow(item)
                     }, {
-                      default: _withCtx(() => [..._cache[38] || (_cache[38] = [
+                      default: _withCtx(() => [..._cache[39] || (_cache[39] = [
                         _createTextVNode("重试", -1)
                       ])]),
                       _: 1
-                    }, 8, ["loading", "onClick"]))
+                    }, 8, ["loading", "onClick"])),
+                    _createVNode(_component_v_btn, {
+                      size: "x-small",
+                      variant: "text",
+                      onClick: ($event) => openDetail(item)
+                    }, {
+                      default: _withCtx(() => [..._cache[40] || (_cache[40] = [
+                        _createTextVNode("详情", -1)
+                      ])]),
+                      _: 1
+                    }, 8, ["onClick"])
                   ]),
-                  "no-data": _withCtx(() => [..._cache[39] || (_cache[39] = [
+                  "no-data": _withCtx(() => [..._cache[41] || (_cache[41] = [
                     _createElementVNode("div", { class: "text-center pa-6 text-grey" }, "该桶暂无数据", -1)
                   ])]),
                   _: 1
@@ -921,7 +1109,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
           ]),
           _createVNode(_component_v_snackbar, {
             modelValue: snackbar.value.show,
-            "onUpdate:modelValue": _cache[7] || (_cache[7] = ($event) => snackbar.value.show = $event),
+            "onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => snackbar.value.show = $event),
             color: snackbar.value.color,
             timeout: "3000",
             location: "bottom"
@@ -932,70 +1120,124 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
             _: 1
           }, 8, ["modelValue", "color"]),
           _createVNode(_component_v_dialog, {
-            modelValue: editDialog.value,
-            "onUpdate:modelValue": _cache[15] || (_cache[15] = ($event) => editDialog.value = $event),
-            "max-width": "560px"
+            modelValue: detailDialog.value,
+            "onUpdate:modelValue": _cache[12] || (_cache[12] = ($event) => detailDialog.value = $event),
+            "max-width": "680px"
           }, {
             default: _withCtx(() => [
-              _createVNode(_component_v_card, null, {
+              _createVNode(_component_v_card, { variant: "flat" }, {
                 default: _withCtx(() => [
-                  _createVNode(_component_v_card_title, { class: "text-h6" }, {
-                    default: _withCtx(() => [..._cache[40] || (_cache[40] = [
-                      _createTextVNode("补齐缺项", -1)
-                    ])]),
-                    _: 1
-                  }),
-                  _createVNode(_component_v_card_subtitle, { class: "text-truncate" }, {
-                    default: _withCtx(() => [
-                      _createTextVNode(_toDisplayString(editRow.value?.name), 1)
+                  _createElementVNode("div", _hoisted_38, [
+                    _createVNode(_component_v_avatar, {
+                      color: "primary",
+                      variant: "tonal",
+                      rounded: "lg",
+                      size: "36",
+                      class: "mr-3"
+                    }, {
+                      default: _withCtx(() => [
+                        _createVNode(_component_v_icon, {
+                          icon: "mdi-file-music-outline",
+                          size: "20"
+                        })
+                      ]),
+                      _: 1
+                    }),
+                    _createElementVNode("div", _hoisted_39, [
+                      _createElementVNode("div", _hoisted_40, _toDisplayString(detailRow.value?.name), 1),
+                      _createElementVNode("div", _hoisted_41, _toDisplayString(detailRow.value?.path), 1)
                     ]),
-                    _: 1
-                  }),
-                  _createVNode(_component_v_card_text, null, {
+                    _createVNode(_component_v_spacer),
+                    _createVNode(_component_v_btn, {
+                      icon: "mdi-close",
+                      variant: "text",
+                      size: "small",
+                      onClick: _cache[9] || (_cache[9] = ($event) => detailDialog.value = false)
+                    })
+                  ]),
+                  _createVNode(_component_v_divider),
+                  _createVNode(_component_v_card_text, { class: "pt-4" }, {
                     default: _withCtx(() => [
-                      _createVNode(_component_v_text_field, {
-                        modelValue: editForm.value.title,
-                        "onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => editForm.value.title = $event),
-                        label: "曲名",
-                        density: "compact",
-                        class: "mb-1"
-                      }, null, 8, ["modelValue"]),
-                      _createVNode(_component_v_text_field, {
-                        modelValue: editForm.value.artist,
-                        "onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => editForm.value.artist = $event),
-                        label: "艺人",
-                        density: "compact",
-                        class: "mb-1"
-                      }, null, 8, ["modelValue"]),
-                      _createVNode(_component_v_text_field, {
-                        modelValue: editForm.value.album,
-                        "onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => editForm.value.album = $event),
-                        label: "专辑",
-                        density: "compact",
-                        class: "mb-1"
-                      }, null, 8, ["modelValue"]),
-                      _createVNode(_component_v_text_field, {
-                        modelValue: editForm.value.year,
-                        "onUpdate:modelValue": _cache[11] || (_cache[11] = ($event) => editForm.value.year = $event),
-                        label: "年份",
-                        density: "compact",
-                        class: "mb-1"
-                      }, null, 8, ["modelValue"]),
-                      _createVNode(_component_v_text_field, {
-                        modelValue: editForm.value.tracknumber,
-                        "onUpdate:modelValue": _cache[12] || (_cache[12] = ($event) => editForm.value.tracknumber = $event),
-                        label: "音轨号",
-                        density: "compact",
-                        class: "mb-1"
-                      }, null, 8, ["modelValue"]),
-                      _createVNode(_component_v_textarea, {
-                        modelValue: editForm.value.lyrics,
-                        "onUpdate:modelValue": _cache[13] || (_cache[13] = ($event) => editForm.value.lyrics = $event),
-                        label: "歌词",
-                        density: "compact",
-                        rows: "4",
-                        "auto-grow": ""
-                      }, null, 8, ["modelValue"])
+                      detailLoading.value ? (_openBlock(), _createBlock(_component_v_progress_linear, {
+                        key: 0,
+                        indeterminate: "",
+                        color: "primary",
+                        height: "2"
+                      })) : detail.value ? (_openBlock(), _createElementBlock(_Fragment, { key: 1 }, [
+                        _cache[45] || (_cache[45] = _createElementVNode("div", { class: "mls-section-title" }, "本插件的改写", -1)),
+                        Object.keys(detailSets()).length ? (_openBlock(), _createBlock(_component_v_table, {
+                          key: 0,
+                          density: "compact",
+                          class: "mls-diff mb-4"
+                        }, {
+                          default: _withCtx(() => [
+                            _cache[42] || (_cache[42] = _createElementVNode("thead", null, [
+                              _createElementVNode("tr", null, [
+                                _createElementVNode("th", { class: "text-left" }, "字段"),
+                                _createElementVNode("th", { class: "text-left" }, "改前"),
+                                _createElementVNode("th", { class: "text-left" }, "改后")
+                              ])
+                            ], -1)),
+                            _createElementVNode("tbody", null, [
+                              (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(detailSets(), (pair, field) => {
+                                return _openBlock(), _createElementBlock("tr", { key: field }, [
+                                  _createElementVNode("td", _hoisted_42, _toDisplayString(fieldText(String(field))), 1),
+                                  _createElementVNode("td", _hoisted_43, _toDisplayString(pair[0] || "（空）"), 1),
+                                  _createElementVNode("td", _hoisted_44, _toDisplayString(pair[1] || "（空）"), 1)
+                                ]);
+                              }), 128))
+                            ])
+                          ]),
+                          _: 1
+                        })) : (_openBlock(), _createElementBlock("div", _hoisted_45, " 这一条没有改写记录：要么本轮判定已齐直接跳过，要么是宿主自己写入的 ")),
+                        detail.value.set_ts ? (_openBlock(), _createElementBlock("div", _hoisted_46, " 最近一次改写 " + _toDisplayString(detail.value.set_ts) + "｜来源 " + _toDisplayString(sourceText(detail.value.source || "")), 1)) : _createCommentVNode("", true),
+                        _cache[46] || (_cache[46] = _createElementVNode("div", { class: "mls-section-title" }, "文件里现在写着", -1)),
+                        _createVNode(_component_v_row, { dense: "" }, {
+                          default: _withCtx(() => [
+                            (_openBlock(), _createElementBlock(_Fragment, null, _renderList(["title", "artist", "album", "year", "tracknumber"], (field) => {
+                              return _createVNode(_component_v_col, {
+                                key: field,
+                                cols: "6",
+                                md: "4"
+                              }, {
+                                default: _withCtx(() => [
+                                  _createElementVNode("div", _hoisted_47, [
+                                    _createElementVNode("div", _hoisted_48, _toDisplayString(fieldText(field)), 1),
+                                    _createElementVNode("div", _hoisted_49, _toDisplayString((detail.value.tags || {})[field] || "—"), 1)
+                                  ])
+                                ]),
+                                _: 2
+                              }, 1024);
+                            }), 64)),
+                            _createVNode(_component_v_col, {
+                              cols: "6",
+                              md: "4"
+                            }, {
+                              default: _withCtx(() => [
+                                _createElementVNode("div", _hoisted_50, [
+                                  _cache[43] || (_cache[43] = _createElementVNode("div", { class: "text-caption text-grey" }, "封面", -1)),
+                                  _createElementVNode("div", _hoisted_51, _toDisplayString(detail.value.has_cover ? "已内嵌" : "无"), 1)
+                                ])
+                              ]),
+                              _: 1
+                            }),
+                            _createVNode(_component_v_col, {
+                              cols: "12",
+                              md: "4"
+                            }, {
+                              default: _withCtx(() => [
+                                _createElementVNode("div", _hoisted_52, [
+                                  _cache[44] || (_cache[44] = _createElementVNode("div", { class: "text-caption text-grey" }, "歌词", -1)),
+                                  _createElementVNode("div", _hoisted_53, _toDisplayString(detail.value.lyrics_from === "sibling" ? "同名 .lrc 里有" : detail.value.lyrics_from === "embedded" ? "已内嵌" : "无"), 1)
+                                ])
+                              ]),
+                              _: 1
+                            })
+                          ]),
+                          _: 1
+                        }),
+                        (detail.value.missing || []).length ? (_openBlock(), _createElementBlock("div", _hoisted_54, " 仍缺：" + _toDisplayString(detail.value.missing.map(fieldText).join("、")), 1)) : _createCommentVNode("", true)
+                      ], 64)) : _createCommentVNode("", true)
                     ]),
                     _: 1
                   }),
@@ -1005,9 +1247,208 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       _createVNode(_component_v_btn, {
                         variant: "text",
                         class: "text-none",
-                        onClick: _cache[14] || (_cache[14] = ($event) => editDialog.value = false)
+                        onClick: _cache[10] || (_cache[10] = ($event) => detailDialog.value = false)
                       }, {
-                        default: _withCtx(() => [..._cache[41] || (_cache[41] = [
+                        default: _withCtx(() => [..._cache[47] || (_cache[47] = [
+                          _createTextVNode("关闭", -1)
+                        ])]),
+                        _: 1
+                      }),
+                      detailRow.value?.status === "deficient" ? (_openBlock(), _createBlock(_component_v_btn, {
+                        key: 0,
+                        variant: "flat",
+                        color: "primary",
+                        class: "text-none",
+                        onClick: _cache[11] || (_cache[11] = ($event) => {
+                          detailDialog.value = false;
+                          openEdit(detailRow.value);
+                        })
+                      }, {
+                        default: _withCtx(() => [..._cache[48] || (_cache[48] = [
+                          _createTextVNode("补齐缺项", -1)
+                        ])]),
+                        _: 1
+                      })) : _createCommentVNode("", true)
+                    ]),
+                    _: 1
+                  })
+                ]),
+                _: 1
+              })
+            ]),
+            _: 1
+          }, 8, ["modelValue"]),
+          _createVNode(_component_v_dialog, {
+            modelValue: editDialog.value,
+            "onUpdate:modelValue": _cache[16] || (_cache[16] = ($event) => editDialog.value = $event),
+            "max-width": "720px"
+          }, {
+            default: _withCtx(() => [
+              _createVNode(_component_v_card, { variant: "flat" }, {
+                default: _withCtx(() => [
+                  _createElementVNode("div", _hoisted_55, [
+                    _createVNode(_component_v_avatar, {
+                      color: "primary",
+                      variant: "tonal",
+                      rounded: "lg",
+                      size: "36",
+                      class: "mr-3"
+                    }, {
+                      default: _withCtx(() => [
+                        _createVNode(_component_v_icon, {
+                          icon: "mdi-music-box-edit-outline",
+                          size: "20"
+                        })
+                      ]),
+                      _: 1
+                    }),
+                    _createElementVNode("div", _hoisted_56, [
+                      _cache[49] || (_cache[49] = _createElementVNode("div", { class: "text-subtitle-1" }, "补齐缺项", -1)),
+                      _createElementVNode("div", _hoisted_57, _toDisplayString(editRow.value?.path), 1)
+                    ]),
+                    _createVNode(_component_v_spacer),
+                    _createVNode(_component_v_btn, {
+                      icon: "mdi-close",
+                      variant: "text",
+                      size: "small",
+                      onClick: _cache[13] || (_cache[13] = ($event) => editDialog.value = false)
+                    })
+                  ]),
+                  _createVNode(_component_v_divider),
+                  _createVNode(_component_v_card_text, { class: "pt-4" }, {
+                    default: _withCtx(() => [
+                      editLoading.value ? (_openBlock(), _createBlock(_component_v_progress_linear, {
+                        key: 0,
+                        indeterminate: "",
+                        color: "primary",
+                        height: "2"
+                      })) : _createCommentVNode("", true),
+                      editMissing.value.length ? (_openBlock(), _createElementBlock("div", _hoisted_58, [
+                        (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(editMissing.value, (field) => {
+                          return _openBlock(), _createBlock(_component_v_chip, {
+                            key: field,
+                            size: "x-small",
+                            variant: "tonal",
+                            color: "warning",
+                            "prepend-icon": "mdi-alert-circle-outline"
+                          }, {
+                            default: _withCtx(() => [
+                              _createTextVNode(_toDisplayString(fieldText(field)), 1)
+                            ]),
+                            _: 2
+                          }, 1024);
+                        }), 128)),
+                        _cache[50] || (_cache[50] = _createElementVNode("span", { class: "text-caption text-grey ml-1" }, "以上几项文件里没有，其余都是已填好的现值", -1))
+                      ])) : !editLoading.value ? (_openBlock(), _createElementBlock("div", _hoisted_59, " 按后端判定这一条已经齐了，下面的值就是文件里的现值 ")) : _createCommentVNode("", true),
+                      _createVNode(_component_v_form, {
+                        onSubmit: _withModifiers(submitEdit, ["prevent"])
+                      }, {
+                        default: _withCtx(() => [
+                          _createVNode(_component_v_row, { dense: "" }, {
+                            default: _withCtx(() => [
+                              (_openBlock(), _createElementBlock(_Fragment, null, _renderList(EDIT_FIELDS, (field) => {
+                                return _createVNode(_component_v_col, {
+                                  key: field.key,
+                                  cols: field.cols
+                                }, {
+                                  default: _withCtx(() => [
+                                    _createVNode(_component_v_text_field, {
+                                      modelValue: editForm.value[field.key],
+                                      "onUpdate:modelValue": ($event) => editForm.value[field.key] = $event,
+                                      label: fieldText(field.key),
+                                      loading: editLoading.value,
+                                      density: "comfortable",
+                                      "hide-details": "auto",
+                                      variant: "outlined"
+                                    }, {
+                                      "append-inner": _withCtx(() => [
+                                        !editBase.value[field.key] ? (_openBlock(), _createBlock(_component_v_chip, {
+                                          key: 0,
+                                          size: "x-small",
+                                          variant: "text",
+                                          color: "warning"
+                                        }, {
+                                          default: _withCtx(() => [..._cache[51] || (_cache[51] = [
+                                            _createTextVNode("缺", -1)
+                                          ])]),
+                                          _: 1
+                                        })) : editChanged.value.includes(field.key) ? (_openBlock(), _createBlock(_component_v_icon, {
+                                          key: 1,
+                                          icon: "mdi-pencil-circle",
+                                          size: "x-small",
+                                          color: "primary"
+                                        })) : (_openBlock(), _createBlock(_component_v_icon, {
+                                          key: 2,
+                                          icon: "mdi-check-circle-outline",
+                                          size: "x-small",
+                                          color: "grey"
+                                        }))
+                                      ]),
+                                      _: 2
+                                    }, 1032, ["modelValue", "onUpdate:modelValue", "label", "loading"])
+                                  ]),
+                                  _: 2
+                                }, 1032, ["cols"]);
+                              }), 64))
+                            ]),
+                            _: 1
+                          }),
+                          _createElementVNode("div", _hoisted_60, [
+                            _createElementVNode("div", _hoisted_61, [
+                              _cache[54] || (_cache[54] = _createElementVNode("div", { class: "mls-section-title mb-0" }, "歌词", -1)),
+                              _createVNode(_component_v_spacer),
+                              editLyricsFrom.value === "sibling" ? (_openBlock(), _createBlock(_component_v_chip, {
+                                key: 0,
+                                size: "x-small",
+                                variant: "tonal",
+                                color: "info"
+                              }, {
+                                default: _withCtx(() => [..._cache[52] || (_cache[52] = [
+                                  _createTextVNode(" 取自同名 .lrc ", -1)
+                                ])]),
+                                _: 1
+                              })) : editLyricsFrom.value === "embedded" ? (_openBlock(), _createBlock(_component_v_chip, {
+                                key: 1,
+                                size: "x-small",
+                                variant: "text",
+                                color: "grey"
+                              }, {
+                                default: _withCtx(() => [..._cache[53] || (_cache[53] = [
+                                  _createTextVNode(" 文件里已有 ", -1)
+                                ])]),
+                                _: 1
+                              })) : _createCommentVNode("", true)
+                            ]),
+                            _createVNode(_component_v_textarea, {
+                              modelValue: editForm.value.lyrics,
+                              "onUpdate:modelValue": _cache[14] || (_cache[14] = ($event) => editForm.value.lyrics = $event),
+                              density: "compact",
+                              rows: "5",
+                              "auto-grow": "",
+                              "hide-details": "",
+                              variant: "outlined",
+                              loading: editLoading.value,
+                              placeholder: "留空则不改动"
+                            }, null, 8, ["modelValue", "loading"])
+                          ]),
+                          !editHasCover.value ? (_openBlock(), _createElementBlock("div", _hoisted_62, " 缺封面这里补不了：封面要下载后内嵌，用行上的「重试」让识别源再刮一次 ")) : _createCommentVNode("", true)
+                        ]),
+                        _: 1
+                      })
+                    ]),
+                    _: 1
+                  }),
+                  _createVNode(_component_v_divider),
+                  _createVNode(_component_v_card_actions, null, {
+                    default: _withCtx(() => [
+                      _createElementVNode("div", _hoisted_63, _toDisplayString(editChanged.value.length ? `本次写入 ${editChanged.value.length} 项：${editChanged.value.map(fieldText).join("、")}` : "没有改动可写入"), 1),
+                      _createVNode(_component_v_spacer),
+                      _createVNode(_component_v_btn, {
+                        variant: "text",
+                        class: "text-none",
+                        onClick: _cache[15] || (_cache[15] = ($event) => editDialog.value = false)
+                      }, {
+                        default: _withCtx(() => [..._cache[55] || (_cache[55] = [
                           _createTextVNode("取消", -1)
                         ])]),
                         _: 1
@@ -1017,13 +1458,14 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                         color: "primary",
                         class: "text-none",
                         loading: busy.value,
+                        disabled: editLoading.value || !editChanged.value.length,
                         onClick: submitEdit
                       }, {
-                        default: _withCtx(() => [..._cache[42] || (_cache[42] = [
-                          _createTextVNode("保存", -1)
+                        default: _withCtx(() => [..._cache[56] || (_cache[56] = [
+                          _createTextVNode(" 保存 ", -1)
                         ])]),
                         _: 1
-                      }, 8, ["loading"])
+                      }, 8, ["loading", "disabled"])
                     ]),
                     _: 1
                   })
@@ -1040,6 +1482,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const Page = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-56c0f874"]]);
+const Page = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-7b483ddc"]]);
 
 export { Page as default };
