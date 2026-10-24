@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, inject, onMounted } from 'vue'
 import { FLOW_STEPS } from './flow'
 
 const props = defineProps({
@@ -7,13 +7,18 @@ const props = defineProps({
   api: { type: Object as () => MoviePilotApi, default: () => ({}) as any },
   pluginId: { type: String, default: '' },
   sourcePluginId: { type: String, default: '' },
-  nativeSubscribe: { type: Function as any, default: null }
+  nativeSubscribe: { type: Function as any, default: null },
+  // 侧栏全页里自己开的这个配置框：宿主不给 AppPage 传 initialConfig，
+  // 起头和落盘都得走插件自己的 /config，而不是 emit('save') 交给宿主整体替换。
+  standalone: { type: Boolean, default: false }
 })
 
-const emit = defineEmits(['save', 'close', 'switch', 'layout'])
+const emit = defineEmits(['save', 'close', 'switch', 'layout', 'updated'])
 
 const DEFAULTS = {
   enabled: false,
+  // 缺键按开：升级过来的装机没有这一项，默认关会让入口"升级完就消失"
+  show_sidebar_nav: true,
   onlyonce: false,
   mode: '',
   cron: '0 3 * * sun',
@@ -129,19 +134,101 @@ const modeNote = computed(() =>
 )
 
 function saveConfig() {
+  if (props.standalone) return saveStandalone()
   // 只负责把配置交给宿主：宿主自己 PUT /plugin/{id} 并弹「已保存 / 保存失败」。
   // 这里再弹一条会出现两条通知，而且它在请求发出前就报成功，失败了也照样说已保存。
   emit('save', config.value)
 }
 
+const saving = ref(false)
+// 服务端存没存过密码：standalone 模式下这一格永远是空的（接口不回显），
+// 留空提交等于"没改"，不先说破就会被读成"要把密码清掉"。
+const passwordSet = ref(false)
+const snackbar = ref({ show: false, text: '', color: 'info' })
+
+interface HostToast {
+  error(msg: string): unknown
+  info(msg: string): unknown
+  success(msg: string): unknown
+  warning(msg: string): unknown
+}
+const toast = inject<HostToast | null>('moviepilot:toast', null)
+const base = computed(() => `plugin/${props.pluginId || props.sourcePluginId}`)
+
+function notify(msg: string, color = 'info') {
+  if (toast) {
+    const fn = (toast as any)[color] || toast.info
+    fn.call(toast, msg)
+    return
+  }
+  snackbar.value = { show: true, text: msg, color }
+}
+
+/** 后端回的是整份 /status，配置从里面的 config 段起头；密码只回"存没存过"。 */
+function fillFromStatus(data: any) {
+  if (!data) return
+  const echo = data.config || {}
+  config.value.enabled = !!data.enabled
+  config.value.min_score = echo.min_score ?? config.value.min_score
+  config.value.mode = echo.mode === 'force_all' ? 'force_all' : ''
+  config.value.cron = echo.cron || config.value.cron
+  config.value.scraper_paths = echo.scraper_paths ?? ''
+  config.value.exclude_paths = echo.exclude_paths ?? ''
+  config.value.source_backend = echo.source_backend || 'auto'
+  config.value.mtw_base_url = echo.mtw_base_url || ''
+  config.value.mtw_resource = toResourceList(echo.mtw_resource)
+  // 这两项服务端没回时保持本地值：把"没回"当成"关"或"没存过"都是瞎猜
+  if (typeof echo.show_sidebar_nav === 'boolean') config.value.show_sidebar_nav = echo.show_sidebar_nav
+  if (typeof echo.mtw_password_set === 'boolean') passwordSet.value = echo.mtw_password_set
+}
+
+async function loadStandalone() {
+  try {
+    const res = await (props.api as MoviePilotApi).get(`${base.value}/config`)
+    if (!res) return
+    config.value = {
+      ...DEFAULTS,
+      ...res,
+      mtw_password: '',
+      onlyonce: false,
+      mtw_resource: toResourceList(res.mtw_resource)
+    }
+    passwordSet.value = !!res.mtw_password_set
+  } catch (e: any) {
+    notify(`配置读取失败：${e?.message || e}`, 'error')
+  }
+}
+
+async function saveStandalone() {
+  saving.value = true
+  try {
+    const body: Record<string, any> = { ...config.value, onlyonce: !!config.value.onlyonce }
+    if (!String(body.mtw_password || '').trim()) delete body.mtw_password
+    const res = await (props.api as MoviePilotApi).post(`${base.value}/config`, body)
+    if (res && res.ok === false) {
+      notify(res.message || '保存失败', 'warning')
+      return
+    }
+    fillFromStatus(res)
+    config.value.onlyonce = false
+    notify('配置已保存', 'success')
+    emit('updated')
+  } catch (e: any) {
+    notify(`保存失败：${e?.message || e}`, 'error')
+  } finally {
+    saving.value = false
+  }
+}
+
 onMounted(() => {
   // 侧栏版式需要比宿主默认的 60rem 更宽，宽度由宿主的配置框按这个事件设置
   emit('layout', { maxWidth: '74rem' })
+  if (props.standalone) loadStandalone()
 })
 </script>
 
 <template>
-  <v-card flat class="mls-card">
+  <v-card flat :class="['mls-card', standalone ? 'mls-card-fit' : '']">
     <div class="mls-head">
       <v-avatar color="primary" variant="tonal" rounded="lg" size="40" class="mr-3">
         <v-icon icon="mdi-music-circle-outline" size="24" />
@@ -246,6 +333,16 @@ onMounted(() => {
           </div>
 
           <v-switch v-model="config.onlyonce" label="保存后立即运行一次" hide-details color="primary" inset class="mt-1" />
+
+          <div class="mls-block">
+            <v-switch v-model="config.show_sidebar_nav" label="在主界面「整理」显示侧栏入口"
+                      hide-details color="primary" inset />
+            <div class="text-caption text-grey mt-1">
+              勾上并启用插件后，主界面左侧「整理」下会出现「音乐库刮削」，点进来直接是这张数据页，
+              不必再从插件管理页两层点进来；这个入口要管理权限才可见（这一区的插件都会动库里文件）。
+              关掉不影响周期扫描，也不影响这里 —— 宿主「插件管理 → 配置」照样能打开配置页。
+            </div>
+          </div>
         </div>
 
         <!-- 识别与匹配 -->
@@ -274,7 +371,7 @@ onMounted(() => {
                 v-model="config.mtw_password"
                 label="MTW 密码"
                 type="password"
-                placeholder="仅本机保存，不入 git"
+                :placeholder="standalone && passwordSet ? '已保存，留空即不修改' : '仅本机保存，不入 git'"
                 hide-details
               />
             </v-col>
@@ -382,14 +479,23 @@ onMounted(() => {
 
     <v-divider />
     <div class="mls-actions">
-      <v-btn variant="text" class="text-none" prepend-icon="mdi-database-eye-outline" @click="emit('switch')">
+      <v-btn v-if="!standalone" variant="text" class="text-none" prepend-icon="mdi-database-eye-outline"
+             @click="emit('switch')">
         查看数据页
       </v-btn>
+      <v-btn v-else variant="text" class="text-none" prepend-icon="mdi-close" @click="emit('close')">
+        关闭
+      </v-btn>
       <v-spacer />
-      <v-btn color="primary" variant="flat" prepend-icon="mdi-content-save" class="text-none" @click="saveConfig">
+      <v-btn color="primary" variant="flat" prepend-icon="mdi-content-save" class="text-none"
+             :loading="saving" @click="saveConfig">
         保存配置
       </v-btn>
     </div>
+
+    <v-snackbar v-model="snackbar.show" :color="snackbar.color" timeout="3500" location="bottom">
+      {{ snackbar.text }}
+    </v-snackbar>
   </v-card>
 </template>
 
@@ -399,6 +505,10 @@ onMounted(() => {
 .mls-head { display: flex; align-items: center; gap: 8px; padding: 14px 18px; }
 .mls-head-text { min-width: 0; }
 .mls-body { display: flex; min-height: 400px; }
+/* 侧栏对话框里整张卡要被限高：限在卡片上、让内容区自己滚，
+   底部的保存条才不会顶出可视区被裁掉（宿主那层滚动交给 v-dialog 做不了这件事）。 */
+.mls-card-fit { max-height: 86vh; }
+.mls-card-fit .mls-body { flex: 1 1 auto; min-height: 0; }
 .mls-nav {
   flex: 0 0 176px;
   border-right: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));

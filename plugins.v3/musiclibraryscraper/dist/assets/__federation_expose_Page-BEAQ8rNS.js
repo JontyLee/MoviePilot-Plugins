@@ -83,7 +83,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
     showSwitch: { type: Boolean, default: true }
   },
   emits: ["action", "switch", "close", "layout"],
-  setup(__props, { emit: __emit }) {
+  setup(__props, { expose: __expose, emit: __emit }) {
     const emit = __emit;
     const props = __props;
     const base = computed(() => `plugin/${props.pluginId || props.sourcePluginId}`);
@@ -191,6 +191,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       await Promise.all([loadStatus(), view.value === "overview" ? Promise.resolve() : loadFiles()]);
       emit("action");
     }
+    __expose({ refresh });
     function selectView(key) {
       view.value = key;
       if (key === "overview") return;
@@ -1034,6 +1035,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const Page = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-ab1e3b0e"]]);
+const Page = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-b4601f6f"]]);
 
 export { Page as default };

@@ -16,6 +16,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import re
 import sys
 import tempfile
 import time
@@ -768,6 +769,18 @@ class PluginConfigTest(unittest.TestCase):
     def test_render_mode_is_vue_federation(self) -> None:
         self.assertEqual(x.XiaoaiSpeaker.get_render_mode(), ("vue", "dist/assets"))
         self.assertEqual(_plugin().get_page(), [])
+
+    def test_built_remote_entry_serves_app_page(self) -> None:
+        """侧栏 nav_key=main 时宿主按 ./AppPage → ./Page 找组件：只暴露 ./Page 会报
+        「无法加载插件全页组件」，而这个只有装到实例上才看得见 —— 拿产物先断言一次。"""
+        entry = (_ROOT / "plugins.v3" / "xiaoaispeaker" / "dist" / "assets" / "remoteEntry.js")
+        if not entry.exists():
+            self.skipTest(f"{entry} 尚未构建")
+        text = entry.read_text(encoding="utf-8")
+        self.assertIn("'./AppPage'", text)
+        chunk = re.search(r"__federation_expose_AppPage-[A-Za-z0-9_-]+\.js", text)
+        self.assertIsNotNone(chunk, "./AppPage 暴露了但没有对应产物")
+        self.assertTrue((entry.parent / chunk.group(0)).exists())
 
     def test_api_declarations(self) -> None:
         plugin = _plugin()

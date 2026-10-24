@@ -362,6 +362,9 @@ _FORM_NOTES = (
     "【元数据来源】识别来源=内置源时，插件直连各音乐平台的公开检索接口，不必为刮削单独部署 "
     "Music Tag Web；识别来源=Music Tag Web 时沿用 v0.3.x 的行为，由 MTW 代为检索。"
     "自动（默认）表示配了 MTW 地址就走 MTW、没配就走内置源 —— 老实升级的装机行为不变。\n"
+    "【侧栏入口】「整理」分区的那个入口就是这张数据页：勾上并启用插件后，主界面左侧「整理」下"
+    "会出现「音乐库刮削」，点进去直接看四桶与补齐缺项，不必再从插件管理页两层点进来。"
+    "它要管理权限才可见（这一区的插件都会动库里文件），关掉不影响周期扫描本身。\n"
     "内置源可用：网易云 / QQ音乐 / 酷狗 / 咪咕 / MusicBrainz。酷我与 smart_tag 只有 MTW 模式能问"
     "（酷我的检索接口对曲名索引恒不返回命中、www 接口要带签名，插件侧没有实现）。"
     "识别源可多选，留空即全部源；不在当前来源可用清单里的源会被忽略，整份配置恰好只剩被忽略的"
@@ -1003,7 +1006,7 @@ class MusicLibraryScraper(_PluginBase):
         "也可切回 MTW 由它代为检索；再沿用 MP 原生音乐刮削链路写入标签与封面。"
     )
     plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/avator.webp"
-    plugin_version = "0.5.0"
+    plugin_version = "0.6.0"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "musiclibraryscraper_"
@@ -1012,6 +1015,9 @@ class MusicLibraryScraper(_PluginBase):
 
     # 配置项
     _enabled: bool = False
+    # 主界面「整理」分区的侧栏入口。默认开：这个插件的价值就在数据页，
+    # 而数据页原本只能从插件管理页两层点进去。
+    _show_sidebar_nav: bool = True
     _onlyonce: bool = False
     _cron: Optional[str] = None
     _scraper_paths: str = ""
@@ -1050,6 +1056,9 @@ class MusicLibraryScraper(_PluginBase):
         if config:
             previous_mtw = (self._mtw_base_url, self._mtw_username, self._mtw_password)
             self._enabled = bool(config.get("enabled"))
+            # 缺键按开：升级过来的装机没有这一项，默认关会让入口"升级完就消失"，
+            # 而它本来什么也没改变过，只是多了一个入口。
+            self._show_sidebar_nav = bool(config.get("show_sidebar_nav", True))
             self._onlyonce = bool(config.get("onlyonce"))
             self._cron = config.get("cron") or None
             self._scraper_paths = config.get("scraper_paths") or ""
@@ -1090,23 +1099,32 @@ class MusicLibraryScraper(_PluginBase):
             # 直接 record.config_data = deepcopy(config_data)），所以必须把全量配置写回去，
             # 只写 {"onlyonce": False} 会把其余配置一起清掉。密码本来就在这份配置里，
             # 明文落 systemconfig 是 MP 存储插件配置的方式，插件侧无法在不丢配置的前提下回避。
-            self.update_config({
-                "enabled": self._enabled,
-                "onlyonce": False,
-                "cron": self._cron,
-                "scraper_paths": self._scraper_paths,
-                "exclude_paths": self._exclude_paths,
-                "mode": "force_all" if self._force_all else "",
-                "mtw_base_url": self._mtw_base_url,
-                "mtw_username": self._mtw_username,
-                "mtw_password": self._mtw_password,
-                # 配置键保持单数，值自 v0.3.0 起是数组（读侧兼容旧的单字符串）
-                "mtw_resource": self._mtw_resources,
-                "source_backend": self._source_backend,
-                "min_score": self._min_score,
-                "fill_lyrics": self._fill_lyrics,
-            })
+            self.update_config(self._config_snapshot())
             self._kick_scan()
+
+    def _config_snapshot(self) -> Dict[str, Any]:
+        """当前配置的全量形状（键必须与 get_form 的 defaults 一致）。
+
+        两处整体替换要用它：onlyonce 回写，以及侧栏配置对话框的 POST /config
+        —— 那个对话框不走宿主「插件管理 → 配置」那条链路，落盘得插件自己来。
+        """
+        return {
+            "enabled": self._enabled,
+            "show_sidebar_nav": self._show_sidebar_nav,
+            "onlyonce": self._onlyonce,
+            "cron": self._cron,
+            "scraper_paths": self._scraper_paths,
+            "exclude_paths": self._exclude_paths,
+            "mode": "force_all" if self._force_all else "",
+            "mtw_base_url": self._mtw_base_url,
+            "mtw_username": self._mtw_username,
+            "mtw_password": self._mtw_password,
+            # 配置键保持单数，值自 v0.3.0 起是数组（读侧兼容旧的单字符串）
+            "mtw_resource": self._mtw_resources,
+            "source_backend": self._source_backend,
+            "min_score": self._min_score,
+            "fill_lyrics": self._fill_lyrics,
+        }
 
     @staticmethod
     def _resolve_backend_choice(raw: Any) -> str:
@@ -1324,6 +1342,20 @@ class MusicLibraryScraper(_PluginBase):
                 "auth": "bear",
                 "summary": "触发一次扫描",
             },
+            {
+                "path": "/config",
+                "endpoint": self.api_get_config,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "读取可编辑配置（不含密码）",
+            },
+            {
+                "path": "/config",
+                "endpoint": self.api_config,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "保存配置（只改传上来的键）",
+            },
         ]
 
     def api_status(self, request: Request) -> Dict[str, Any]:
@@ -1427,6 +1459,64 @@ class MusicLibraryScraper(_PluginBase):
         return {"accepted": started, "running": self._is_running(),
                 "reason": None if started else "busy"}
 
+    def api_get_config(self, request: Request) -> Dict[str, Any]:
+        """GET /config —— 可编辑配置，不含密码。
+
+        侧栏全页里的配置对话框要用它起头：宿主只把 api/pluginId/navKey 三个 props
+        交给 ./AppPage，initialConfig 那条链路在这个挂载方式下拿不到，只能插件自己回。
+        密码不回显（与 /status 同一个承诺：不写进日志、状态接口或数据页），
+        另给 mtw_password_set 说明存没存过，页面上那格留空就是不改。
+        """
+        config = dict(self._config_snapshot())
+        password = str(config.pop("mtw_password") or "")
+        config["onlyonce"] = False
+        config["mtw_password_set"] = bool(password)
+        return config
+
+    async def api_config(self, request: Request) -> Dict[str, Any]:
+        """POST /config —— 只改传上来的键；密码留空表示保留原值。
+
+        这条路径绕开了宿主「插件管理 → 配置」的整体替换：先拿当前全量做底、
+        按键覆盖，再交给 init_plugin 走同一套归一化（cron 兜底、min_score 收界、
+        源名单过滤、换 MTW 地址丢令牌都在那里），最后整体写回。
+        请求里认不出来的键不会被写进配置，免得留下表单没定义却存在于配置里的野键。
+        """
+        try:
+            payload = await request.json()
+        except Exception:
+            return {"ok": False, "message": "请求体不是合法的 JSON"}
+        if not isinstance(payload, dict):
+            return {"ok": False, "message": "请求体要是一个 JSON 对象"}
+        known = set(self._config_snapshot()) | {"mtw_password_set"}
+        merged = {**self._config_snapshot(),
+                  **{key: value for key, value in payload.items() if key in known}}
+        merged.pop("mtw_password_set", None)
+        if not str(merged.get("mtw_password") or "").strip():
+            merged["mtw_password"] = self._mtw_password
+        self.init_plugin(merged)
+        self.update_config(self._config_snapshot())
+        # enabled 决定宿主要不要登记这个插件，cron 决定什么时候跑：改过任何一个
+        # 都要请宿主重建，没改也重建一次没有代价。
+        if "enabled" in payload or "cron" in payload:
+            self._refresh_jobs()
+        status = self._build_status()
+        status.update({"ok": True, "message": "配置已保存"})
+        return status
+
+    def _refresh_jobs(self) -> None:
+        """让宿主按当前配置重建本插件的周期任务。
+
+        从侧栏对话框保存不会走插件管理那条链路，不喊这一声的话：勾了「启用插件」
+        而宿主那边还是停用状态，周期扫描登记不上，侧栏入口也不会出现。
+        """
+        update = getattr(scheduler_sdk, "update_plugin_job", None) if scheduler_sdk else None
+        if not update:
+            return
+        try:
+            update(self.__class__.__name__)
+        except Exception as err:  # pragma: no cover - 调度器不可用不影响配置已落盘
+            logger.warning(f"[music-scraper] 重建周期任务失败: {err}")
+
     # ---------------- 页面 / 渲染 ----------------
 
     @staticmethod
@@ -1437,6 +1527,26 @@ class MusicLibraryScraper(_PluginBase):
     def get_page(self) -> List[dict]:
         """Vue 模式下详情页由远程 ./Page 渲染，这里返回空。"""
         return []
+
+    def get_sidebar_nav(self) -> List[Dict[str, Any]]:
+        """主界面「整理」分区的全页入口（远程组件 ./AppPage）。
+
+        section 用 organize、permission 用 manage，跟这一区里的音乐资源管理（32）、
+        字幕助手（30）、brushflow（45）同一套：这一区的插件都会动库里文件。
+        order 33 紧贴音乐资源管理，两条音乐相关的挨在一起，也不把字幕那一对（30、48）切断。
+        """
+        if not self.get_state() or not self._show_sidebar_nav:
+            return []
+        return [
+            {
+                "nav_key": "main",
+                "title": "音乐库刮削",
+                "icon": "mdi-music-circle-outline",
+                "section": "organize",
+                "permission": "manage",
+                "order": 33,
+            }
+        ]
 
     def get_service(self) -> List[Dict[str, Any]]:
         """周期扫描服务，由宿主调度器托管（插件自建 scheduler 已移除）。"""
@@ -1472,13 +1582,16 @@ class MusicLibraryScraper(_PluginBase):
                 "component": "VForm",
                 "content": [
                     {"component": "VRow", "content": [
-                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                        {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
                             {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}}
                         ]},
-                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                        {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
+                            {"component": "VSwitch", "props": {"model": "show_sidebar_nav", "label": "整理区侧栏入口"}}
+                        ]},
+                        {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
                             {"component": "VSwitch", "props": {"model": "onlyonce", "label": "立即运行一次"}}
                         ]},
-                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                        {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
                             {"component": "VSelect", "props": {
                                 "model": "mode", "label": "写入模式",
                                 "items": [
@@ -1581,6 +1694,7 @@ class MusicLibraryScraper(_PluginBase):
             }
         ], {
             "enabled": False,
+            "show_sidebar_nav": True,
             "onlyonce": False,
             "mode": "",
             "cron": _DEFAULT_CRON,
@@ -2260,6 +2374,8 @@ class MusicLibraryScraper(_PluginBase):
                 "cron": cron_now[0],
                 "cron_next": cron_now[1],
                 "mode": "force_all" if self._force_all else "fill_empty",
+                # 侧栏入口开没开：数据页与配置对话框都按这一项说"入口在不在整理区"
+                "show_sidebar_nav": self._show_sidebar_nav,
                 "scraper_paths": self._scraper_paths,
                 "exclude_paths": self._exclude_paths,
                 # 识别来源回显两份：配置值（可能是 auto）和本轮真正生效的那个。

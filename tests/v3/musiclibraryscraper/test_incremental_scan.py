@@ -8,6 +8,7 @@ __is_complete 完全屏蔽。
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import inspect
 import re
@@ -759,11 +760,138 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(mls.MusicLibraryScraper.get_render_mode(), ("vue", "dist/assets"))
         self.assertEqual(self._plugin().get_page(), [])
 
+    def test_built_remote_entry_serves_app_page(self):
+        """侧栏 nav_key=main 时宿主按 ./AppPage → ./Page 找组件：只暴露 ./Page 的话
+        点入口会报「无法加载插件全页组件」，而这只有装了才看得见 —— 拿产物先断言一次。"""
+        entry = (_ROOT / "plugins.v3" / "musiclibraryscraper" / "dist" / "assets" / "remoteEntry.js")
+        if not entry.exists():
+            self.skipTest(f"{entry} 尚未构建")
+        text = entry.read_text(encoding="utf-8")
+        self.assertIn("'./AppPage'", text)
+        chunk = re.search(r"__federation_expose_AppPage-[A-Za-z0-9_-]+\.js", text)
+        self.assertIsNotNone(chunk, "./AppPage 暴露了但没有对应产物")
+        self.assertTrue((entry.parent / chunk.group(0)).exists())
+
     def test_api_declares_bear_auth(self):
         p = self._plugin()
         apis = p.get_api()
-        self.assertEqual({a["path"] for a in apis}, {"/status", "/files", "/retry", "/scan", "/edit"})
+        self.assertEqual({a["path"] for a in apis},
+                         {"/status", "/files", "/retry", "/scan", "/edit", "/config"})
         self.assertTrue(all(a["auth"] == "bear" for a in apis))
+
+    def test_sidebar_nav_is_an_organize_entry(self):
+        """入口落在「整理」而不是「发现」：这一区的插件都会动库里文件。
+
+        permission 跟这一区其他插件一致用 manage（会改文件的东西不该让只读账号看到入口），
+        order 33 紧贴音乐资源管理（32），不把字幕那一对（30、48）切开。
+        """
+        p = self._plugin()
+        p._enabled = True
+        nav = p.get_sidebar_nav()
+        self.assertEqual(len(nav), 1)
+        self.assertEqual(nav[0]["section"], "organize")
+        self.assertEqual(nav[0]["permission"], "manage")
+        self.assertEqual(nav[0]["nav_key"], "main")
+        self.assertEqual(nav[0]["order"], 33)
+
+    def test_sidebar_nav_needs_both_switches(self):
+        """停用插件或关掉入口都不投影 —— 宿主自己也会按 get_state 过滤，插件侧再收一道。"""
+        p = self._plugin()
+        p._enabled = False
+        self.assertEqual(p.get_sidebar_nav(), [])
+        p._enabled = True
+        p._show_sidebar_nav = False
+        self.assertEqual(p.get_sidebar_nav(), [])
+
+    def test_upgrading_without_the_key_keeps_the_entry(self):
+        """老装机的配置里没有 show_sidebar_nav：缺键按开。
+
+        默认按关的话，升级完入口"就没了"，而这次升级本来什么都没改变过。
+        """
+        p = mls.MusicLibraryScraper()
+        p.init_plugin({"enabled": True, "scraper_paths": "/music"})
+        self.assertTrue(p._show_sidebar_nav)
+        p.init_plugin({"enabled": True, "show_sidebar_nav": False, "scraper_paths": "/music"})
+        self.assertFalse(p._show_sidebar_nav)
+
+    # ---------------- 侧栏配置对话框那两条接口 ----------------
+
+    def _configured(self):
+        p = mls.MusicLibraryScraper()
+        p.init_plugin({
+            "enabled": True,
+            "scraper_paths": "/music",
+            "mtw_base_url": "http://mtw:8002",
+            "mtw_username": "u",
+            "mtw_password": "secret",
+            "min_score": 2,
+        })
+        p._configs.clear()
+        return p
+
+    @staticmethod
+    def _body(payload):
+        class _Req:
+            async def json(_self):
+                return payload
+        return _Req()
+
+    def test_get_config_does_not_leak_password(self):
+        """GET /config 回显可编辑配置，但不带回密码：只给"存没存过"。
+
+        侧栏对话框没有密码可读也要能保存，靠的是 POST 那边"留空即保留"，
+        不是把密码发到页面上 —— 宿主那条链路本来就把明文配置交回前端。
+        """
+        got = self._configured().api_get_config(None)
+        self.assertNotIn("mtw_password", got)
+        self.assertTrue(got["mtw_password_set"])
+        self.assertEqual(got["mtw_username"], "u")
+        self.assertFalse(got["onlyonce"])
+
+    def test_post_config_keeps_everything_not_in_the_payload(self):
+        """只改传上来的键：改一个分数不该顺手清空密码、库路径或 MTW 地址。
+
+        这条路径绕开宿主「插件管理 → 配置」的整体替换，全量写回由插件自己做，
+        所以底必须先拿当前配置垫上；密码那格留空同样算"没改"（表单不回填密码）。
+        """
+        p = self._configured()
+        res = asyncio.run(p.api_config(self._body({"min_score": 3, "mtw_password": ""})))
+        self.assertTrue(res["ok"])
+        written = p._configs[-1]
+        self.assertEqual(written["min_score"], 3)
+        self.assertEqual(written["mtw_password"], "secret")
+        self.assertEqual(written["mtw_base_url"], "http://mtw:8002")
+        self.assertEqual(written["scraper_paths"], "/music")
+
+    def test_post_config_drops_unknown_keys(self):
+        """认不出来的键不写进配置：免得留下表单没定义、配置里却存在的野键。"""
+        p = self._configured()
+        asyncio.run(p.api_config(self._body({"mtw_password_set": True, "typo_key": 1})))
+        written = p._configs[-1]
+        self.assertNotIn("typo_key", written)
+        self.assertNotIn("mtw_password_set", written)
+
+    def test_post_config_rejects_a_non_object_body(self):
+        """请求体不是 JSON 对象时说一句能懂的话，而不是抛到宿主 API 层。"""
+        p = self._configured()
+        for bad in ([{"min_score": 1}], "not json"):
+            class _Req:
+                async def json(_self):
+                    if isinstance(bad, str):
+                        raise ValueError(bad)
+                    return bad
+            res = asyncio.run(p.api_config(_Req()))
+            self.assertFalse(res["ok"])
+        self.assertEqual(p._configs, [])
+
+    def test_post_config_clears_password_only_when_given_one(self):
+        """只有显式给了密码才替换：这一项改错了会让 MTW 模式整轮 401。"""
+        p = self._configured()
+        p._token = "上一个实例签发的"
+        asyncio.run(p.api_config(self._body({"mtw_password": "fresh"})))
+        self.assertEqual(p._configs[-1]["mtw_password"], "fresh")
+        # 换了凭据要丢掉缓存的令牌，继续带它请求只会白吃一次 401
+        self.assertIsNone(p._token)
 
     def test_data_page_translates_footer_and_status(self):
         """数据页不能漏 Vuetify 默认英文文案，且页脚文案必须走 Vuetify 3 的直传 props。

@@ -1,0 +1,8 @@
+
+/* 仅插件内局部样式；含 .v- 的选择器会被构建的 postcss 门禁整条删掉，所以只碰自己的类。 */
+.mls-app[data-v-08b5c1c6] { width: 100%;
+}
+.mls-config-dialog[data-v-08b5c1c6] {
+  border-radius: 14px;
+  background: rgb(var(--v-theme-surface));
+}

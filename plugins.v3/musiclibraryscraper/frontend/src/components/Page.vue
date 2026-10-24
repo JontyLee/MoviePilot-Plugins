@@ -150,6 +150,10 @@ async function refresh() {
   emit('action')
 }
 
+// 侧栏全页（./AppPage）把这一页嵌进去用：配置对话框关掉后要能刷新，
+// 又不必重挂组件（重挂会把选中的那一桶、页码、搜索一起丢掉）。
+defineExpose({ refresh })
+
 function selectView(key: View) {
   view.value = key
   if (key === 'overview') return
