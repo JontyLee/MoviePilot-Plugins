@@ -1,3 +1,11 @@
+const _export_sfc = (sfc, props) => {
+  const target = sfc.__vccOpts || sfc;
+  for (const [key, val] of props) {
+    target[key] = val;
+  }
+  return target;
+};
+
 const TASK_ACTIONS = [
   { title: "播放歌单", value: "play_playlist" },
   { title: "歌单从某首播", value: "play_playlist_from" },
@@ -67,4 +75,4 @@ function query(params) {
   return pairs.length ? `?${pairs.join("&")}` : "";
 }
 
-export { MODE_ITEMS as M, TASK_ACTIONS as T, WEEK_DAYS as W, activeLine as a, fmtSize as b, fmtTime as c, fmtSeconds as f, modeText as m, query as q, statusColor as s, taskNeedsPlaylist as t };
+export { MODE_ITEMS as M, TASK_ACTIONS as T, WEEK_DAYS as W, _export_sfc as _, activeLine as a, fmtSize as b, fmtTime as c, fmtSeconds as f, modeText as m, query as q, statusColor as s, taskNeedsPlaylist as t };

@@ -1,9 +1,8 @@
 <script setup lang="ts">
 import { ref, computed, inject, onMounted, onUnmounted, watch } from 'vue'
-import ConfigForm from './ConfigForm.vue'
+import Config from './Config.vue'
 import {
   type Status,
-  type LoginResult,
   type Browse,
   type Search,
   type Device,
@@ -16,7 +15,6 @@ import {
   type PlaylistResult,
   type PlaylistRow,
   type SongResult,
-  type CommandRow,
   type VoiceRecord,
   type GroupRow,
   type LyricResult,
@@ -28,9 +26,6 @@ import {
   fmtTime,
   modeText,
   MODE_ITEMS,
-  TASK_ACTIONS,
-  WEEK_DAYS,
-  taskNeedsPlaylist,
   activeLine,
   query
 } from './types'
@@ -50,8 +45,8 @@ const props = defineProps({
   sourcePluginId: { type: String, default: '' }
 })
 
-// 侧栏全页宿主只接 action 这一个事件（见联邦组件规范 5.4），配置就在本页的
-// 「配置」栏里改，不需要向宿主请求切换。
+// 侧栏全页只报动作给宿主（见联邦组件规范 5.4）：这一页只看运行情况，
+// 配置与登录都在本页自己开的「插件配置」对话框里改。
 const emit = defineEmits(['action'])
 
 const base = computed(() => `plugin/${props.pluginId || props.sourcePluginId}`)
@@ -97,8 +92,8 @@ const loading = ref(false)
 const busy = ref<string>('')
 const snackbar = ref({ show: false, text: '', color: 'info' })
 
-type Pane = 'play' | 'library' | 'songs' | 'tasks' | 'voice' | 'account' | 'config'
-const pane = ref<Pane>('play')
+type Pane = 'overview' | 'play' | 'library' | 'songs' | 'tasks' | 'voice'
+const pane = ref<Pane>('overview')
 
 // ---------------- 读取 ----------------
 
@@ -106,6 +101,18 @@ const cfg = computed(() => status.value.config)
 const playing = computed(() => status.value.playing)
 const queue = computed(() => status.value.queue)
 const devices = computed<Device[]>(() => status.value.devices || [])
+const onlineCount = computed(() => devices.value.filter(d => d.presence === 'online').length)
+const needsMusicApiCount = computed(() => devices.value.filter(d => d.needs_music_api).length)
+// 配置里那台可能已经不在本账号的设备列表里（换账号、音箱解绑），那时只剩裸 ID 可读，
+// 总览里宁可写成「不在列表里」也别让人以为它还在
+const defaultDeviceName = computed(() => {
+  const id = cfg.value.default_device_id
+  if (!id) return devices.value.find(d => d.presence === 'online')?.name
+    || devices.value.find(d => d.presence === 'online')?.alias
+    || '（没有在线音箱）'
+  const hit = devices.value.find(d => d.device_id === id)
+  return hit ? (hit.name || hit.alias || hit.device_id) : `${id}（不在当前设备列表里）`
+})
 const needs = computed(() => status.value.needs || [])
 const notices = computed(() => status.value.notices || [])
 
@@ -183,6 +190,25 @@ function stopPolling() {
     clearInterval(timer)
     timer = null
   }
+}
+
+// ---------------- 插件配置 ----------------
+
+// 配置与登录都在这一个对话框里改（照豆瓣中心把「看运行」和「改配置」分开的做法）。
+// 打开时停掉本页的 5 秒轮询：两处同时刷同一批状态没有意义，关掉时再补一次。
+const configDialog = ref(false)
+
+watch(configDialog, (open) => {
+  if (open) {
+    stopPolling()
+    return
+  }
+  void loadStatus(false)
+  startPolling()
+})
+
+function onConfigUpdated() {
+  void loadStatus(false)
 }
 
 // ---------------- 播放 ----------------
@@ -310,150 +336,20 @@ function toggleLyric() {
   else lyric.value = null
 }
 
-// ---------------- 设备分组 ----------------
+// ---------------- 设备分组（只读） ----------------
 
+// 分组怎么建、哪台音箱进哪一组都是配置，在「插件配置」里改；这里只把它当成
+// 「这一组会一起响」的运行情况列出来给人看，别在两个地方都能编辑。
 const groups = computed<GroupRow[]>(() => (status.value.extra?.groups as GroupRow[]) || [])
 const defaultGroup = computed<string>(() => String(status.value.extra?.default_group || ''))
-const groupForm = ref<{ name: string; device_ids: string[] }>({ name: '', device_ids: [] })
-const editingGroup = ref('')
 
-const groupDeviceItems = computed(() => devices.value.map((item) => ({
-  title: item.name || item.alias || item.device_id,
-  value: item.device_id
-})))
+// ---------------- 定时任务（运行情况） ----------------
 
-function newGroup() {
-  editingGroup.value = ''
-  groupForm.value = { name: '', device_ids: [] }
-}
-
-function editGroup(row: GroupRow) {
-  editingGroup.value = row.name
-  groupForm.value = { name: row.name, device_ids: [...row.device_ids] }
-}
-
-async function saveGroup() {
-  const name = groupForm.value.name.trim()
-  if (!name) {
-    notify('先给分组起个名字', 'warning')
-    return
-  }
-  if (groupForm.value.device_ids.length < 2) {
-    notify('分组至少要有两台音箱才有意义', 'warning')
-    return
-  }
-  const res = await post('/groups', { name, device_ids: groupForm.value.device_ids }, '保存分组')
-  if (res && res.ok !== false) {
-    editingGroup.value = ''
-    groupForm.value = { name: '', device_ids: [] }
-  }
-}
-
-function removeGroup(name: string) {
-  return post('/groups', { name, remove: true }, '删除分组').then(() => {
-    if (editingGroup.value === name) newGroup()
-  })
-}
-
-// ---------------- 定时任务 ----------------
-
+// 任务怎么定义（做什么、哪几天、哪台音箱、播什么歌单）在「插件配置」里改；
+// 这一页只回答「它跑没跑、下一次是什么时候」，外加启停与立即执行这两个动作。
 const tasks = computed<TaskRow[]>(() => (status.value.extra?.tasks as TaskRow[]) || [])
 const taskLogs = computed<TaskLogRow[]>(() => (status.value.extra?.task_logs as TaskLogRow[]) || [])
-const taskActions = TASK_ACTIONS
-const weekDays = WEEK_DAYS
-const monthDays = Array.from({ length: 31 }, (_unused, i) => i + 1)
-
-function emptyTask() {
-  return {
-    name: '',
-    enabled: true,
-    action: 'play_playlist',
-    schedule: { type: 'weekly', time: '07:00', weekdays: [1, 2, 3, 4, 5] as number[], monthdays: [1] as number[] },
-    target: { all: false, device_ids: [] as string[] },
-    params: { playlist_name: '', song_name: '', start: 'first', play_mode: '',
-              volume: null as number | null, stop_after_minutes: null as number | null }
-  }
-}
-
-const taskForm = ref(emptyTask())
-const editingTask = ref('')
-
-function newTask() {
-  editingTask.value = ''
-  taskForm.value = emptyTask()
-}
-
-function editTask(row: TaskRow) {
-  editingTask.value = row.id
-  taskForm.value = {
-    name: row.name,
-    enabled: row.enabled,
-    action: row.action,
-    schedule: {
-      type: row.schedule?.type || 'weekly',
-      time: row.schedule?.time || '07:00',
-      weekdays: [...(row.schedule?.weekdays || [])],
-      monthdays: [...(row.schedule?.monthdays || [])]
-    },
-    target: { all: !!row.target?.all, device_ids: [...(row.target?.device_ids || [])] },
-    params: {
-      playlist_name: row.params?.playlist_name || '',
-      song_name: row.params?.song_name || '',
-      start: row.params?.start || 'first',
-      play_mode: row.params?.play_mode || '',
-      volume: row.params?.volume ?? null,
-      stop_after_minutes: row.params?.stop_after_minutes ?? null
-    }
-  }
-}
-
-function toggleIn(list: number[], value: number) {
-  const at = list.indexOf(value)
-  if (at >= 0) list.splice(at, 1)
-  else list.push(value)
-}
-
-async function saveTask() {
-  const form = taskForm.value
-  if (!form.name.trim()) {
-    notify('先给任务起个名字', 'warning')
-    return
-  }
-  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(form.schedule.time.trim())) {
-    notify('时间要写成 HH:MM，比如 07:00', 'warning')
-    return
-  }
-  const key = form.schedule.type === 'monthly' ? 'monthdays' : 'weekdays'
-  if (!form.schedule[key].length) {
-    notify(form.schedule.type === 'monthly' ? '勾出每月哪几天' : '勾出每周哪几天', 'warning')
-    return
-  }
-  if (taskNeedsPlaylist(form.action) && !form.params.playlist_name.trim()) {
-    notify('播放歌单的任务要先选中歌单（歌单来自曲库索引）', 'warning')
-    return
-  }
-  const res = await post('/tasks', {
-    id: editingTask.value || undefined,
-    name: form.name.trim(),
-    enabled: form.enabled,
-    action: form.action,
-    schedule: { type: form.schedule.type, time: form.schedule.time.trim(),
-                weekdays: [...form.schedule.weekdays].sort((a, b) => a - b),
-                monthdays: [...form.schedule.monthdays].sort((a, b) => a - b) },
-    target: { all: form.target.all, device_ids: form.target.all ? [] : [...form.target.device_ids] },
-    params: { ...form.params }
-  }, '保存定时任务')
-  if (res && res.ok !== false) {
-    editingTask.value = ''
-    taskForm.value = emptyTask()
-  }
-}
-
-function removeTask(row: TaskRow) {
-  return post('/tasks', { id: row.id, remove: true }, '删除定时任务').then(() => {
-    if (editingTask.value === row.id) newTask()
-  })
-}
+const enabledTasks = computed(() => tasks.value.filter(row => row.enabled).length)
 
 function toggleTask(row: TaskRow) {
   return post('/tasks', { ...row, enabled: !row.enabled }, row.enabled ? '停用任务' : '启用任务')
@@ -485,14 +381,6 @@ function queueDirectory() {
 
 function jumpTo(index: number) {
   return post('/control', { action: String(index) }, '切曲')
-}
-
-function selectDevice(device: Device) {
-  return post('/device/select', { device_id: device.device_id }, '设为默认')
-}
-
-function clearDefault() {
-  return post('/device/select', { device_id: '' }, '取消默认音箱')
 }
 
 // ---------------- 播放方式、定时、收藏 ----------------
@@ -610,133 +498,6 @@ function queuePlaylistSongs() {
   return post('/queue', { paths, index: 0 }, '歌单入队')
 }
 
-// ---------------- 登录 ----------------
-
-const loginForm = ref({ username: '', password: '' })
-const loginResult = ref<LoginResult | null>(null)
-const verifyCode = ref('')
-const manualToken = ref('')
-const showManual = ref(false)
-// 登录成功后自动把音箱列表端上来：这一栏原来的毛病是登完了还得自己滚下去点「刷新设备」才知道有哪些音箱
-const picker = ref(false)
-
-// 候选按「当前默认 → 在线 → 其余」排：刚登完时最有用的那台要在最上面。
-// 下面那块设备总览不重排，保持小米云端返回的顺序，方便跟音箱上的名字对照着找。
-const pickerDevices = computed<Device[]>(() => devices.value.slice().sort((a, b) => {
-  const rank = (d: Device) => (d.is_default ? 0 : d.presence === 'online' ? 1 : 2)
-  return rank(a) - rank(b)
-}))
-
-const loginStates: Record<string, { color: string; text: string }> = {
-  success: { color: 'success', text: '登录成功' },
-  need_captcha: { color: 'warning', text: '卡在图形验证码：照上面的图填验证码提交' },
-  need_verify: { color: 'warning', text: '卡在二次校验：把小米发到手机/邮箱的验证码填进来提交' },
-  failed: { color: 'error', text: '登录失败' }
-}
-
-const loginState = computed(() => loginStates[loginResult.value?.state || ''] || null)
-
-async function startLogin() {
-  busy.value = '登录'
-  try {
-    const res: LoginResult = await (props.api as MoviePilotApi).post(`${base.value}/login`, {
-      username: loginForm.value.username.trim(),
-      password: loginForm.value.password
-    })
-    afterLogin(res)
-  } catch (e: any) {
-    notify(`登录请求失败：${e?.message || e}`, 'error')
-  } finally {
-    busy.value = ''
-  }
-}
-
-async function submitVerify() {
-  const code = verifyCode.value.trim()
-  if (!code) {
-    notify('填写验证码', 'warning')
-    return
-  }
-  busy.value = '提交验证码'
-  try {
-    const res: LoginResult = await (props.api as MoviePilotApi).post(`${base.value}/login`, { code })
-    afterLogin(res)
-  } catch (e: any) {
-    notify(`验证码提交失败：${e?.message || e}`, 'error')
-  } finally {
-    busy.value = ''
-  }
-}
-
-async function submitManual() {
-  const raw = manualToken.value.trim()
-  if (!raw) {
-    notify('把整串 cookie 粘进来（要包含 userId 与 serviceToken）', 'warning')
-    return
-  }
-  busy.value = '校验票据'
-  try {
-    const res: LoginResult = await (props.api as MoviePilotApi).post(
-      `${base.value}/login`, { manual_token: raw }
-    )
-    afterLogin(res)
-  } catch (e: any) {
-    notify(`票据校验失败：${e?.message || e}`, 'error')
-  } finally {
-    busy.value = ''
-  }
-}
-
-async function afterLogin(res: LoginResult) {
-  loginResult.value = res || null
-  verifyCode.value = ''
-  if (res?.state === 'success') {
-    notify(res.message || '登录成功', 'success')
-    loginForm.value.password = ''
-    showManual.value = false
-    manualToken.value = ''
-    await loadStatus(false)
-    // 后端登录成功时已经强制刷过一遍设备，这里只负责把它直接端到人面前，
-    // 不用再滚下去点一次「刷新设备」
-    if (devices.value.length) picker.value = true
-    else notify('登录成功，但这个账号下没取到音箱设备', 'warning')
-    return
-  }
-  if (res?.state === 'need_captcha' || res?.state === 'need_verify') {
-    notify(res.message || '需要验证码', 'warning')
-    return
-  }
-  notify(res?.message || '登录失败', 'error')
-}
-
-function pickDevice(device: Device) {
-  picker.value = false
-  return selectDevice(device)
-}
-
-async function doLogout() {
-  const res = await post('/logout', {}, '退出登录')
-  if (res) {
-    loginResult.value = null
-    picker.value = false
-    loginForm.value = { username: loginForm.value.username, password: '' }
-  }
-}
-
-async function refreshDevices() {
-  busy.value = '刷新设备'
-  try {
-    const res = await (props.api as MoviePilotApi).get(`${base.value}/devices`)
-    if (res?.message && !res?.devices?.length) notify(`设备刷新失败：${res.message}`, 'warning')
-    else notify(`设备列表已刷新，共 ${(res?.devices || []).length} 台`)
-    await loadStatus(false)
-  } catch (e: any) {
-    notify(`设备刷新失败：${e?.message || e}`, 'error')
-  } finally {
-    busy.value = ''
-  }
-}
-
 // ---------------- 音乐库 ----------------
 
 const browse = ref<Browse>({ cwd: '', parent: '', roots: [], dirs: [], files: [], reason: '', truncated: false })
@@ -812,7 +573,6 @@ async function refreshLibrary() {
 
 const voiceRecords = ref<VoiceRecord[]>([])
 const voiceCommandsOn = ref<string[]>([])
-const commandRows = ref<CommandRow[]>([])
 const testText = ref('')
 const testExecute = ref(false)
 const testResult = ref<VoiceState | null>(null)
@@ -837,34 +597,8 @@ async function loadVoiceDetail() {
     voiceRecords.value = res?.records || []
     voiceCommandsOn.value = res?.commands || []
     testResult.value = res ? { ...res, records: [] } : null
-    if (res && !commandRows.value.length) await loadCommands()
   } catch (e: any) {
     notify(`语音状态读取失败：${e?.message || e}`, 'error')
-  }
-}
-
-async function loadCommands() {
-  try {
-    const res = await (props.api as MoviePilotApi).get(`${base.value}/commands`)
-    commandRows.value = res?.items || []
-  } catch (e: any) {
-    notify(`口令表读取失败：${e?.message || e}`, 'error')
-  }
-}
-
-async function saveCommands() {
-  busy.value = '保存口令开关'
-  try {
-    const res = await (props.api as MoviePilotApi).post(`${base.value}/commands`, {
-      enabled: commandRows.value.filter(row => row.enabled).map(row => row.kind)
-    })
-    commandRows.value = res?.items || commandRows.value
-    voiceCommandsOn.value = commandRows.value.filter(row => row.enabled).map(row => row.kind)
-    notify(`口令表已保存，启用 ${voiceCommandsOn.value.length} 类`)
-  } catch (e: any) {
-    notify(`口令表保存失败：${e?.message || e}`, 'error')
-  } finally {
-    busy.value = ''
   }
 }
 
@@ -900,9 +634,6 @@ async function switchPane(next: Pane) {
   pane.value = next
   if (next === 'songs') {
     await Promise.all([loadPlaylists(), loadFavorites()])
-  } else if (next === 'tasks') {
-    // 任务表单里的歌单下拉要用索引里的歌单名，没加载过就先捞一次
-    if (!playlists.value.length) await loadPlaylists()
   } else if (next === 'voice') {
     await loadVoiceDetail()
   }
@@ -916,24 +647,24 @@ onMounted(async () => {
 
 onUnmounted(stopPolling)
 
+// 侧栏只讲「现在跑得怎么样」：登录、默认音箱、口令表、任务定义这些都归配置页
 const paneItems: { key: Pane; title: string; icon: string; desc: string }[] = [
+  { key: 'overview', title: '运行总览', icon: 'mdi-view-dashboard-outline', desc: '登录、音箱、监听、曲库索引与直链地址现在是什么状态' },
   { key: 'play', title: '播放台', icon: 'mdi-speaker', desc: '当前播放、队列连播、播放方式、歌词、定时停止、音量与播报' },
   { key: 'library', title: '音乐库', icon: 'mdi-folder-music-outline', desc: '浏览库内目录与搜索文件名，点一首直接推到音箱' },
   { key: 'songs', title: '歌单与收藏', icon: 'mdi-playlist-play', desc: '目录歌单与 m3u 歌单、收藏列表，整本入队播放' },
-  { key: 'tasks', title: '定时任务', icon: 'mdi-clock-outline', desc: '到点自动播歌单、停止、调音量，含立即执行与日志' },
-  { key: 'voice', title: '语音控制', icon: 'mdi-microphone-message', desc: '小爱对话监听、口令表与试一句话' },
-  { key: 'account', title: '账号与设备', icon: 'mdi-account-circle-outline', desc: '小米账号登录、音箱列表、默认音箱与设备分组' },
-  { key: 'config', title: '配置', icon: 'mdi-cog-outline', desc: '音乐库范围、外部访问地址、播放接口与语音参数' }
+  { key: 'tasks', title: '定时任务', icon: 'mdi-clock-outline', desc: '哪几条在等触发、上一次跑成什么样，可启停与立即执行' },
+  { key: 'voice', title: '语音控制', icon: 'mdi-microphone-message', desc: '监听开没开、听到了什么、试一句话' }
 ]
 
 const currentPane = computed(() => paneItems.find(p => p.key === pane.value) || paneItems[0])
 
-// 侧栏条目右边的小数字：一眼能看出「有几台音箱」「队列里堆了多少首」「监听抓了几句」，
+// 侧栏条目右边的小数字：一眼能看出「队列里堆了多少首」「监听抓了几句」，
 // 0 就不显示，免得整列都是灰色的零
 function paneBadge(key: Pane): number {
-  if (key === 'account') return devices.value.length
   if (key === 'play') return queue.value.total || 0
   if (key === 'voice') return voice.value.handled || 0
+  if (key === 'tasks') return enabledTasks.value
   return 0
 }
 </script>
@@ -967,6 +698,9 @@ function paneBadge(key: Pane): number {
       </div>
       <v-btn icon="mdi-refresh" size="small" variant="text" :loading="loading || !!busy"
              @click="loadStatus()" />
+      <v-btn size="small" variant="tonal" class="text-none ml-1" prepend-icon="mdi-cog-outline"
+             @click="configDialog = true">插件配置
+      </v-btn>
     </div>
 
     <v-alert v-if="needs.length || notices.length" type="info" variant="tonal"
@@ -976,6 +710,11 @@ function paneBadge(key: Pane): number {
       </div>
       <div v-for="item in notices" :key="'m' + item" class="text-caption text-grey-darken-1">
         {{ item }}
+      </div>
+      <div class="mt-1">
+        <v-btn size="x-small" variant="text" class="text-none" prepend-icon="mdi-cog-outline"
+               @click="configDialog = true">到插件配置里处理
+        </v-btn>
       </div>
     </v-alert>
 
@@ -1004,6 +743,176 @@ function paneBadge(key: Pane): number {
         <div class="xai-pane-title">
           <span class="xai-pane-name">{{ currentPane.title }}</span>
           <span class="xai-pane-desc">{{ currentPane.desc }}</span>
+        </div>
+
+        <!-- 运行总览：只看跑得怎么样，一律不给输入框 -->
+        <div v-show="pane === 'overview'" class="xai-pane">
+          <div class="xai-ov">
+            <div class="xai-ov-card">
+              <div class="xai-ov-head">
+                <v-icon size="17" :icon="status.logged_in ? 'mdi-account-check-outline' : 'mdi-account-alert-outline'"
+                        :color="status.token_expired ? 'error' : status.logged_in ? 'success' : 'warning'" />
+                小米账号
+                <v-spacer />
+                <span class="xai-pill"
+                      :class="`xai-pill-${status.token_expired ? 'error' : status.logged_in ? 'ok' : 'warn'}`">
+                  {{ status.token_expired ? '票据过期' : status.logged_in ? '已登录' : '未登录' }}
+                </span>
+              </div>
+              <div class="xai-ov-line">
+                {{ status.logged_in ? (cfg.username_set ? cfg.username : '（未记录账号名）') : '还没有可用的登录票据' }}
+                <span v-if="status.manual_token" class="text-caption text-grey">｜手工粘贴的 cookie</span>
+              </div>
+              <div class="xai-ov-sub">
+                <template v-if="status.logged_in">票据保存于 {{ status.token_saved_at || '-' }}</template>
+                <template v-else>登录、账号密码与设备分组只在「插件配置」里做，这里不重复一遍</template>
+              </div>
+            </div>
+
+            <div class="xai-ov-card">
+              <div class="xai-ov-head">
+                <v-icon size="17" icon="mdi-speaker-multiple" :color="devices.length ? 'success' : 'grey'" />
+                音箱
+                <v-spacer />
+                <span class="xai-pill" :class="`xai-pill-${devices.length ? 'ok' : 'warn'}`">
+                  {{ devices.length ? `${devices.length} 台 / ${onlineCount} 台在线` : '没有设备' }}
+                </span>
+              </div>
+              <div class="xai-ov-line">
+                默认：{{ defaultDeviceName }}
+                <span v-if="!cfg.default_device_id" class="text-caption text-grey">（未指定，落第一台在线）</span>
+              </div>
+              <div v-if="groups.length" class="xai-ov-sub">
+                分组 {{ groups.length }} 组：{{ groups.map(g => `${g.name}(${g.devices.length || g.device_ids.length})`).join('、') }}
+              </div>
+              <div v-if="needsMusicApiCount" class="xai-ov-sub text-warning">
+                {{ needsMusicApiCount }} 台只支持 play_music，直链可能被当成电台播放
+              </div>
+            </div>
+
+            <div class="xai-ov-card">
+              <div class="xai-ov-head">
+                <v-icon size="17" :icon="playing.status === 1 ? 'mdi-play-circle-outline' : 'mdi-pause-circle-outline'"
+                        :color="statusColor(playing.status) === 'success' ? 'success' : 'grey'" />
+                正在播
+                <v-spacer />
+                <span class="xai-pill" :class="`xai-pill-${playing.status === 1 ? 'ok' : 'idle'}`">
+                  {{ playing.status_text }}
+                </span>
+              </div>
+              <div class="xai-ov-line text-truncate" :title="playing.title || playing.path">
+                {{ playing.title || playing.path || playing.url || '音箱上没有在放的东西' }}
+              </div>
+              <div class="xai-ov-sub">
+                {{ playing.device_name || '无设备' }}｜队列 {{ queue.total }} 首<template v-if="queue.total">
+                  （第 {{ queue.index + 1 }} 首）</template>｜{{ modeText(queue.mode || 'order') }}｜
+                连播{{ queue.auto_next ? '开' : '关' }}
+                <template v-if="timerState.active">｜定时停止 {{ timerState.remaining || '已登记' }}</template>
+              </div>
+              <div v-if="playing.error" class="xai-ov-sub text-error">{{ playing.error }}</div>
+            </div>
+
+            <div class="xai-ov-card">
+              <div class="xai-ov-head">
+                <v-icon size="17" icon="mdi-microphone-message" :color="voice.enabled ? 'success' : 'grey'" />
+                语音监听
+                <v-spacer />
+                <span class="xai-pill" :class="`xai-pill-${voice.enabled ? 'ok' : 'idle'}`">
+                  {{ voice.enabled ? '监听中' : '未开启' }}
+                </span>
+              </div>
+              <div class="xai-ov-line">
+                {{ voice.enabled
+                   ? `每 ${voice.interval} 秒读一轮 · 已接手 ${voice.handled} 句 · 上次轮询 ${voice.last_poll_at || '-'}`
+                   : '插件不读小米的对话记录接口' }}
+              </div>
+              <div class="xai-ov-sub">
+                生效口令 {{ voiceCommandsOn.length }} 类
+                <template v-if="voice.chat">｜AI 对话{{ voice.chat_active ? '窗口开着' : '已配（窗口未开）' }}</template>
+                <template v-if="voice.devices.length">｜监听 {{ voice.devices.join('、') }}</template>
+              </div>
+              <div v-if="voice.error" class="xai-ov-sub text-error">{{ voice.error }}</div>
+            </div>
+
+            <div class="xai-ov-card">
+              <div class="xai-ov-head">
+                <v-icon size="17"
+                        :icon="library.ready ? 'mdi-database-marker-outline' : 'mdi-database-refresh-outline'"
+                        :color="library.ready ? 'success' : 'grey'" />
+                曲库索引
+                <v-spacer />
+                <span class="xai-pill" :class="`xai-pill-${library.ready ? 'ok' : 'warn'}`">
+                  {{ library.ready ? `${library.songs} 首` : '尚未建立' }}
+                </span>
+              </div>
+              <div class="xai-ov-line">
+                {{ library.ready ? `${library.playlists} 个歌单｜语音点歌可用` : '语音点歌还点不到歌' }}
+              </div>
+              <div class="xai-ov-sub">
+                <template v-if="library.ready">上次扫描 {{ library.scanned_at || library.built_at || '-' }}</template>
+                <template v-else>第一次扫描由语音轮询带着跑，也可以去「音乐库」那栏手动重建</template>
+                <template v-if="library.truncated">｜条目超上限被截断</template>
+                <template v-if="library.skipped">｜跳过 {{ library.skipped }} 个</template>
+              </div>
+              <div v-if="library.error" class="xai-ov-sub text-error">{{ library.error }}</div>
+            </div>
+
+            <div class="xai-ov-card">
+              <div class="xai-ov-head">
+                <v-icon size="17" icon="mdi-link-variant"
+                        :color="cfg.base_url_effective ? 'success' : 'error'" />
+                音箱取流地址
+                <v-spacer />
+                <span class="xai-pill" :class="`xai-pill-${cfg.base_url_effective ? 'ok' : 'error'}`">
+                  {{ cfg.base_url_effective ? '可用' : '拿不到' }}
+                </span>
+              </div>
+              <div class="xai-ov-line text-truncate" :title="cfg.base_url_effective">
+                {{ cfg.base_url_effective || '没有可用地址，音箱必然拉不到流' }}
+              </div>
+              <div class="xai-ov-sub">
+                <template v-if="cfg.base_url_source">来自 {{ cfg.base_url_source }}</template>
+                ｜库内 {{ cfg.dir_count }} 个目录
+                <template v-if="cfg.missing_dirs?.length">｜读不到：{{ cfg.missing_dirs.join('、') }}</template>
+              </div>
+            </div>
+
+            <div class="xai-ov-card">
+              <div class="xai-ov-head">
+                <v-icon size="17" icon="mdi-clock-outline" :color="enabledTasks ? 'success' : 'grey'" />
+                定时任务
+                <v-spacer />
+                <span class="xai-pill" :class="`xai-pill-${enabledTasks ? 'ok' : 'idle'}`">
+                  {{ enabledTasks ? `${enabledTasks}/${tasks.length} 条待触发` : '没有启用的任务' }}
+                </span>
+              </div>
+              <div class="xai-ov-line text-truncate">
+                <template v-if="tasks.length">
+                  {{ tasks.slice(0, 3).map(t => `${t.name}（${t.rule}）`).join('、') }}
+                  <template v-if="tasks.length > 3">｜另 {{ tasks.length - 3 }} 条</template>
+                </template>
+                <template v-else>还没建任务，去「插件配置」里建</template>
+              </div>
+              <div class="xai-ov-sub">
+                <template v-if="taskLogs.length">
+                  最近一次：{{ taskLogs[0].at }} {{ taskLogs[0].task_name }}
+                  —— {{ taskLogs[0].success ? '成功' : '失败' }}
+                </template>
+                <template v-else>还没有执行记录</template>
+              </div>
+            </div>
+          </div>
+
+          <div class="xai-block">
+            <div class="d-flex align-center" style="gap: 8px; flex-wrap: wrap">
+              <v-btn size="small" variant="tonal" color="primary" prepend-icon="mdi-cog-outline"
+                     class="text-none" @click="configDialog = true">打开插件配置
+              </v-btn>
+              <span class="text-caption text-grey">
+                这一页只读运行情况和做播放动作；账号、默认音箱、口令表、任务定义与其他配置都在配置页改。
+              </span>
+            </div>
+          </div>
         </div>
 
         <!-- 播放台 -->
@@ -1394,7 +1303,7 @@ function paneBadge(key: Pane): number {
             <span class="text-caption text-grey ml-2">{{ tasks.length }} 条</span>
           </div>
           <div v-if="!tasks.length" class="text-caption text-grey mb-2">
-            还没有任务。下面建一条：到点由插件的周期巡检触发（20 秒一次，同一分钟只跑一次）。
+            还没有任务：到「插件配置」的定时任务那一节建一条，到点由插件的周期巡检触发（20 秒一次，同一分钟只跑一次）。
           </div>
           <v-card v-for="row in tasks" :key="row.id" variant="outlined" class="xai-card pa-3 mb-2">
             <div class="d-flex align-center" style="gap: 10px; flex-wrap: wrap">
@@ -1408,88 +1317,23 @@ function paneBadge(key: Pane): number {
                 <div class="text-caption text-grey">
                   {{ row.rule }}｜{{ row.target.all ? '全部在线音箱'
                      : (row.target.device_ids.length ? `${row.target.device_ids.length} 台指定音箱` : '默认音箱') }}
-                  <template v-if="taskNeedsPlaylist(row.action)">｜歌单 {{ row.params?.playlist_name || row.params?.playlist_id || '（未选）' }}</template>
+                  <template v-if="row.params?.playlist_name || row.params?.playlist_id">
+                    ｜歌单 {{ row.params.playlist_name || row.params.playlist_id }}
+                  </template>
                 </div>
               </div>
               <v-btn size="x-small" variant="text" color="primary" :loading="busy === '立即执行'"
                      @click="runTask(row)">立即执行</v-btn>
-              <v-btn size="x-small" variant="text" @click="editTask(row)">编辑</v-btn>
-              <v-btn size="x-small" variant="text" color="error" :loading="busy === '删除定时任务'"
-                     @click="removeTask(row)">删除</v-btn>
             </div>
           </v-card>
 
-          <v-card variant="outlined" class="xai-card pa-3 mt-3">
-            <div class="xai-block-title">{{ editingTask ? `编辑任务「${editingTask}」` : '新建任务' }}</div>
-            <div class="d-flex" style="gap: 8px; flex-wrap: wrap">
-              <v-text-field v-model="taskForm.name" density="compact" hide-details clearable label="任务名"
-                            placeholder="早上起床放歌" style="min-width: 180px; flex: 1 1 180px" />
-              <v-select v-model="taskForm.action" :items="taskActions" density="compact" hide-details
-                        label="做什么" style="min-width: 160px" />
-              <v-text-field v-model="taskForm.schedule.time" density="compact" hide-details
-                            label="时间 HH:MM" placeholder="07:00" style="width: 110px" />
-              <v-btn-toggle v-model="taskForm.schedule.type" density="compact" mandatory>
-                <v-btn value="weekly" size="small" variant="text">按星期</v-btn>
-                <v-btn value="monthly" size="small" variant="text">按几号</v-btn>
-              </v-btn-toggle>
-              <v-checkbox v-model="taskForm.enabled" label="启用" density="compact" hide-details />
-            </div>
-
-            <div v-if="taskForm.schedule.type === 'weekly'" class="xai-days mt-2">
-              <v-chip v-for="(label, day) in weekDays" :key="day" size="small" class="xai-mode"
-                      :variant="taskForm.schedule.weekdays.includes(day) ? 'flat' : 'outlined'"
-                      :color="taskForm.schedule.weekdays.includes(day) ? 'primary' : 'default'"
-                      @click="toggleIn(taskForm.schedule.weekdays, day)">{{ label }}</v-chip>
-            </div>
-            <div v-else class="xai-days mt-2">
-              <v-chip v-for="day in monthDays" :key="day" size="small" class="xai-mode"
-                      :variant="taskForm.schedule.monthdays.includes(day) ? 'flat' : 'outlined'"
-                      :color="taskForm.schedule.monthdays.includes(day) ? 'primary' : 'default'"
-                      @click="toggleIn(taskForm.schedule.monthdays, day)">{{ day }}</v-chip>
-            </div>
-
-            <div class="d-flex align-center mt-2" style="gap: 8px; flex-wrap: wrap">
-              <v-checkbox v-model="taskForm.target.all" label="全部在线音箱" density="compact" hide-details />
-              <v-combobox v-if="!taskForm.target.all" v-model="taskForm.target.device_ids"
-                          :items="groupDeviceItems" item-title="title" item-value="value"
-                          density="compact" hide-details multiple chips closable-chips
-                          label="指定音箱（留空=默认音箱）" style="min-width: 240px; flex: 1 1 240px" />
-            </div>
-
-            <div v-if="taskNeedsPlaylist(taskForm.action)" class="d-flex mt-2"
-                 style="gap: 8px; flex-wrap: wrap">
-              <v-combobox v-model="taskForm.params.playlist_name" :items="playlists.map(p => p.name)"
-                          density="compact" hide-details clearable label="歌单（来自曲库索引）"
-                          placeholder="范特西" style="min-width: 200px; flex: 1 1 200px" />
-              <v-text-field v-if="taskForm.action === 'play_playlist_from'"
-                            v-model="taskForm.params.song_name" density="compact" hide-details clearable
-                            label="从这首歌开始" placeholder="稻香" style="min-width: 160px; flex: 1 1 160px" />
-              <v-select v-if="taskForm.action === 'play_playlist'" v-model="taskForm.params.start"
-                        :items="[{ title: '从第一首', value: 'first' }, { title: '随机起点', value: 'random' }]"
-                        density="compact" hide-details label="起点" style="width: 130px" />
-            </div>
-
-            <div class="d-flex mt-2" style="gap: 8px; flex-wrap: wrap">
-              <v-select v-model="taskForm.params.play_mode"
-                        :items="[{ title: '跟随上次', value: '' }, ...MODE_ITEMS]" density="compact"
-                        hide-details label="播放方式" style="min-width: 150px" />
-              <v-text-field v-if="taskForm.action === 'set_volume' || taskNeedsPlaylist(taskForm.action)"
-                            v-model.number="taskForm.params.volume" type="number" min="0" max="100"
-                            density="compact" hide-details label="音量 0-100" style="width: 120px" />
-              <v-text-field v-if="taskNeedsPlaylist(taskForm.action)"
-                            v-model.number="taskForm.params.stop_after_minutes" type="number" min="0"
-                            density="compact" hide-details label="播多久后停（分钟）" style="width: 160px" />
-              <v-btn color="primary" variant="flat" class="text-none" size="small"
-                     :loading="busy === '保存定时任务'" @click="saveTask">
-                {{ editingTask ? '保存修改' : '创建任务' }}
-              </v-btn>
-              <v-btn size="small" variant="text" @click="newTask">清空</v-btn>
-            </div>
-            <div class="text-caption text-grey mt-1">
-              播放类任务要音箱在线、且配置了「外部访问地址」；法定节假日的调休判定没有做（上游把假期表
-              编在插件产物里，插件装在宿主容器里没有那份数据），要「只工作日 / 只周末」就分建两条任务勾不同的周几。
-            </div>
-          </v-card>
+          <div class="text-caption text-grey mt-2">
+            任务怎么定义（做什么、哪几天、哪台音箱、播哪个歌单）在「插件配置」的定时任务那一节改，
+            这一栏只看跑得怎么样、做启停与立即执行。
+            <v-btn size="x-small" variant="text" class="text-none ml-1" prepend-icon="mdi-cog-outline"
+                   @click="configDialog = true">去插件配置
+            </v-btn>
+          </div>
 
           <div class="xai-block">
             <div class="xai-block-title">
@@ -1536,7 +1380,7 @@ function paneBadge(key: Pane): number {
             </div>
             <div v-if="voice.error" class="text-caption text-error mt-2">{{ voice.error }}</div>
             <div class="text-caption text-grey mt-2">
-              开关只影响本页这一项监听；轮询间隔、监听哪些音箱、打断与回复等细节在「配置」栏里改。
+              开关只影响监听这一项动作；轮询间隔、监听哪些音箱、打断与回复等细节在「插件配置」里改。
               对音箱说「{{ cfg.voice_hint_text || '正在搜索，请稍候' }}」以外的普通指令时，小爱自己会先答一句，
               插件只在命中口令表时才接手。
             </div>
@@ -1568,24 +1412,24 @@ function paneBadge(key: Pane): number {
           </div>
 
           <div class="xai-block">
-            <div class="d-flex align-center">
-              <div class="xai-block-title">口令表</div>
-              <v-spacer />
-              <v-btn size="x-small" variant="text" class="text-none" prepend-icon="mdi-content-save"
-                     :loading="busy === '保存口令开关'" @click="saveCommands">保存开关</v-btn>
+            <div class="xai-block-title">
+              生效口令
+              <span class="text-caption text-grey ml-2">{{ voiceCommandsOn.length }} 类</span>
             </div>
-            <div class="text-caption text-grey mb-2">
-              关掉某一类，那句话就不会被接手（会留给小爱自己的回答）。「停止播放」这类保底口令不受这里影响。
+            <div class="xai-chips">
+              <v-chip v-for="kind in voiceCommandsOn" :key="kind" size="small" variant="tonal"
+                      color="primary">{{ kindText(kind) }}
+              </v-chip>
+              <span v-if="!voiceCommandsOn.length" class="text-caption text-grey">
+                口令表整表关着，小爱说什么都不会被接手
+              </span>
             </div>
-            <v-card variant="outlined" class="xai-card pa-2">
-              <div v-for="row in commandRows" :key="row.kind" class="xai-cmd">
-                <v-switch v-model="row.enabled" color="primary" hide-details inset density="compact"
-                          :label="row.label" style="flex: 0 0 168px" />
-                <span class="text-caption text-grey xai-cmd-keywords">{{ row.keywords.join('、') }}</span>
-              </div>
-            </v-card>
-            <div v-if="voiceCommandsOn.length !== commandRows.length" class="text-caption text-warning mt-1">
-              当前生效 {{ voiceCommandsOn.length }}/{{ commandRows.length }} 类，改动后记得点「保存开关」。
+            <div class="text-caption text-grey mt-1">
+              逐类开哪几类是配置，在「插件配置 → 语音口令表」里改；这里只列此刻真正生效的。
+              「停止播放」这类保底口令不受那个开关影响。
+              <v-btn size="x-small" variant="text" class="text-none ml-1" prepend-icon="mdi-cog-outline"
+                     @click="configDialog = true">去插件配置
+              </v-btn>
             </div>
           </div>
 
@@ -1616,213 +1460,18 @@ function paneBadge(key: Pane): number {
           </div>
         </div>
 
-        <!-- 账号与设备 -->
-        <div v-show="pane === 'account'" class="xai-pane">
-          <v-card variant="outlined" class="xai-card pa-4 mb-3">
-            <div class="xai-block-title">
-              小米账号
-              <v-chip size="x-small" variant="tonal" class="ml-2"
-                      :color="status.logged_in ? 'success' : 'grey'"
-                      :prepend-icon="status.logged_in ? 'mdi-check-circle-outline' : 'mdi-help-circle-outline'">
-                {{ status.logged_in ? '已登录' : '未登录' }}
-              </v-chip>
-            </div>
-
-            <div v-if="status.logged_in" class="d-flex align-center mb-3" style="gap: 8px; flex-wrap: wrap">
-              <div class="text-body-2" style="flex: 1 1 220px">
-                {{ cfg.username_set ? cfg.username : '（未记录账号名）' }}
-                <span v-if="cfg.username_set" class="text-caption text-grey ml-1">已掩码</span>
-                <div class="text-caption text-grey">
-                  票据保存于 {{ status.token_saved_at || '-' }}
-                  <template v-if="status.manual_token">｜手工粘贴的 cookie</template>
-                  <template v-if="status.token_expired">｜已过期，需要重新登录</template>
-                </div>
-              </div>
-              <v-btn size="small" variant="tonal" prepend-icon="mdi-speaker-multiple"
-                     @click="picker = true">选择音箱</v-btn>
-              <v-btn size="small" variant="tonal" :loading="busy === '刷新设备'"
-                    prepend-icon="mdi-refresh" @click="refreshDevices">刷新设备</v-btn>
-              <v-btn size="small" variant="tonal" color="error" :loading="busy === '退出登录'"
-                     prepend-icon="mdi-logout" @click="doLogout">退出登录</v-btn>
-            </div>
-
-            <!-- 登录行登成了也留着：换账号、票据过期时补一次登录都在这里，不用先退出 -->
-            <div class="d-flex" style="gap: 8px; flex-wrap: wrap">
-              <v-text-field v-model="loginForm.username" density="compact" hide-details clearable
-                            label="小米账号（手机号 / 邮箱 / 账号ID）" :placeholder="cfg.username"
-                            style="min-width: 220px; flex: 1 1 220px" @keyup.enter="startLogin" />
-              <v-text-field v-model="loginForm.password" density="compact" hide-details
-                            :type="loginForm.password ? 'text' : 'password'"
-                            :label="cfg.password_set ? '密码（留空则用已保存的）' : '密码'"
-                            style="min-width: 180px; flex: 1 1 180px" @keyup.enter="startLogin" />
-              <v-btn color="primary" variant="flat" class="text-none" :loading="busy === '登录'"
-                     prepend-icon="mdi-login" @click="startLogin">登录</v-btn>
-            </div>
-
-            <div v-if="loginResult" class="mt-3">
-              <v-alert :type="loginState?.color || 'info'" variant="tonal" density="compact"
-                       :icon="loginState ? undefined : 'mdi-information-outline'">
-                <div class="text-body-2">{{ loginState?.text || loginResult.state }}</div>
-                <div class="text-caption">{{ loginResult.message }}</div>
-                <div v-if="loginResult.state === 'success'" class="text-caption">
-                  取到 {{ loginResult.device_count }} 台音箱
-                  <template v-if="loginResult.device_count">｜已在上面弹出音箱列表，点一下即设为默认</template>
-                </div>
-              </v-alert>
-            </div>
-
-            <div v-if="loginState?.color === 'warning'" class="mt-3">
-              <v-img v-if="loginResult?.captcha_image" :src="loginResult.captcha_image" max-height="120"
-                     class="rounded mb-2" style="max-width: 240px" contain />
-              <div class="d-flex" style="gap: 8px; flex-wrap: wrap">
-                <v-text-field v-model="verifyCode" density="compact" hide-details
-                              :label="loginResult?.state === 'need_verify' ? '邮箱/短信验证码' : '图形验证码'"
-                              style="max-width: 220px" @keyup.enter="submitVerify" />
-                <v-btn size="small" variant="tonal" color="info" :loading="busy === '提交验证码'"
-                       @click="submitVerify">提交</v-btn>
-                <v-btn size="small" variant="text" @click="startLogin">重新发起登录</v-btn>
-              </div>
-            </div>
-
-            <v-expand-transition>
-              <div v-if="showManual" class="mt-3">
-                <v-textarea v-model="manualToken" :rows="3" density="compact" hide-details
-                            placeholder="userId=…; serviceToken=…; 把浏览器里 i.api.xiaomi.com 登录后的整串 cookie 粘进来" />
-                <div class="d-flex mt-1" style="gap: 8px">
-                  <v-btn size="small" variant="tonal" :loading="busy === '校验票据'"
-                         @click="submitManual">校验并使用</v-btn>
-                  <v-btn size="small" variant="text" @click="showManual = false">取消</v-btn>
-                </div>
-              </div>
-            </v-expand-transition>
-            <div class="text-caption text-grey mt-2">
-              账密登不上（小米风控、二次校验过不去）时可以在高级里直接粘贴 cookie 票据；
-              票据只存在本机插件数据里，配置页不回显明文。
-              <v-btn size="x-small" variant="text" class="text-none ml-1"
-                     :prepend-icon="showManual ? 'mdi-chevron-up' : 'mdi-chevron-down'"
-                     @click="showManual = !showManual">高级</v-btn>
-            </div>
-          </v-card>
-
-          <v-expand-transition>
-            <v-card v-if="picker && devices.length" variant="outlined" color="primary" class="xai-card-accent pa-4 mb-3">
-              <div class="xai-block-title">
-                选一台当默认音箱
-                <span class="text-caption text-grey ml-2">{{ devices.length }} 台可选</span>
-              </div>
-              <div v-for="device in pickerDevices" :key="device.device_id"
-                   class="d-flex align-center" style="gap: 10px; flex-wrap: wrap; padding: 4px 0">
-                <v-icon :icon="device.presence === 'online' ? 'mdi-speaker' : 'mdi-speaker-off'"
-                        :color="device.is_default ? 'primary' : (device.presence === 'online' ? 'success' : 'grey')" />
-                <div style="min-width: 0; flex: 1 1 200px">
-                  <div class="text-body-2">
-                    {{ device.name || device.alias || device.device_id }}
-                    <v-chip v-if="device.is_default" size="x-small" variant="flat" color="primary" class="ml-1">当前默认</v-chip>
-                  </div>
-                  <div class="text-caption text-grey">
-                    {{ device.model || device.hardware || '未知型号' }}｜{{ device.presence === 'online' ? '在线' : '离线' }}
-                    <template v-if="device.needs_music_api">｜需走 play_music</template>
-                  </div>
-                </div>
-                <v-btn size="small" variant="text" color="primary" :disabled="device.is_default"
-                       :loading="busy === '设为默认'" @click="pickDevice(device)">
-                  {{ device.is_default ? '已是默认' : '选它' }}
-                </v-btn>
-              </div>
-              <div class="text-caption text-grey mt-1">
-                在线的放前面，离线也能选（音箱上线后照样能用）。不选就落在第一台在线设备上。
-                <v-btn size="x-small" variant="text" class="text-none ml-1" @click="picker = false">收起</v-btn>
-              </div>
-            </v-card>
-          </v-expand-transition>
-
-          <div class="xai-block-title">
-            音箱设备
-            <span class="text-caption text-grey ml-2">{{ devices.length }} 台</span>
-          </div>
-          <v-alert v-if="!devices.length" type="warning" variant="tonal" density="compact">
-            {{ status.logged_in
-               ? '设备列表是空的：可能票据已失效，点上面的「刷新设备」重试。'
-               : '登录小米账号后才能看到音箱。' }}
-          </v-alert>
-          <v-card v-for="device in devices" :key="device.device_id" variant="outlined" class="xai-card pa-3 mb-2">
-            <div class="d-flex align-center" style="gap: 10px; flex-wrap: wrap">
-              <v-icon :icon="device.presence === 'online' ? 'mdi-speaker' : 'mdi-speaker-off'"
-                      :color="device.presence === 'online' ? 'success' : 'grey'" />
-              <div style="min-width: 0; flex: 1 1 200px">
-                <div class="text-body-2">
-                  {{ device.name || device.alias || device.device_id }}
-                  <v-chip v-if="device.is_default" size="x-small" variant="flat" color="primary" class="ml-1">默认</v-chip>
-                  <v-chip v-if="device.alias && device.name" size="x-small" variant="tonal" class="ml-1">{{ device.alias }}</v-chip>
-                </div>
-                <div class="text-caption text-grey">
-                  {{ device.model || device.hardware || '未知型号' }}｜{{ device.presence === 'online' ? '在线' : '离线' }}
-                  <template v-if="device.needs_music_api">｜该型号需走 play_music，直链可能被当成电台播放</template>
-                </div>
-              </div>
-              <v-btn size="x-small" variant="text" color="primary" :disabled="device.is_default"
-                     :loading="busy === '设为默认'" @click="selectDevice(device)">设为默认</v-btn>
-              <v-btn size="x-small" variant="text" :disabled="!cfg.default_device_id"
-                     :loading="busy === '取消默认'" @click="clearDefault">取消默认</v-btn>
-            </div>
-          </v-card>
-          <div class="text-caption text-grey">
-            没设默认音箱时，操作落在第一台在线设备上；都不在线就落在列表第一台。
-            设备列表由插件缓存 5 分钟，改动账号或新增音箱后点「刷新设备」。
-          </div>
-
-          <div class="xai-block">
-            <div class="xai-block-title">
-              设备分组
-              <span class="text-caption text-grey ml-2">{{ groups.length }} 组</span>
-            </div>
-            <v-card v-for="row in groups" :key="row.name" variant="outlined" class="xai-card pa-3 mb-2">
-              <div class="d-flex align-center" style="gap: 10px; flex-wrap: wrap">
-                <v-icon icon="mdi-home-group" color="primary" />
-                <div style="min-width: 0; flex: 1 1 200px">
-                  <div class="text-body-2">
-                    {{ row.name }}
-                    <v-chip v-if="defaultGroup === row.name" size="x-small" variant="flat" color="primary" class="ml-1">
-                      默认音箱所在组
-                    </v-chip>
-                  </div>
-                  <div class="text-caption text-grey">{{ row.devices.join('、') || row.device_ids.join('、') }}</div>
-                </div>
-                <v-btn size="x-small" variant="text" :loading="busy === '保存分组'"
-                       @click="editGroup(row)">编辑</v-btn>
-                <v-btn size="x-small" variant="text" color="error" :loading="busy === '删除分组'"
-                       @click="removeGroup(row.name)">删除</v-btn>
-              </div>
-            </v-card>
-
-            <v-card variant="outlined" class="xai-card pa-3">
-              <div class="d-flex align-center" style="gap: 8px; flex-wrap: wrap">
-                <v-text-field v-model="groupForm.name" density="compact" hide-details clearable
-                              :label="editingGroup ? `改名或另起一组（原「${editingGroup}」）` : '新建分组'"
-                              placeholder="全屋 / 卧室 / 客厅…" style="max-width: 220px" />
-                <v-combobox v-model="groupForm.device_ids" :items="groupDeviceItems" item-title="title"
-                            item-value="value" density="compact" hide-details multiple chips closable-chips
-                            label="组内音箱（≥2 台）" style="min-width: 260px; flex: 1 1 260px" />
-                <v-btn size="small" variant="tonal" color="primary" :loading="busy === '保存分组'"
-                       @click="saveGroup">保存</v-btn>
-                <v-btn size="small" variant="text" @click="newGroup">清空</v-btn>
-              </div>
-              <div class="text-caption text-grey mt-1">
-                分组里的音箱共用同一份队列、播放方式与定时，播放/切曲/音量/播报都会同步过去；
-                一台设备只属于一个组，选中别组已有的音箱时会自动从原组里挪过来，
-                原组不足两台就随之解散。默认音箱所在的那一组即「全屋广播」的落点。
-              </div>
-            </v-card>
-          </div>
-        </div>
-
-        <!-- 配置：v-if 而非 v-show，这一栏不在时才不发那次 /status -->
-        <div v-if="pane === 'config'" class="xai-pane xai-pane-config">
-          <ConfigForm :api="props.api" :plugin-id="props.pluginId" :source-plugin-id="props.sourcePluginId"
-                      @saved="loadStatus()" />
-        </div>
       </section>
     </div>
+
+    <!-- 配置页与侧栏分开：这里只把它当对话框端上来，登录、账号、默认音箱、口令表、
+         任务定义都只在这一个地方能改（照豆瓣中心侧栏/配置分离的做法） -->
+    <v-dialog v-model="configDialog" max-width="1080px" scrollable persistent>
+      <v-card variant="flat" class="xai-config-dialog">
+        <Config :api="props.api" :plugin-id="props.pluginId" :source-plugin-id="props.sourcePluginId"
+                show-close :show-switch="false" @close="configDialog = false"
+                @updated="onConfigUpdated" />
+      </v-card>
+    </v-dialog>
 
     <v-snackbar v-model="snackbar.show" :color="snackbar.color" timeout="3500" location="bottom">
       {{ snackbar.text }}
@@ -1883,10 +1532,6 @@ function paneBadge(key: Pane): number {
   border-radius: var(--xai-radius);
   border-color: var(--xai-line);
 }
-.xai-card-accent {
-  border-radius: var(--xai-radius);
-  border-color: rgba(var(--v-theme-primary), .35);
-}
 
 /* ---------- 骨架 ---------- */
 .xai-body { display: flex; min-height: 460px; }
@@ -1904,7 +1549,6 @@ function paneBadge(key: Pane): number {
 }
 .xai-content { flex: 1 1 auto; min-width: 0; overflow-y: auto; }
 .xai-pane { padding: 14px 18px 22px; }
-.xai-pane-config { padding: 0; }
 .xai-pane-title {
   display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
   padding: 14px 18px 0;
@@ -1918,6 +1562,26 @@ function paneBadge(key: Pane): number {
   display: flex; align-items: center; gap: 6px;
   font-size: 12px; font-weight: 600; letter-spacing: .3px;
   color: var(--xai-ink-soft); margin-bottom: 8px;
+}
+
+/* ---------- 运行总览 ---------- */
+/* 每张卡只讲一件事：标题行带状态药丸，正文一行结论、一行细节 */
+.xai-ov { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+.xai-ov-card {
+  padding: 13px 15px; border-radius: var(--xai-radius);
+  border: 1px solid var(--xai-line); background: var(--xai-veil);
+}
+.xai-ov-head {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 12.5px; font-weight: 650; color: var(--xai-ink);
+}
+.xai-ov-line { margin-top: 8px; font-size: 13px; color: var(--xai-ink); }
+.xai-ov-sub { margin-top: 3px; font-size: 11.5px; color: var(--xai-ink-faint); line-height: 1.6; }
+.xai-chips { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+.xai-config-dialog {
+  background: rgb(var(--v-theme-surface));
+  border-radius: var(--xai-radius);
 }
 
 /* ---------- 播放台 ---------- */
@@ -1957,8 +1621,6 @@ function paneBadge(key: Pane): number {
   color: var(--xai-ink-soft);
 }
 .xai-modes { gap: 2px; flex-wrap: wrap; }
-/* 定时任务的星期/几号是用点选的，靠 2px 的间距点不准；这类日格单独给一排留白 */
-.xai-days { display: flex; flex-wrap: wrap; gap: 6px; }
 .xai-mode { cursor: pointer; user-select: none; transition: transform .12s ease; }
 .xai-mode:active { transform: scale(.95); }
 @media (prefers-reduced-motion: reduce) { .xai-mode:active { transform: none; } }
@@ -2001,8 +1663,6 @@ function paneBadge(key: Pane): number {
 
 .xai-table { font-size: 13px; }
 .xai-table .text-truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.xai-cmd { display: flex; align-items: center; gap: 10px; padding: 4px 6px; }
-.xai-cmd-keywords { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .xai-record { display: flex; align-items: baseline; gap: 8px; padding: 4px 6px; font-size: 13px; }
 .xai-record-at { flex: 0 0 74px; color: var(--xai-ink-faint); font-variant-numeric: tabular-nums; }
 .xai-record-text { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -13,8 +13,11 @@ const props = defineProps({
   api: { type: Object as () => MoviePilotApi, default: () => ({}) as any },
   pluginId: { type: String, default: '' },
   sourcePluginId: { type: String, default: '' },
-  // 侧栏全页没有「切换到配置页」这回事（配置就在这一页里），宿主也不接 AppPage 的 switch
-  canSwitch: { type: Boolean, default: false }
+  // 宿主在配置对话框里接「切换到播放台」；侧栏全页自己开的那个对话框不需要
+  canSwitch: { type: Boolean, default: false },
+  // 配置页按「先登录、取到音箱，再改后面的」排序：这一项决定除启用开关外的表体开不开
+  sectionsOpen: { type: Boolean, default: true },
+  devices: { type: Array as () => Device[], default: () => [] }
 })
 
 const emit = defineEmits(['switch', 'saved'])
@@ -26,14 +29,12 @@ const saving = ref(false)
 const status = ref<Status | null>(null)
 const loaded = ref(false)
 
-// /config 只改传上来的字段、密码留空表示保留，所以草稿要按「服务端当前值」起头：
-// 直接用宿主存的配置会把已存的密码位置当成空，保存时一起写没。
+// /config 只改传上来的字段，所以草稿要按「服务端当前值」起头。
+// 账号、密码与默认音箱不在这里：它们跟着「登录」那一步走（见 ConfigLogin），
+// 表单里不带这三个键，保存时也就不会把它们一起写没。
 const form = ref<Record<string, any>>({
   enabled: false,
   show_sidebar_nav: true,
-  username: '',
-  password: '',
-  default_device_id: '',
   music_dirs: '',
   base_url: '',
   play_mode: 'auto',
@@ -66,17 +67,8 @@ const playModeItems = [
 ]
 
 const cfg = computed(() => status.value?.config)
-const devices = computed<Device[]>(() => status.value?.devices || [])
-
-// 候选来自服务端刚取到的设备；配置里那台已经不在这个账号的列表里时，选中项会被 v-select
-// 显示成裸 ID，所以另加一句提示，别让人以为设备还在。
-const deviceItems = computed(() => [
-  { title: '留空（第一台在线设备）', value: '' },
-  ...devices.value.map(d => ({
-    title: `${d.name || d.alias || d.device_id}${d.presence === 'online' ? '' : '（离线）'}`,
-    value: d.device_id
-  }))
-])
+// 音箱候选由配置页统一取（登录那一步刚刷新过设备），表单自己那份 /status 只用来起草稿
+const devices = computed<Device[]>(() => props.devices)
 
 const navText = computed(() => {
   if (!loaded.value) return '读取中'
@@ -115,12 +107,8 @@ function fillFromStatus(data: Status) {
     ...form.value,
     enabled: !!c.enabled,
     show_sidebar_nav: c.show_sidebar_nav !== false,
-    // 服务端回的是掩码（13****34），填进输入框就成了「把掩码存成账号」：这里只留空，
-    // 已存账号用占位符提示，要换才输入
-    username: '',
-    // 密码永不回显：留空即「不改动」，由服务端的 if password 判掉
-    password: '',
-    default_device_id: c.default_device_id || '',
+    // 账号、密码、默认音箱由「登录与音箱」那张卡管，这里不占位：/config 是「缺省即保留」，
+    // 不带这三个键就等于不动它们
     music_dirs: c.music_dirs || '',
     base_url: c.base_url || '',
     play_mode: c.play_mode || 'auto',
@@ -160,10 +148,6 @@ async function save() {
   saving.value = true
   try {
     const body: Record<string, any> = { ...form.value }
-    // 密码是「留空即不改动」：服务端按 if password 判掉空串，这里先删掉免得写成空
-    if (!body.password) delete body.password
-    // 账号同理：留空表示不改，服务端还会再把带 * 的掩码当没改过兜一层
-    if (!body.username) delete body.username
     fillFromStatus(await (props.api as MoviePilotApi).post(`${base.value}/config`, body))
     notify('配置已保存', 'success')
     emit('saved')
@@ -199,49 +183,22 @@ defineExpose({ loadConfig, save })
       这两个开关就是宿主眼里的「插件已启用」：发现侧栏的入口、播放台巡检、语音轮询都按
       <b>启用插件</b>这一项准入 —— <b>插件管理页那个开关改的是宿主自己的实例记录，碰不到这里</b>，
       所以只装好插件不在这里打开的话，侧栏永远不会出现。保存后立刻生效，不用重启主程序。
+      <template v-if="!sectionsOpen">
+        <br><b>小米账号、默认音箱与设备分组在上面第 1 步做</b>：登录成功并选到音箱，下面的配置才谈得上生效。
+      </template>
     </div>
 
-    <div class="xcf-body">
+    <div v-if="sectionsOpen" class="xcf-body">
       <div class="xcf-group">
-        <div class="xcf-group-title">小米账号</div>
-        <v-alert type="info" variant="tonal" density="compact" class="mb-3">
-          这里只保存账密与设备偏好；<b>登录本身（含图形验证码 / 二次校验）在「账号与设备」那一栏做</b>，
-          改完账号密码后重新登录才会生效。
-        </v-alert>
-        <v-row dense>
-          <v-col cols="12" md="6">
-            <v-text-field v-model="form.username"
-                          label="小米账号（手机号 / 邮箱 / 账号ID）"
-                          :placeholder="cfg?.username_set ? cfg.username : ''"
-                          :hint="cfg?.username_set ? `已保存：${cfg.username}，留空即不修改` : '留空即不修改'"
-                          persistent-hint />
-          </v-col>
-          <v-col cols="12" md="6">
-            <v-text-field v-model="form.password" :type="form.password ? 'text' : 'password'"
-                          :label="cfg?.password_set ? '密码（留空保留已存的）' : '密码'"
-                          :hint="cfg?.password_set ? '已保存密码，接口永不回显' : '只在首次填写'"
-                          persistent-hint />
-          </v-col>
-        </v-row>
-        <div class="text-caption text-grey mt-1">
-          票据只存在本机插件数据里，任何接口都不回显明文。账密登不上时可以在「账号与设备」里粘贴 cookie 票据。
-        </div>
-      </div>
-
-      <div class="xcf-group">
-        <div class="xcf-group-title">音箱</div>
-        <v-select v-model="form.default_device_id" :items="deviceItems" label="默认音箱"
-                  hide-details placeholder="留空则用第一台在线设备" />
-        <div class="text-caption text-grey mt-1">
-          {{ devices.length ? `已取到 ${devices.length} 台设备` : '还没取到设备列表：登录后这里才会填充候选' }}
-          <template v-if="cfg?.default_device_id && !devices.some(d => d.device_id === cfg?.default_device_id)">
-            ｜当前配置的默认音箱不在列表里，操作会回落到在线设备
-          </template>
-        </div>
-        <div class="d-flex mt-3" style="gap: 16px; flex-wrap: wrap">
+        <div class="xcf-group-title">播放行为</div>
+        <div class="d-flex" style="gap: 16px; flex-wrap: wrap">
           <v-switch v-model="form.auto_next" color="success" hide-details inset label="队列自动连播" />
           <v-switch v-model="form.keep_light" color="success" hide-details inset label="播放时常亮" />
           <v-switch v-model="form.tts_announce" color="success" hide-details inset label="连播时先播报下一曲" />
+        </div>
+        <div class="text-caption text-grey mt-1">
+          这几项是全局偏好，推给哪台音箱由上面的登录那一步决定；
+          「自动连播」关掉后侧栏队列播完当前这首不会自己接下一首（手动「下一首」仍然有效）。
         </div>
       </div>
 
@@ -318,7 +275,7 @@ defineExpose({ loadConfig, save })
           {{ devices.length
              ? `已取到 ${devices.length} 台设备，可直接勾选；留空时只跟着默认音箱走`
              : '设备候选要登录后才有；也可以先手填 device_id（逗号分隔）' }}
-          ｜口令表逐类的开关在「语音控制」那一栏里改，不在这里。
+          ｜逐类口令的开关在本页下面的「语音口令表」里改，监听开没开在侧栏运行视图看。
         </div>
       </div>
 
@@ -364,7 +321,7 @@ defineExpose({ loadConfig, save })
         <div class="text-caption text-grey mt-1">
           索引只为语音点歌服务（读标签与目录名，元数据缓存落在插件数据目录）。
           当前 {{ cfg?.library_limit ?? 10000 }} 首上限、每 {{ cfg?.library_refresh ?? 60 }} 分钟保鲜一次；
-          索引状态与手动重建在「音乐库」那一栏。
+          索引状态与手动重建在侧栏的「音乐库」那一栏。
         </div>
       </div>
 

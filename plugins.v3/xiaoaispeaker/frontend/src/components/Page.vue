@@ -81,10 +81,6 @@ function setVolume() {
   return post('/volume', { volume: Math.round(volume.value) }, '设置音量')
 }
 
-function selectDevice(device: Device) {
-  return post('/device/select', { device_id: device.device_id }, '设为默认')
-}
-
 async function playKeyword() {
   const text = keyword.value.trim()
   if (!text) {
@@ -133,17 +129,16 @@ onUnmounted(() => {
         <div class="xai-head-title">小爱音箱</div>
         <div class="xai-head-sub">
           <template v-if="status?.logged_in">{{ cfg?.username || '已登录' }}｜{{ devices.length }} 台设备</template>
-          <template v-else>未登录：到侧栏「账号与设备」登录小米账号</template>
+          <template v-else>未登录：到「插件配置」的第 1 步登录小米账号</template>
         </div>
       </div>
       <v-spacer />
       <span class="xai-pill" :class="playing?.status === 1 ? 'xai-pill-ok' : 'xai-pill-idle'">
         {{ playing?.status_text || '未知' }}
       </span>
-      <v-btn v-if="status?.token_expired" size="x-small" variant="text" color="error"
-             class="ml-1 text-none">票据过期</v-btn>
+      <span v-if="status?.token_expired" class="xai-pill xai-pill-error ml-1">票据过期</span>
       <v-btn v-if="props.showSwitch" icon="mdi-cog-outline" size="x-small" variant="text"
-             @click="emit('switch')" />
+             title="插件配置" @click="emit('switch')" />
       <v-btn icon="mdi-refresh" size="x-small" variant="text" :loading="!!busy"
              @click="loadStatus()" />
     </div>
@@ -215,7 +210,7 @@ onUnmounted(() => {
 
       <div class="xai-title">设备</div>
       <div v-if="!devices.length" class="text-caption text-grey">
-        {{ status?.logged_in ? '没有取到设备，可在侧栏页刷新设备列表。' : '登录后才会列出音箱。' }}
+        {{ status?.logged_in ? '没有取到设备，到「插件配置」第 1 步刷新设备列表。' : '登录后才会列出音箱。' }}
       </div>
       <div v-for="device in devices" :key="device.device_id" class="xai-row">
         <v-icon :icon="device.presence === 'online' ? 'mdi-speaker' : 'mdi-speaker-off'" size="18"
@@ -225,12 +220,10 @@ onUnmounted(() => {
         <v-chip size="x-small" variant="tonal" :color="device.presence === 'online' ? 'success' : 'grey'">
           {{ device.presence === 'online' ? '在线' : '离线' }}
         </v-chip>
-        <v-btn size="x-small" variant="text" :disabled="device.is_default"
-               :loading="busy === '设为默认'" @click="selectDevice(device)">设为默认</v-btn>
       </div>
 
       <div class="text-caption text-grey mt-3">
-        库内浏览、整目录入队与播报在侧栏「小爱音箱」页面；外部直链推送同样在那里。
+        库内浏览、整目录入队与播报在侧栏「小爱音箱」页面；换默认音箱在「插件配置」里做。
       </div>
     </div>
 
@@ -267,6 +260,7 @@ onUnmounted(() => {
   border: 1px solid transparent;
 }
 .xai-pill-ok { color: rgb(var(--v-theme-success)); background: rgba(var(--v-theme-success), .12); border-color: rgba(var(--v-theme-success), .2); }
+.xai-pill-error { color: rgb(var(--v-theme-error)); background: rgba(var(--v-theme-error), .12); border-color: rgba(var(--v-theme-error), .2); }
 .xai-pill-idle { color: var(--xai-ink-faint); background: rgba(var(--v-theme-on-surface), .06); border-color: var(--xai-line); }
 .xai-body { padding: 14px 16px 16px; }
 .xai-hero {
