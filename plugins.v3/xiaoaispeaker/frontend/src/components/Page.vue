@@ -170,7 +170,7 @@ onUnmounted(() => {
         <div v-if="playing?.error" class="text-caption text-error">{{ playing.error }}</div>
         <div class="d-flex align-center mt-3" style="gap: 10px; flex-wrap: wrap">
           <div class="xai-transport">
-            <v-btn size="x-small" variant="text" icon="mdi-previous-variant"
+            <v-btn size="x-small" variant="text" icon="mdi-skip-previous-circle-outline"
                    :loading="busy === '播放控制'" @click="control('prev')" />
             <v-btn class="xai-transport-main" color="primary" variant="flat" rounded="circle"
                    :icon="playing?.status === 1 ? 'mdi-pause' : 'mdi-play'"

@@ -1,0 +1,263 @@
+
+/* 仅插件内局部样式；不得写全局 v- 或 mdi- 类规则（构建有 postcss 门禁，含 .v- 的选择器会被整条删掉）。
+   颜色一律取主程序的 --v-theme-* 变量，深色浅色都跟着宿主走。 */
+.xai-page[data-v-3c067fdb] {
+  width: 100%;
+  --xai-radius: 14px;
+  --xai-ink: rgba(var(--v-theme-on-surface), .92);
+  --xai-ink-soft: rgba(var(--v-theme-on-surface), .62);
+  --xai-ink-faint: rgba(var(--v-theme-on-surface), .42);
+  --xai-line: rgba(var(--v-border-color), var(--v-border-opacity));
+  --xai-veil: rgba(var(--v-theme-on-surface), .045);
+}
+
+/* ---------- 顶栏 ---------- */
+.xai-head[data-v-3c067fdb] {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--xai-line);
+  background: linear-gradient(180deg, var(--xai-veil), transparent);
+}
+.xai-brand[data-v-3c067fdb] { display: flex; align-items: center; gap: 11px; min-width: 0;
+}
+.xai-brand-mark[data-v-3c067fdb] {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 38px; height: 38px; border-radius: 12px; flex: 0 0 auto;
+  color: rgb(var(--v-theme-primary));
+  background: rgba(var(--v-theme-primary), .14);
+  box-shadow: inset 0 0 0 1px rgba(var(--v-theme-primary), .18);
+}
+.xai-brand-text[data-v-3c067fdb] { min-width: 0; line-height: 1.25;
+}
+.xai-brand-title[data-v-3c067fdb] { font-size: 15px; font-weight: 650; letter-spacing: .2px; color: var(--xai-ink);
+}
+.xai-brand-sub[data-v-3c067fdb] { font-size: 11.5px; color: var(--xai-ink-faint); white-space: nowrap;
+}
+.xai-stats[data-v-3c067fdb] { display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
+
+/* 状态药丸：顶栏、播放台、详情页共用一套形状 */
+.xai-pill[data-v-3c067fdb] {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 22px; padding: 0 9px; border-radius: 999px;
+  font-size: 11.5px; font-weight: 500; white-space: nowrap;
+  border: 1px solid transparent;
+}
+.xai-pill-ok[data-v-3c067fdb] { color: rgb(var(--v-theme-success)); background: rgba(var(--v-theme-success), .12); border-color: rgba(var(--v-theme-success), .2);
+}
+.xai-pill-warn[data-v-3c067fdb] { color: rgb(var(--v-theme-warning)); background: rgba(var(--v-theme-warning), .12); border-color: rgba(var(--v-theme-warning), .2);
+}
+.xai-pill-error[data-v-3c067fdb] { color: rgb(var(--v-theme-error)); background: rgba(var(--v-theme-error), .12); border-color: rgba(var(--v-theme-error), .2);
+}
+.xai-pill-idle[data-v-3c067fdb] { color: var(--xai-ink-soft); background: var(--xai-veil); border-color: var(--xai-line);
+}
+.xai-todo[data-v-3c067fdb] { margin: 14px 18px 0; border-radius: var(--xai-radius);
+}
+
+/* 列表面板的容器：v-card 自带的圆角比这套设计小一圈，边框也偏重，
+   统一收成 14px + 一条淡线。用自有类名写，绕开构建的 .v- 门禁。 */
+.xai-card[data-v-3c067fdb] {
+  border-radius: var(--xai-radius);
+  border-color: var(--xai-line);
+}
+.xai-card-accent[data-v-3c067fdb] {
+  border-radius: var(--xai-radius);
+  border-color: rgba(var(--v-theme-primary), .35);
+}
+
+/* ---------- 骨架 ---------- */
+.xai-body[data-v-3c067fdb] { display: flex; min-height: 460px;
+}
+.xai-nav[data-v-3c067fdb] {
+  flex: 0 0 186px;
+  padding: 10px 0;
+  border-right: 1px solid var(--xai-line);
+  background: var(--xai-veil);
+}
+.xai-nav-item[data-v-3c067fdb] { margin: 1px 8px;
+}
+.xai-nav-badge[data-v-3c067fdb] {
+  min-width: 20px; padding: 0 6px; height: 18px; line-height: 18px; text-align: center;
+  border-radius: 999px; font-size: 11px; font-weight: 600;
+  color: var(--xai-ink-soft); background: rgba(var(--v-theme-on-surface), .08);
+}
+.xai-content[data-v-3c067fdb] { flex: 1 1 auto; min-width: 0; overflow-y: auto;
+}
+.xai-pane[data-v-3c067fdb] { padding: 14px 18px 22px;
+}
+.xai-pane-config[data-v-3c067fdb] { padding: 0;
+}
+.xai-pane-title[data-v-3c067fdb] {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  padding: 14px 18px 0;
+}
+.xai-pane-name[data-v-3c067fdb] { font-size: 13px; font-weight: 650; color: var(--xai-ink);
+}
+.xai-pane-desc[data-v-3c067fdb] { font-size: 11.5px; color: var(--xai-ink-faint);
+}
+
+/* 每个内容块之间靠留白分段，不再靠一条条横线 */
+.xai-block[data-v-3c067fdb] { margin-top: 18px;
+}
+.xai-block-title[data-v-3c067fdb] {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; font-weight: 600; letter-spacing: .3px;
+  color: var(--xai-ink-soft); margin-bottom: 8px;
+}
+
+/* ---------- 播放台 ---------- */
+.xai-hero[data-v-3c067fdb] {
+  border-radius: var(--xai-radius);
+  color: var(--xai-ink);
+  background:
+    radial-gradient(120% 140% at 0% 0%, rgba(var(--v-theme-primary), .16), transparent 60%),
+    linear-gradient(180deg, rgba(var(--v-theme-surface, 255, 255, 255), .06), transparent),
+    var(--xai-veil);
+  box-shadow: inset 0 0 0 1px var(--xai-line);
+}
+.xai-hero-mark[data-v-3c067fdb] {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 54px; height: 54px; border-radius: 16px; flex: 0 0 auto;
+  color: rgb(var(--v-theme-primary)); background: rgba(var(--v-theme-primary), .14);
+}
+/* 正在播的时候给一圈呼吸的光环，页面不动也知道在放 */
+.xai-hero-live[data-v-3c067fdb] { animation: xai-pulse-3c067fdb 2.4s ease-in-out infinite;
+}
+@keyframes xai-pulse-3c067fdb {
+0%, 100% { box-shadow: 0 0 0 0 rgba(var(--v-theme-primary), .22);
+}
+50% { box-shadow: 0 0 0 9px rgba(var(--v-theme-primary), 0);
+}
+}
+@media (prefers-reduced-motion: reduce) {
+.xai-hero-live[data-v-3c067fdb] { animation: none;
+}
+}
+.xai-hero-title[data-v-3c067fdb] { font-size: 17px; font-weight: 650; letter-spacing: .2px;
+}
+.xai-hero-sub[data-v-3c067fdb] { font-size: 11.5px; color: var(--xai-ink-faint); margin-top: 2px;
+}
+.xai-hero-time[data-v-3c067fdb] { font-size: 13px; font-variant-numeric: tabular-nums; color: var(--xai-ink);
+}
+.xai-hero-time span[data-v-3c067fdb] { font-size: 11.5px; color: var(--xai-ink-faint);
+}
+.xai-hero-bar[data-v-3c067fdb] { background: rgba(var(--v-theme-on-surface), .08);
+}
+.xai-transport[data-v-3c067fdb] {
+  display: inline-flex; align-items: center; gap: 2px; padding: 3px;
+  border-radius: 999px; background: rgba(var(--v-theme-on-surface), .06);
+}
+.xai-transport-main[data-v-3c067fdb] { width: 42px; height: 42px; box-shadow: 0 4px 14px rgba(var(--v-theme-primary), .3);
+}
+.xai-volume[data-v-3c067fdb] {
+  display: flex; align-items: center; flex: 1 1 240px; min-width: 200px; max-width: 380px;
+  color: var(--xai-ink-soft);
+}
+.xai-modes[data-v-3c067fdb] { gap: 2px; flex-wrap: wrap;
+}
+/* 定时任务的星期/几号是用点选的，靠 2px 的间距点不准；这类日格单独给一排留白 */
+.xai-days[data-v-3c067fdb] { display: flex; flex-wrap: wrap; gap: 6px;
+}
+.xai-mode[data-v-3c067fdb] { cursor: pointer; user-select: none; transition: transform .12s ease;
+}
+.xai-mode[data-v-3c067fdb]:active { transform: scale(.95);
+}
+@media (prefers-reduced-motion: reduce) {
+.xai-mode[data-v-3c067fdb]:active { transform: none;
+}
+}
+
+/* ---------- 队列 / 目录 / 歌词 / 日志 ---------- */
+.xai-queue[data-v-3c067fdb] { padding: 4px 6px; max-height: 340px; overflow-y: auto;
+}
+.xai-queue-row[data-v-3c067fdb] {
+  display: flex; align-items: center; gap: 10px; padding: 7px 10px;
+  border-radius: 10px; cursor: pointer; transition: background .14s ease;
+}
+.xai-queue-row[data-v-3c067fdb]:hover { background: rgba(var(--v-theme-on-surface), .06);
+}
+.xai-queue-current[data-v-3c067fdb] {
+  background: rgba(var(--v-theme-primary), .1);
+  box-shadow: inset 2px 0 0 rgb(var(--v-theme-primary));
+}
+.xai-queue-index[data-v-3c067fdb] { flex: 0 0 22px; font-size: 11.5px; color: var(--xai-ink-faint); font-variant-numeric: tabular-nums;
+}
+.xai-queue-name[data-v-3c067fdb] {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 13px; color: var(--xai-ink);
+}
+.xai-dir[data-v-3c067fdb] {
+  display: flex; align-items: center; gap: 6px; padding: 6px 9px;
+  border-radius: 9px; cursor: pointer; font-size: 13px; color: var(--xai-ink);
+  transition: background .14s ease;
+}
+.xai-dir[data-v-3c067fdb]:hover { background: rgba(var(--v-theme-on-surface), .06);
+}
+.xai-lyric[data-v-3c067fdb] { max-height: 280px; overflow-y: auto; padding: 4px 8px;
+}
+.xai-lyric-line[data-v-3c067fdb] {
+  display: flex; gap: 10px; padding: 5px 8px; border-radius: 8px; font-size: 13px;
+  color: var(--xai-ink-soft);
+}
+.xai-lyric-active[data-v-3c067fdb] {
+  background: rgba(var(--v-theme-primary), .12); color: var(--xai-ink);
+  font-weight: 600; box-shadow: inset 2px 0 0 rgb(var(--v-theme-primary));
+}
+.xai-lyric-time[data-v-3c067fdb] { flex: 0 0 42px; font-size: 11px; color: var(--xai-ink-faint); font-variant-numeric: tabular-nums;
+}
+.xai-logs[data-v-3c067fdb] { padding: 4px 8px; max-height: 280px; overflow-y: auto;
+}
+.xai-log[data-v-3c067fdb] { display: flex; align-items: center; gap: 8px; padding: 5px 0; flex-wrap: wrap;
+}
+.xai-log-message[data-v-3c067fdb] { flex: 1 1 200px; min-width: 0; color: var(--xai-ink-soft);
+}
+.xai-table[data-v-3c067fdb] { font-size: 13px;
+}
+.xai-table .text-truncate[data-v-3c067fdb] { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.xai-cmd[data-v-3c067fdb] { display: flex; align-items: center; gap: 10px; padding: 4px 6px;
+}
+.xai-cmd-keywords[data-v-3c067fdb] { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.xai-record[data-v-3c067fdb] { display: flex; align-items: baseline; gap: 8px; padding: 4px 6px; font-size: 13px;
+}
+.xai-record-at[data-v-3c067fdb] { flex: 0 0 74px; color: var(--xai-ink-faint); font-variant-numeric: tabular-nums;
+}
+.xai-record-text[data-v-3c067fdb] { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cursor-pointer[data-v-3c067fdb] { cursor: pointer;
+}
+
+/* 长列表滚动条细一点，别抢内容 */
+.xai-content[data-v-3c067fdb]::-webkit-scrollbar, .xai-queue[data-v-3c067fdb]::-webkit-scrollbar,
+.xai-lyric[data-v-3c067fdb]::-webkit-scrollbar, .xai-logs[data-v-3c067fdb]::-webkit-scrollbar { width: 7px; height: 7px;
+}
+.xai-content[data-v-3c067fdb]::-webkit-scrollbar-thumb, .xai-queue[data-v-3c067fdb]::-webkit-scrollbar-thumb,
+.xai-lyric[data-v-3c067fdb]::-webkit-scrollbar-thumb, .xai-logs[data-v-3c067fdb]::-webkit-scrollbar-thumb {
+  border-radius: 999px; background: rgba(var(--v-theme-on-surface), .16);
+}
+@media (max-width: 900px) {
+.xai-brand-sub[data-v-3c067fdb] { display: none;
+}
+}
+@media (max-width: 760px) {
+.xai-body[data-v-3c067fdb] { flex-direction: column;
+}
+.xai-nav[data-v-3c067fdb] {
+    flex: 0 0 auto;
+    padding: 8px 10px;
+    border-right: none;
+    border-bottom: 1px solid var(--xai-line);
+}
+  /* 窄屏下七行竖排导航会把内容推到屏幕外，换成一行胶囊横排 */
+.xai-nav .xai-nav-item[data-v-3c067fdb] {
+    display: inline-flex; width: auto; margin: 2px 5px 2px 0;
+    border-radius: 999px; border: 1px solid var(--xai-line);
+}
+.xai-head[data-v-3c067fdb] { padding: 12px 14px; flex-wrap: wrap;
+}
+.xai-pane[data-v-3c067fdb], .xai-pane-title[data-v-3c067fdb] { padding-left: 14px; padding-right: 14px;
+}
+.xai-volume[data-v-3c067fdb] { max-width: none;
+}
+}

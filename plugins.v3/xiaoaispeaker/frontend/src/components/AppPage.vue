@@ -1036,7 +1036,7 @@ function paneBadge(key: Pane): number {
                                class="mt-4 xai-hero-bar" rounded />
             <div class="d-flex align-center mt-4" style="gap: 10px; flex-wrap: wrap">
               <div class="xai-transport">
-                <v-btn icon="mdi-previous-variant" size="small" variant="text"
+                <v-btn icon="mdi-skip-previous-circle-outline" size="small" variant="text"
                        :loading="busy === '播放控制'" @click="control('prev')" />
                 <v-btn class="xai-transport-main" color="primary" variant="flat" rounded="circle"
                        :icon="playing.status === 1 ? 'mdi-pause' : 'mdi-play'"
@@ -1092,7 +1092,7 @@ function paneBadge(key: Pane): number {
             <v-alert v-if="!cfg.auto_next" type="warning" variant="tonal" density="compact" class="mb-2">
               配置里的「队列自动连播」是关的，音箱播完当前这首不会自己接下一首（这里的手动「下一首」仍然有效）。
             </v-alert>
-            <v-card v-if="queue.total" variant="outlined" class="xai-queue">
+            <v-card v-if="queue.total" variant="outlined" class="xai-card xai-queue">
               <div v-for="(item, i) in queue.items" :key="item.path" class="xai-queue-row"
                    :class="{ 'xai-queue-current': i === queue.index }" @click="jumpTo(i)">
                 <span class="xai-queue-index">{{ i + 1 }}</span>
@@ -1149,7 +1149,7 @@ function paneBadge(key: Pane): number {
                   {{ lyric?.name }}｜{{ lyric?.source === 'sidecar' ? '同目录歌词文件' : '音频内嵌标签' }}
                   <template v-if="!lyric?.has_time">｜没有时间戳，只能整篇看</template>
                 </div>
-                <v-card variant="outlined">
+                <v-card variant="outlined" class="xai-card">
                   <div ref="lyricBox" class="xai-lyric">
                     <div v-for="(line, i) in lyric?.lines" :key="i" class="xai-lyric-line"
                          :class="{ 'xai-lyric-active': i === lyricActive }">
@@ -1191,7 +1191,7 @@ function paneBadge(key: Pane): number {
 
         <!-- 音乐库 -->
         <div v-show="pane === 'library'" class="xai-pane">
-          <v-card variant="outlined" class="pa-3 mb-3">
+          <v-card variant="outlined" class="xai-card pa-3 mb-3">
             <div class="d-flex align-center" style="gap: 8px; flex-wrap: wrap">
               <v-icon :icon="library.ready ? 'mdi-database-marker-outline' : 'mdi-database-refresh-outline'"
                       :color="library.ready ? 'success' : 'grey'" size="20" />
@@ -1243,7 +1243,7 @@ function paneBadge(key: Pane): number {
 
             <div v-if="browseReasonText" class="text-caption text-grey">{{ browseReasonText }}</div>
 
-            <v-card v-if="browse.dirs.length" variant="outlined" class="pa-2 mb-2">
+            <v-card v-if="browse.dirs.length" variant="outlined" class="xai-card pa-2 mb-2">
               <div v-for="dir in browse.dirs" :key="dir.path" class="xai-dir" @click="loadBrowse(dir.path)">
                 <v-icon icon="mdi-folder-outline" size="16" class="mr-2" />{{ dir.name }}
               </div>
@@ -1308,7 +1308,7 @@ function paneBadge(key: Pane): number {
               收藏按加入顺序整本入队；语音里说「播放我的收藏」走的是同一份列表。
             </span>
           </div>
-          <v-card v-if="favorites.length" variant="outlined" class="pa-2 mt-2 xai-queue">
+          <v-card v-if="favorites.length" variant="outlined" class="xai-card pa-2 mt-2 xai-queue">
             <div v-for="row in favorites" :key="row.path" class="xai-queue-row">
               <v-icon :icon="row.exists ? 'mdi-music-note' : 'mdi-file-question-outline'" size="16"
                       :color="row.exists ? 'grey' : 'warning'" />
@@ -1334,10 +1334,10 @@ function paneBadge(key: Pane): number {
             <v-alert v-if="!playlists.length" type="info" variant="tonal" density="compact">
               {{ playlistReason || '歌单来自曲库索引：库里的一层目录（含音频）与 .m3u 文件各算一个歌单，先在「音乐库」那栏重建索引。' }}
             </v-alert>
-            <v-card v-else variant="outlined" class="pa-2 xai-queue">
+            <v-card v-else variant="outlined" class="xai-card pa-2 xai-queue">
               <div v-for="row in playlists" :key="row.id" class="xai-queue-row"
                    :class="{ 'xai-queue-current': openPlaylist?.id === row.id }" @click="openPlaylistRows(row)">
-                <v-icon :icon="row.kind === 'm3u' ? 'mdi-file-document-music-outline' : 'mdi-folder-music-outline'"
+                <v-icon :icon="row.kind === 'm3u' ? 'mdi-file-music-outline' : 'mdi-folder-music-outline'"
                         size="16" />
                 <span class="xai-queue-name" :title="row.path">{{ row.name }}</span>
                 <span class="text-caption text-grey">{{ row.count }} 首</span>
@@ -1396,7 +1396,7 @@ function paneBadge(key: Pane): number {
           <div v-if="!tasks.length" class="text-caption text-grey mb-2">
             还没有任务。下面建一条：到点由插件的周期巡检触发（20 秒一次，同一分钟只跑一次）。
           </div>
-          <v-card v-for="row in tasks" :key="row.id" variant="outlined" class="pa-3 mb-2">
+          <v-card v-for="row in tasks" :key="row.id" variant="outlined" class="xai-card pa-3 mb-2">
             <div class="d-flex align-center" style="gap: 10px; flex-wrap: wrap">
               <v-switch :model-value="row.enabled" hide-details density="compact" color="primary"
                         :loading="busy === '启用任务' || busy === '停用任务'"
@@ -1419,7 +1419,7 @@ function paneBadge(key: Pane): number {
             </div>
           </v-card>
 
-          <v-card variant="outlined" class="pa-3 mt-3">
+          <v-card variant="outlined" class="xai-card pa-3 mt-3">
             <div class="xai-block-title">{{ editingTask ? `编辑任务「${editingTask}」` : '新建任务' }}</div>
             <div class="d-flex" style="gap: 8px; flex-wrap: wrap">
               <v-text-field v-model="taskForm.name" density="compact" hide-details clearable label="任务名"
@@ -1497,7 +1497,7 @@ function paneBadge(key: Pane): number {
               <span class="text-caption text-grey ml-2">最近 {{ taskLogs.length }} 条</span>
             </div>
             <div v-if="!taskLogs.length" class="text-caption text-grey">还没有执行记录。</div>
-            <v-card v-else variant="outlined" class="xai-logs">
+            <v-card v-else variant="outlined" class="xai-card xai-logs">
               <div v-for="(row, i) in taskLogs" :key="i" class="xai-log">
                 <v-icon :icon="row.success ? 'mdi-check-circle-outline' : 'mdi-alert-circle-outline'"
                         size="15" :color="row.success ? 'success' : 'error'" />
@@ -1512,7 +1512,7 @@ function paneBadge(key: Pane): number {
 
         <!-- 语音控制 -->
         <div v-show="pane === 'voice'" class="xai-pane">
-          <v-card variant="outlined" class="pa-4">
+          <v-card variant="outlined" class="xai-card pa-4">
             <div class="d-flex align-center" style="gap: 8px; flex-wrap: wrap">
               <v-icon icon="mdi-microphone-message" size="26"
                       :color="voice.enabled ? 'success' : 'grey'" />
@@ -1577,7 +1577,7 @@ function paneBadge(key: Pane): number {
             <div class="text-caption text-grey mb-2">
               关掉某一类，那句话就不会被接手（会留给小爱自己的回答）。「停止播放」这类保底口令不受这里影响。
             </div>
-            <v-card variant="outlined" class="pa-2">
+            <v-card variant="outlined" class="xai-card pa-2">
               <div v-for="row in commandRows" :key="row.kind" class="xai-cmd">
                 <v-switch v-model="row.enabled" color="primary" hide-details inset density="compact"
                           :label="row.label" style="flex: 0 0 168px" />
@@ -1601,7 +1601,7 @@ function paneBadge(key: Pane): number {
                  ? '还没抓到新的对话。对音箱说一句话，等下一次轮询（最多十几秒）再刷新这里。'
                  : '开启监听后，这里会列出插件从对话记录里读到的每一句。' }}
             </v-alert>
-            <v-card v-else variant="outlined" class="pa-2">
+            <v-card v-else variant="outlined" class="xai-card pa-2">
               <div v-for="(row, i) in voiceRecords" :key="`${row.at}-${i}`" class="xai-record">
                 <span class="text-caption text-grey xai-record-at">{{ row.at }}</span>
                 <span class="xai-record-text">{{ row.text }}</span>
@@ -1618,7 +1618,7 @@ function paneBadge(key: Pane): number {
 
         <!-- 账号与设备 -->
         <div v-show="pane === 'account'" class="xai-pane">
-          <v-card variant="outlined" class="pa-4 mb-3">
+          <v-card variant="outlined" class="xai-card pa-4 mb-3">
             <div class="xai-block-title">
               小米账号
               <v-chip size="x-small" variant="tonal" class="ml-2"
@@ -1705,7 +1705,7 @@ function paneBadge(key: Pane): number {
           </v-card>
 
           <v-expand-transition>
-            <v-card v-if="picker && devices.length" variant="outlined" color="primary" class="pa-4 mb-3">
+            <v-card v-if="picker && devices.length" variant="outlined" color="primary" class="xai-card-accent pa-4 mb-3">
               <div class="xai-block-title">
                 选一台当默认音箱
                 <span class="text-caption text-grey ml-2">{{ devices.length }} 台可选</span>
@@ -1745,7 +1745,7 @@ function paneBadge(key: Pane): number {
                ? '设备列表是空的：可能票据已失效，点上面的「刷新设备」重试。'
                : '登录小米账号后才能看到音箱。' }}
           </v-alert>
-          <v-card v-for="device in devices" :key="device.device_id" variant="outlined" class="pa-3 mb-2">
+          <v-card v-for="device in devices" :key="device.device_id" variant="outlined" class="xai-card pa-3 mb-2">
             <div class="d-flex align-center" style="gap: 10px; flex-wrap: wrap">
               <v-icon :icon="device.presence === 'online' ? 'mdi-speaker' : 'mdi-speaker-off'"
                       :color="device.presence === 'online' ? 'success' : 'grey'" />
@@ -1776,9 +1776,9 @@ function paneBadge(key: Pane): number {
               设备分组
               <span class="text-caption text-grey ml-2">{{ groups.length }} 组</span>
             </div>
-            <v-card v-for="row in groups" :key="row.name" variant="outlined" class="pa-3 mb-2">
+            <v-card v-for="row in groups" :key="row.name" variant="outlined" class="xai-card pa-3 mb-2">
               <div class="d-flex align-center" style="gap: 10px; flex-wrap: wrap">
-                <v-icon icon="mdi-home-group-outline" color="primary" />
+                <v-icon icon="mdi-home-group" color="primary" />
                 <div style="min-width: 0; flex: 1 1 200px">
                   <div class="text-body-2">
                     {{ row.name }}
@@ -1795,7 +1795,7 @@ function paneBadge(key: Pane): number {
               </div>
             </v-card>
 
-            <v-card variant="outlined" class="pa-3">
+            <v-card variant="outlined" class="xai-card pa-3">
               <div class="d-flex align-center" style="gap: 8px; flex-wrap: wrap">
                 <v-text-field v-model="groupForm.name" density="compact" hide-details clearable
                               :label="editingGroup ? `改名或另起一组（原「${editingGroup}」）` : '新建分组'"
@@ -1876,6 +1876,17 @@ function paneBadge(key: Pane): number {
 .xai-pill-idle { color: var(--xai-ink-soft); background: var(--xai-veil); border-color: var(--xai-line); }
 
 .xai-todo { margin: 14px 18px 0; border-radius: var(--xai-radius); }
+
+/* 列表面板的容器：v-card 自带的圆角比这套设计小一圈，边框也偏重，
+   统一收成 14px + 一条淡线。用自有类名写，绕开构建的 .v- 门禁。 */
+.xai-card {
+  border-radius: var(--xai-radius);
+  border-color: var(--xai-line);
+}
+.xai-card-accent {
+  border-radius: var(--xai-radius);
+  border-color: rgba(var(--v-theme-primary), .35);
+}
 
 /* ---------- 骨架 ---------- */
 .xai-body { display: flex; min-height: 460px; }
@@ -2007,16 +2018,21 @@ function paneBadge(key: Pane): number {
 
 @media (max-width: 900px) {
   .xai-brand-sub { display: none; }
-  .xai-stats { display: none; }
 }
 @media (max-width: 760px) {
   .xai-body { flex-direction: column; }
   .xai-nav {
     flex: 0 0 auto;
+    padding: 8px 10px;
     border-right: none;
     border-bottom: 1px solid var(--xai-line);
   }
-  .xai-head { padding: 12px 14px; }
+  /* 窄屏下七行竖排导航会把内容推到屏幕外，换成一行胶囊横排 */
+  .xai-nav .xai-nav-item {
+    display: inline-flex; width: auto; margin: 2px 5px 2px 0;
+    border-radius: 999px; border: 1px solid var(--xai-line);
+  }
+  .xai-head { padding: 12px 14px; flex-wrap: wrap; }
   .xai-pane, .xai-pane-title { padding-left: 14px; padding-right: 14px; }
   .xai-volume { max-width: none; }
 }

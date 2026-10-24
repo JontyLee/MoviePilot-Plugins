@@ -238,7 +238,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     _createVNode(_component_v_btn, {
                       size: "x-small",
                       variant: "text",
-                      icon: "mdi-previous-variant",
+                      icon: "mdi-skip-previous-circle-outline",
                       loading: busy.value === "播放控制",
                       onClick: _cache[2] || (_cache[2] = ($event) => control("prev"))
                     }, null, 8, ["loading"]),
@@ -428,6 +428,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const Page = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-61641a37"]]);
+const Page = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-f18a4813"]]);
 
 export { Page as default };

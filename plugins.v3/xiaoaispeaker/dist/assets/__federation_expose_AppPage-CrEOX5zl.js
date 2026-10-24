@@ -1376,7 +1376,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     _createElementVNode("div", _hoisted_21, [
                       _createElementVNode("div", _hoisted_22, [
                         _createVNode(_component_v_btn, {
-                          icon: "mdi-previous-variant",
+                          icon: "mdi-skip-previous-circle-outline",
                           size: "small",
                           variant: "text",
                           loading: busy.value === "播放控制",
@@ -1520,7 +1520,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   queue.value.total ? (_openBlock(), _createBlock(_component_v_card, {
                     key: 1,
                     variant: "outlined",
-                    class: "xai-queue"
+                    class: "xai-card xai-queue"
                   }, {
                     default: _withCtx(() => [
                       (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(queue.value.items, (item, i) => {
@@ -1636,7 +1636,10 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                           _createTextVNode("｜没有时间戳，只能整篇看")
                         ], 64)) : _createCommentVNode("", true)
                       ]),
-                      _createVNode(_component_v_card, { variant: "outlined" }, {
+                      _createVNode(_component_v_card, {
+                        variant: "outlined",
+                        class: "xai-card"
+                      }, {
                         default: _withCtx(() => [
                           _createElementVNode("div", {
                             ref_key: "lyricBox",
@@ -1760,7 +1763,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               _withDirectives(_createElementVNode("div", _hoisted_48, [
                 _createVNode(_component_v_card, {
                   variant: "outlined",
-                  class: "pa-3 mb-3"
+                  class: "xai-card pa-3 mb-3"
                 }, {
                   default: _withCtx(() => [
                     _createElementVNode("div", _hoisted_49, [
@@ -1916,7 +1919,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   browse.value.dirs.length ? (_openBlock(), _createBlock(_component_v_card, {
                     key: 1,
                     variant: "outlined",
-                    class: "pa-2 mb-2"
+                    class: "xai-card pa-2 mb-2"
                   }, {
                     default: _withCtx(() => [
                       (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(browse.value.dirs, (dir) => {
@@ -2049,7 +2052,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                 favorites.value.length ? (_openBlock(), _createBlock(_component_v_card, {
                   key: 0,
                   variant: "outlined",
-                  class: "pa-2 mt-2 xai-queue"
+                  class: "xai-card pa-2 mt-2 xai-queue"
                 }, {
                   default: _withCtx(() => [
                     (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(favorites.value, (row) => {
@@ -2135,7 +2138,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   })) : (_openBlock(), _createBlock(_component_v_card, {
                     key: 1,
                     variant: "outlined",
-                    class: "pa-2 xai-queue"
+                    class: "xai-card pa-2 xai-queue"
                   }, {
                     default: _withCtx(() => [
                       (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(playlists.value, (row) => {
@@ -2145,7 +2148,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                           onClick: ($event) => openPlaylistRows(row)
                         }, [
                           _createVNode(_component_v_icon, {
-                            icon: row.kind === "m3u" ? "mdi-file-document-music-outline" : "mdi-folder-music-outline",
+                            icon: row.kind === "m3u" ? "mdi-file-music-outline" : "mdi-folder-music-outline",
                             size: "16"
                           }, null, 8, ["icon"]),
                           _createElementVNode("span", {
@@ -2270,7 +2273,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   return _openBlock(), _createBlock(_component_v_card, {
                     key: row.id,
                     variant: "outlined",
-                    class: "pa-3 mb-2"
+                    class: "xai-card pa-3 mb-2"
                   }, {
                     default: _withCtx(() => [
                       _createElementVNode("div", _hoisted_84, [
@@ -2344,7 +2347,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                 }), 128)),
                 _createVNode(_component_v_card, {
                   variant: "outlined",
-                  class: "pa-3 mt-3"
+                  class: "xai-card pa-3 mt-3"
                 }, {
                   default: _withCtx(() => [
                     _createElementVNode("div", _hoisted_88, _toDisplayString(editingTask.value ? `编辑任务「${editingTask.value}」` : "新建任务"), 1),
@@ -2577,7 +2580,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   !taskLogs.value.length ? (_openBlock(), _createElementBlock("div", _hoisted_98, "还没有执行记录。")) : (_openBlock(), _createBlock(_component_v_card, {
                     key: 1,
                     variant: "outlined",
-                    class: "xai-logs"
+                    class: "xai-card xai-logs"
                   }, {
                     default: _withCtx(() => [
                       (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(taskLogs.value, (row, i) => {
@@ -2606,7 +2609,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               _withDirectives(_createElementVNode("div", _hoisted_103, [
                 _createVNode(_component_v_card, {
                   variant: "outlined",
-                  class: "pa-4"
+                  class: "xai-card pa-4"
                 }, {
                   default: _withCtx(() => [
                     _createElementVNode("div", _hoisted_104, [
@@ -2719,7 +2722,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   _cache[103] || (_cache[103] = _createElementVNode("div", { class: "text-caption text-grey mb-2" }, " 关掉某一类，那句话就不会被接手（会留给小爱自己的回答）。「停止播放」这类保底口令不受这里影响。 ", -1)),
                   _createVNode(_component_v_card, {
                     variant: "outlined",
-                    class: "pa-2"
+                    class: "xai-card pa-2"
                   }, {
                     default: _withCtx(() => [
                       (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(commandRows.value, (row) => {
@@ -2775,7 +2778,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   })) : (_openBlock(), _createBlock(_component_v_card, {
                     key: 1,
                     variant: "outlined",
-                    class: "pa-2"
+                    class: "xai-card pa-2"
                   }, {
                     default: _withCtx(() => [
                       (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(voiceRecords.value, (row, i) => {
@@ -2803,7 +2806,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
               _withDirectives(_createElementVNode("div", _hoisted_124, [
                 _createVNode(_component_v_card, {
                   variant: "outlined",
-                  class: "pa-4 mb-3"
+                  class: "xai-card pa-4 mb-3"
                 }, {
                   default: _withCtx(() => [
                     _createElementVNode("div", _hoisted_125, [
@@ -3033,7 +3036,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       key: 0,
                       variant: "outlined",
                       color: "primary",
-                      class: "pa-4 mb-3"
+                      class: "xai-card-accent pa-4 mb-3"
                     }, {
                       default: _withCtx(() => [
                         _createElementVNode("div", _hoisted_140, [
@@ -3127,7 +3130,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   return _openBlock(), _createBlock(_component_v_card, {
                     key: device.device_id,
                     variant: "outlined",
-                    class: "pa-3 mb-2"
+                    class: "xai-card pa-3 mb-2"
                   }, {
                     default: _withCtx(() => [
                       _createElementVNode("div", _hoisted_148, [
@@ -3209,12 +3212,12 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     return _openBlock(), _createBlock(_component_v_card, {
                       key: row.name,
                       variant: "outlined",
-                      class: "pa-3 mb-2"
+                      class: "xai-card pa-3 mb-2"
                     }, {
                       default: _withCtx(() => [
                         _createElementVNode("div", _hoisted_155, [
                           _createVNode(_component_v_icon, {
-                            icon: "mdi-home-group-outline",
+                            icon: "mdi-home-group",
                             color: "primary"
                           }),
                           _createElementVNode("div", _hoisted_156, [
@@ -3265,7 +3268,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   }), 128)),
                   _createVNode(_component_v_card, {
                     variant: "outlined",
-                    class: "pa-3"
+                    class: "xai-card pa-3"
                   }, {
                     default: _withCtx(() => [
                       _createElementVNode("div", _hoisted_159, [
@@ -3353,6 +3356,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const AppPage = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-7711424b"]]);
+const AppPage = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-3c067fdb"]]);
 
 export { AppPage as default };
