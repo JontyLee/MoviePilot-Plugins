@@ -29,7 +29,7 @@ function onConfigSaved() {
           :source-plugin-id="props.sourcePluginId" :show-switch="true"
           @switch="configDialog = true" />
 
-    <v-dialog v-model="configDialog" max-width="1180px" scrollable persistent>
+    <v-dialog v-model="configDialog" max-width="980px" scrollable persistent>
       <v-card variant="flat" class="mls-config-dialog">
         <Config :api="props.api" :plugin-id="props.pluginId" :source-plugin-id="props.sourcePluginId"
                 standalone @close="configDialog = false" @updated="onConfigSaved" />

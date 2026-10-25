@@ -1017,10 +1017,14 @@ class ContractTest(unittest.TestCase):
         self.assertIn("./FlowPipeline.vue", cfg)
         # 界面只画环节，不摊开说明文：长句一律在 docs
         self.assertNotIn("desc:", flow)
-        # 配置页先讲流程再讲具体项：这插件每个开关最后都改写音乐文件且不可回滚
-        self.assertIn("pane === 'flow'", cfg)
-        self.assertLess(cfg.index("'流程'"), cfg.index("'运行与写入'"))
-        # 侧栏版式向宿主申请宽度（宿主对话框默认 60rem 装不下侧栏 + 分页表）
+        # 配置页是一页摊开的分组，不再分栏切换：先流水线再具体项这个顺序要留在文档顺序里
+        # —— 这插件每个开关最后都改写音乐文件且不可回滚，不知道在调哪一环就没法判断该不该调
+        self.assertNotIn("pane", cfg)
+        self.assertNotIn("mls-nav", cfg)
+        titles = ["流程", "运行与写入", "识别与匹配", "音乐库范围"]
+        positions = [cfg.index(f'<div class="mls-group-title">{t}</div>') for t in titles]
+        self.assertEqual(positions, sorted(positions))
+        # 向宿主申请宽度：两条路径输入框与流水线，宿主默认 60rem 摆不开
         self.assertIn("emit('layout'", page)
         self.assertIn("emit('layout'", cfg)
 

@@ -74,7 +74,7 @@ V3 新插件使用 `plugins.v3/<plugin_id_lower>/`、`tests/v3/<plugin_id_lower>
 | --- | --- |
 | 类名 / 目录 | `MusicLibraryScraper` / `plugins.v3/musiclibraryscraper/` |
 | 配置前缀 | `musiclibraryscraper_` |
-| 版本 | 0.8.0 |
+| 版本 | 0.9.0 |
 | 元数据来源 | 插件直连的各平台公开检索接口（网易云 / QQ音乐 / 酷狗 / 咪咕 / MusicBrainz），不必部署任何服务 |
 | 图标 | `icons/tagflow.svg`（仓库自绘，市场走 raw 地址） |
 | 使用说明 | [docs/musiclibraryscraper.md](./docs/musiclibraryscraper.md) |

@@ -172,6 +172,8 @@ plugins.v3/*/frontend/dist/
 # CodeGraph 本地索引产物（工具生成，不入库）
 .codegraph/
 
-# 小爱音箱前端的本地预览工装：vite dev + Edge 无头截图用，不随插件发布
+# 插件前端的本地预览工装：vite dev + Edge 无头截图用，不随插件发布
 plugins.v3/xiaoaispeaker/frontend/preview/
 plugins.v3/xiaoaispeaker/frontend/vite.preview.config.ts
+plugins.v3/musiclibraryscraper/frontend/preview/
+plugins.v3/musiclibraryscraper/frontend/vite.preview.config.ts

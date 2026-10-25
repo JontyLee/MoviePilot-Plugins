@@ -1,6 +1,6 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
 import Page from './__federation_expose_Page-Der7Rktg.js';
-import Config from './__federation_expose_Config-C9TGoBuf.js';
+import Config from './__federation_expose_Config-BkowejZ2.js';
 import { _ as _export_sfc } from './flow-BVjcb_2i.js';
 
 const {defineComponent:_defineComponent} = await importShared('vue');
@@ -41,7 +41,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
         _createVNode(_component_v_dialog, {
           modelValue: configDialog.value,
           "onUpdate:modelValue": _cache[2] || (_cache[2] = ($event) => configDialog.value = $event),
-          "max-width": "1180px",
+          "max-width": "980px",
           scrollable: "",
           persistent: ""
         }, {
@@ -70,6 +70,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const AppPage = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-08b5c1c6"]]);
+const AppPage = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-463c152d"]]);
 
 export { AppPage as default };

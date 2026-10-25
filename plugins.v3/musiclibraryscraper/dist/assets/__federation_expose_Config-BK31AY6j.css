@@ -1,0 +1,28 @@
+
+/* 仅插件内局部样式；不得写全局 v- 或 mdi- 类规则（构建有 postcss 门禁）。 */
+.mls-card[data-v-03fb4135] { width: 100%; display: flex; flex-direction: column;
+}
+.mls-head[data-v-03fb4135] { display: flex; align-items: center; gap: 8px; padding: 14px 18px;
+}
+.mls-head-text[data-v-03fb4135] { min-width: 0;
+}
+.mls-body[data-v-03fb4135] { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 4px 18px 16px;
+}
+/* 侧栏对话框里整张卡要被限高：限在卡片上、让正文自己滚，
+   底部的保存条才不会顶出可视区被裁掉（宿主那层滚动交给 v-dialog 做不了这件事）。 */
+.mls-card-fit[data-v-03fb4135] { max-height: 86vh;
+}
+.mls-group[data-v-03fb4135] { padding: 16px 0;
+}
+.mls-group + .mls-group[data-v-03fb4135] { border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+}
+.mls-group-title[data-v-03fb4135] { font-size: 13px; font-weight: 600; margin-bottom: 10px; opacity: .8;
+}
+.mls-docs[data-v-03fb4135] { margin-top: 14px; padding-top: 10px; border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+}
+.mls-warn[data-v-03fb4135] { color: rgb(var(--v-theme-warning));
+}
+.mls-chips[data-v-03fb4135] { display: flex; flex-wrap: wrap; gap: 6px;
+}
+.mls-actions[data-v-03fb4135] { display: flex; align-items: center; gap: 8px; padding: 10px 16px;
+}

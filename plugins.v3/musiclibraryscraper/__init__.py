@@ -732,7 +732,7 @@ class MusicLibraryScraper(_PluginBase):
         "侧栏「整理」下常驻数据页，失败与有缺项逐文件可查可补。"
     )
     plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/tagflow.svg"
-    plugin_version = "0.8.0"
+    plugin_version = "0.9.0"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "musiclibraryscraper_"

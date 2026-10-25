@@ -74,18 +74,6 @@ function notify(msg: string, color = 'info') {
   snackbar.value = { show: true, text: msg, color }
 }
 
-type Pane = 'flow' | 'run' | 'match' | 'library'
-const pane = ref<Pane>('flow')
-
-const panes: { key: Pane; title: string; icon: string; desc: string }[] = [
-  { key: 'flow', title: '流程', icon: 'mdi-source-branch', desc: '一个文件从被扫到写标签，要过的几道判断' },
-  { key: 'run', title: '运行与写入', icon: 'mdi-play-circle-outline', desc: '什么时候跑、跑到已有标签的文件动不动它' },
-  { key: 'match', title: '识别与匹配', icon: 'mdi-magnify', desc: '问哪几个源、几分算命中' },
-  { key: 'library', title: '音乐库范围', icon: 'mdi-folder-multiple-outline', desc: '扫哪些目录、跳过哪些' }
-]
-
-const currentPane = computed(() => panes.find(p => p.key === pane.value) || panes[0])
-
 const modeItems = [
   { title: '只补缺（推荐）', value: '' },
   { title: '强制覆盖已有标签', value: 'force_all' }
@@ -153,8 +141,8 @@ async function saveStandalone() {
 }
 
 onMounted(() => {
-  // 侧栏版式需要比宿主默认的 60rem 更宽，宽度由宿主的配置框按这个事件设置
-  emit('layout', { maxWidth: '74rem' })
+  // 一页摊开后没有左侧导航占宽，但两条路径输入框与流水线仍要比宿主默认 60rem 松一点
+  emit('layout', { maxWidth: '64rem' })
   if (props.standalone) loadStandalone()
 })
 </script>
@@ -167,7 +155,9 @@ onMounted(() => {
       </v-avatar>
       <div class="mls-head-text">
         <div class="text-h6">TagFlow音乐库刮削 · 配置</div>
-        <div class="text-caption text-medium-emphasis">{{ currentPane.desc }}</div>
+        <div class="text-caption text-medium-emphasis">
+          每个开关最后都落到音乐文件上且无法回滚，先看它管流水线哪一环
+        </div>
       </div>
       <v-spacer />
       <v-switch v-model="config.enabled" color="success" hide-details inset
@@ -176,159 +166,137 @@ onMounted(() => {
     <v-divider />
 
     <div class="mls-body">
-      <nav class="mls-nav">
-        <v-list density="comfortable" nav class="py-2">
-          <v-list-item
-            v-for="item in panes"
-            :key="item.key"
-            :active="pane === item.key"
-            color="primary"
-            rounded="lg"
-            class="mls-nav-item"
-            @click="pane = item.key"
-          >
-            <template #prepend><v-icon :icon="item.icon" class="mr-2" /></template>
-            <v-list-item-title>{{ item.title }}</v-list-item-title>
-          </v-list-item>
-        </v-list>
-      </nav>
+      <!-- 流程：动画讲环节，细节去 docs；一页摊开后这里只留一句提醒，
+           逐项判据与警告的完整版都在下面的具体项里说，不重复占一整屏 -->
+      <section class="mls-group">
+        <div class="mls-group-title">流程</div>
+        <FlowPipeline :steps="FLOW_STEPS" variant="config" :running="true" />
 
-      <section class="mls-content">
-        <!-- 流程：动画讲环节，细节去 docs；这里不再摊开说明文 -->
-        <div v-show="pane === 'flow'" class="mls-pane">
-          <FlowPipeline :steps="FLOW_STEPS" variant="config" :running="true" />
-
-          <v-alert type="warning" variant="tonal" density="compact" class="mt-3">
-            <div class="text-body-2 font-weight-medium">写进文件就回不去</div>
-            <div class="text-caption mt-1">
-              「最低匹配分数」调到 1：曲名对上就写，翻唱、钢琴版也会被当成原曲。<br />
-              「强制覆盖」：手工改过的标签会被替换，封面重新下载内嵌。<br />
-              两者都取这里与宿主刮削策略里较强者；先小范围试一轮再全库跑。
-            </div>
-          </v-alert>
-
-          <div class="mls-docs">
-            <div class="mls-block-title">想看逐项判据与失败归因</div>
-            <div class="text-caption text-grey">
-              配置项下面的说明只留最短的一句；目录结构兜底、同分时取哪一份、各源现状与
-              没接进来的源，都写在仓库的使用说明里。
-            </div>
-            <v-btn :href="DOCS_URL" target="_blank" rel="noopener" variant="text" size="small"
-                   class="text-none mt-1" prepend-icon="mdi-open-in-new">
-              docs/musiclibraryscraper.md
-            </v-btn>
+        <div class="mls-docs">
+          <div class="text-caption mls-warn">
+            分数调到 1 会把翻唱、钢琴版当成原曲；强制覆盖会替换手工改过的标签 ——
+            两者都写进文件、无法回滚，先小范围试一轮再全库跑。
           </div>
+          <div class="text-caption text-grey mt-1">
+            目录结构兜底、同分时取哪一份、各源现状与没接进来的源，都写在仓库的使用说明里。
+          </div>
+          <v-btn :href="DOCS_URL" target="_blank" rel="noopener" variant="text" size="small"
+                 class="text-none mt-1" prepend-icon="mdi-open-in-new">
+            docs/musiclibraryscraper.md
+          </v-btn>
+        </div>
+      </section>
+
+      <!-- 运行与写入 -->
+      <section class="mls-group">
+        <div class="mls-group-title">运行与写入</div>
+
+        <v-row dense>
+          <v-col cols="12" md="6">
+            <v-select v-model="config.mode" :items="modeItems" label="写入模式" hide-details />
+          </v-col>
+          <v-col cols="12" md="6">
+            <v-text-field
+              v-model="config.cron"
+              label="执行周期"
+              placeholder="5 位 cron；星期 0=周一…6=周日、7=周日，留空默认 0 3 * * sun"
+              hide-details
+            />
+          </v-col>
+        </v-row>
+
+        <div class="text-caption text-grey mt-2">
+          {{ config.mode === 'force_all' ? '强制覆盖：全库重扫重问，手工改过的标签会被替换（候选里没有的字段不会清空）。'
+            : '只补缺：四项齐全的文件直接跳过，缺哪项补哪项，手工改过的标签不动。' }}
+          最终是否覆盖取这里与宿主「设置 → 媒体刮削」的较强者。
         </div>
 
-        <!-- 运行与写入 -->
-        <div v-show="pane === 'run'" class="mls-pane">
-          <v-row dense>
-            <v-col cols="12" md="6">
-              <v-select v-model="config.mode" :items="modeItems" label="写入模式" hide-details />
-            </v-col>
-            <v-col cols="12" md="6">
-              <v-text-field
-                v-model="config.cron"
-                label="执行周期"
-                placeholder="5 位 cron；星期 0=周一…6=周日、7=周日，留空默认 0 3 * * sun"
-                hide-details
-              />
-            </v-col>
-          </v-row>
+        <v-switch v-model="config.onlyonce" label="保存后立即运行一次" hide-details
+                  color="primary" inset class="mt-2" />
 
-          <div class="mls-block">
-            <div class="text-caption text-grey">
-              {{ config.mode === 'force_all' ? '强制覆盖：全库重扫重问，手工改过的标签会被替换（候选里没有的字段不会清空）。'
-                : '只补缺：四项齐全的文件直接跳过，缺哪项补哪项，手工改过的标签不动。' }}
-              最终是否覆盖取这里与宿主「设置 → 媒体刮削」的较强者。
-            </div>
-          </div>
-
-          <v-switch v-model="config.onlyonce" label="保存后立即运行一次" hide-details
-                    color="primary" inset class="mt-1" />
-
-          <div class="mls-block">
-            <v-switch v-model="config.show_sidebar_nav" label="在主界面「整理」显示侧栏入口"
-                      hide-details color="primary" inset />
-            <div class="text-caption text-grey mt-1">
-              数据页（逐文件核对与补齐）在这个入口里；关掉不影响周期扫描，也不影响宿主「插件管理 → 配置」。
-            </div>
+        <div class="mt-2">
+          <v-switch v-model="config.show_sidebar_nav" label="在主界面「整理」显示侧栏入口"
+                    hide-details color="primary" inset />
+          <div class="text-caption text-grey mt-1">
+            数据页（逐文件核对与补齐）在这个入口里；关掉不影响周期扫描，也不影响宿主「插件管理 → 配置」。
           </div>
         </div>
+      </section>
 
-        <!-- 识别与匹配 -->
-        <div v-show="pane === 'match'" class="mls-pane">
-          <v-row dense>
-            <v-col cols="12" md="4">
-              <v-text-field
-                v-model.number="config.min_score"
-                label="最低匹配分数（1-3）"
-                type="number"
-                min="1"
-                max="3"
-                hide-details
-              />
-            </v-col>
-            <v-col cols="12" md="8">
-              <v-select
-                v-model="config.resources"
-                :items="resourceItems"
-                label="识别源（可多选，留空=全部源）"
-                multiple
-                chips
-                closable-chips
-                density="compact"
-              />
-            </v-col>
-          </v-row>
-          <div class="text-caption text-grey">{{ sourceNote }}。</div>
+      <!-- 识别与匹配 -->
+      <section class="mls-group">
+        <div class="mls-group-title">识别与匹配</div>
 
-          <v-switch
-            v-model="config.fill_lyrics"
-            label="缺歌词时主动去识别源抓（默认交给宿主）"
-            hide-details
-            color="primary"
-            inset
-            class="mt-1"
-          />
+        <v-row dense>
+          <v-col cols="12" md="4">
+            <v-text-field
+              v-model.number="config.min_score"
+              label="最低匹配分数（1-3）"
+              type="number"
+              min="1"
+              max="3"
+              hide-details
+            />
+          </v-col>
+          <v-col cols="12" md="8">
+            <v-select
+              v-model="config.resources"
+              :items="resourceItems"
+              label="识别源（可多选，留空=全部源）"
+              multiple
+              chips
+              closable-chips
+              density="compact"
+            />
+          </v-col>
+        </v-row>
+        <div class="text-caption text-grey mt-2">{{ sourceNote }}。</div>
 
-          <div class="mls-block">
-            <div class="text-caption text-grey">
-              曲名 / 艺人 / 专辑 各 1 分，默认要 3 分全中才写；分数低于阈值只记失败、不碰文件。
-              调低到 1-2 就可能把翻唱、纯音乐版当成原曲，标签写进文件无法回滚。
-            </div>
-            <div class="text-caption text-grey mt-1">
-              五个源都是插件直连的公开检索接口，不必部署任何服务；只发清洗后的「曲名-艺人」，
-              库内路径与目录结构不出本机。
-            </div>
-            <div class="text-caption text-grey mt-1">
-              比对用的本地身份优先读文件已有标签，缺哪项就按目录结构兜底；猜不出来宁可判未达阈值，
-              也不拿目录名凑假身份改写标签。
-            </div>
-          </div>
+        <v-switch
+          v-model="config.fill_lyrics"
+          label="缺歌词时主动去识别源抓（默认交给宿主）"
+          hide-details
+          color="primary"
+          inset
+          class="mt-2"
+        />
+
+        <div class="text-caption text-grey mt-2">
+          曲名 / 艺人 / 专辑 各 1 分，默认要 3 分全中才写；分数低于阈值只记失败、不碰文件。
+          调低到 1-2 就可能把翻唱、纯音乐版当成原曲，标签写进文件无法回滚。
         </div>
+        <div class="text-caption text-grey mt-1">
+          五个源都是插件直连的公开检索接口，不必部署任何服务；只发清洗后的「曲名-艺人」，
+          库内路径与目录结构不出本机。
+        </div>
+        <div class="text-caption text-grey mt-1">
+          比对用的本地身份优先读文件已有标签，缺哪项就按目录结构兜底；猜不出来宁可判未达阈值，
+          也不拿目录名凑假身份改写标签。
+        </div>
+      </section>
 
-        <!-- 音乐库范围 -->
-        <div v-show="pane === 'library'" class="mls-pane">
-          <v-textarea
-            v-model="config.scraper_paths"
-            :rows="6"
-            label="音乐库路径（一行一个目录）"
-            placeholder="/media/music/周杰伦&#10;/media/music"
-            hide-details
-          />
-          <v-textarea v-model="config.exclude_paths" :rows="2" label="排除路径" hide-details class="mt-2" />
+      <!-- 音乐库范围 -->
+      <section class="mls-group">
+        <div class="mls-group-title">音乐库范围</div>
 
-          <div class="mls-block">
-            <div class="text-caption text-grey">
-              只处理宿主音频白名单与本插件支持列表的交集；.trickplay 缓存目录整棵跳过，
-              指向库外的软链不碰 —— 写标签是按路径落到真实文件的。
-            </div>
-            <div v-if="audioExtensions.length" class="mls-chips mt-2">
-              <v-chip v-for="ext in audioExtensions" :key="ext" size="x-small" variant="tonal"
-                      color="grey">{{ ext }}</v-chip>
-            </div>
-          </div>
+        <v-textarea
+          v-model="config.scraper_paths"
+          :rows="4"
+          auto-grow
+          label="音乐库路径（一行一个目录）"
+          placeholder="/media/music/周杰伦&#10;/media/music"
+          hide-details
+        />
+        <v-textarea v-model="config.exclude_paths" :rows="1" auto-grow
+                    label="排除路径" hide-details class="mt-2" />
+
+        <div class="text-caption text-grey mt-2">
+          只处理宿主音频白名单与本插件支持列表的交集；.trickplay 缓存目录整棵跳过，
+          指向库外的软链不碰 —— 写标签是按路径落到真实文件的。
+        </div>
+        <div v-if="audioExtensions.length" class="mls-chips mt-2">
+          <v-chip v-for="ext in audioExtensions" :key="ext" size="x-small" variant="tonal"
+                  color="grey">{{ ext }}</v-chip>
         </div>
       </section>
     </div>
@@ -360,30 +328,15 @@ onMounted(() => {
 .mls-card { width: 100%; display: flex; flex-direction: column; }
 .mls-head { display: flex; align-items: center; gap: 8px; padding: 14px 18px; }
 .mls-head-text { min-width: 0; }
-.mls-body { display: flex; min-height: 400px; }
-/* 侧栏对话框里整张卡要被限高：限在卡片上、让内容区自己滚，
+.mls-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 4px 18px 16px; }
+/* 侧栏对话框里整张卡要被限高：限在卡片上、让正文自己滚，
    底部的保存条才不会顶出可视区被裁掉（宿主那层滚动交给 v-dialog 做不了这件事）。 */
 .mls-card-fit { max-height: 86vh; }
-.mls-card-fit .mls-body { flex: 1 1 auto; min-height: 0; }
-.mls-nav {
-  flex: 0 0 176px;
-  border-right: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
-  background: rgba(var(--v-theme-on-surface), .02);
-}
-.mls-nav-item { margin: 2px 8px; }
-.mls-content { flex: 1 1 auto; min-width: 0; overflow-y: auto; }
-.mls-pane { padding: 16px 18px; }
-.mls-block { margin-top: 14px; }
-.mls-block-title { font-size: 13px; font-weight: 600; margin-bottom: 4px; opacity: .8; }
-.mls-docs { margin-top: 18px; padding-top: 12px; border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
+.mls-group { padding: 16px 0; }
+.mls-group + .mls-group { border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
+.mls-group-title { font-size: 13px; font-weight: 600; margin-bottom: 10px; opacity: .8; }
+.mls-docs { margin-top: 14px; padding-top: 10px; border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
+.mls-warn { color: rgb(var(--v-theme-warning)); }
 .mls-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .mls-actions { display: flex; align-items: center; gap: 8px; padding: 10px 16px; }
-@media (max-width: 760px) {
-  .mls-body { flex-direction: column; }
-  .mls-nav {
-    flex: 0 0 auto;
-    border-right: none;
-    border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
-  }
-}
 </style>
