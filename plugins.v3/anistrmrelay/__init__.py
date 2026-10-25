@@ -70,7 +70,7 @@ class ANiStrmRelay(_PluginBase):
     plugin_name = "ANi Strm 自用版（CF中转）"
     plugin_desc = "自动获取当季所有番剧生成strm；内置CF中转代理携带cf_clearance直连openani，解决源站人机挑战后strm无法播放的问题（基于 honue 版 ANi-Strm 迭代）"
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/anistrm.png"
-    plugin_version = "0.1.1"
+    plugin_version = "0.1.2"
     plugin_author = "JontyLee（基于 honue ANi-Strm）"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "anistrm_"
@@ -123,7 +123,13 @@ class ANiStrmRelay(_PluginBase):
             self._selected_seasons = ["latest"]
         self._proxy_base = config.get("proxy_base") or DEFAULT_UPSTREAM
         self._relay_enabled = bool(config.get("relay_enabled"))
-        self._cf_clearance = (config.get("cf_clearance") or "").strip()
+        raw_clearance = (config.get("cf_clearance") or "").strip()
+        self._cf_clearance = self._normalize_clearance(raw_clearance)
+        if raw_clearance and self._cf_clearance != raw_clearance:
+            logger.info(
+                "ANi-Strm检测到cf_clearance配置项粘贴了整串浏览器Cookie，"
+                "已自动提取其中的cf_clearance生效；建议保存后仅保留该值"
+            )
         self._cf_user_agent = (config.get("cf_user_agent") or "").strip() or DEFAULT_CF_UA
         if self._cf_clearance and not (config.get("cf_user_agent") or "").strip():
             logger.warning(
@@ -319,6 +325,30 @@ class ANiStrmRelay(_PluginBase):
                 "description": "探测上游连通性并给出应填入「中转访问地址」的完整前缀",
             },
         ]
+
+    @staticmethod
+    def _normalize_clearance(raw: str) -> str:
+        """
+        容错解析用户粘贴的凭证：只接受整串浏览器 Cookie 误粘的场景。
+
+        cf_clearance 与出口IP+UA绑定，注入时必须是裸 token；浏览器开发者工具里
+        常见的"复制整行 Cookie"会带上 _ga 等其它键值，直接注入会拼出畸形请求头，
+        CF 必然继续挑战。此处从多 cookie 串中提取 cf_clearance 的值，纯 token
+        输入原样返回。
+
+        :param raw: 设置项中的原始输入
+        :return: 仅含 cf_clearance token 的字符串（找不到时返回空串或原值）
+        """
+        raw = (raw or "").strip()
+        if not raw:
+            return ""
+        if "cf_clearance=" not in raw and ";" not in raw:
+            return raw
+        for segment in raw.split(";"):
+            name, _, value = segment.strip().partition("=")
+            if name.strip().lower() == "cf_clearance":
+                return value.strip()
+        return raw
 
     def _rotate_clearance(self, resp: httpx.Response) -> None:
         """

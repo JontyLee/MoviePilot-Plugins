@@ -26,7 +26,7 @@ Emby/Jellyfin ── strm 内容 ──> http://<MP>:3000/api/v1/plugin/ANiStrmR
 
 1. 浏览器（**出口 IP 必须与 MP 容器一致**，见下节）访问"反代/源站地址"，过一次人机验证，从开发者工具（F12 → Network → 任一对源站域的请求 → Request Headers）同时复制 `cf_clearance` 的值和该请求的 `User-Agent`——一次复制里两个都拿到了，保证成对来自同一会话。
 2. 插件设置：
-   - `cf_clearance Cookie`：粘贴上一步的值；
+   - `cf_clearance Cookie`：粘贴上一步的值，**只要 `cf_clearance=` 后面那串 token**（别把整行 Cookie 一起粘进来，`_ga` 等其它键会拼出畸形请求头让挑战一直失败；0.1.2 起即使误粘整串也会自动提取生效，但建议保持干净）；
    - `验证时的浏览器UA`：与第 1 步复制的 `User-Agent` 完全一致（就是同一条 Network 请求头里的那串，别手敲、别用别的浏览器/别的标签页的 UA）；`cf_clearance` 与 UA 绑定，UA 不匹配会重新触发挑战；
    - `中转访问令牌`：建议填一串随机字符（中转端点匿名可达，令牌防滥用；生成的 strm 会自动附带 `?rt=`）；
    - `中转访问地址`：媒体服务器可达的本插件中转前缀，形如 `http://<MP局域网地址>:3000/api/v1/plugin/ANiStrmRelay/relay`。不确定插件 ID 大小写时，登录后调用 `GET /api/v1/plugin/ANiStrmRelay/relay`（bearer 鉴权）自检，返回中的 `suggested_public_base` 即应填值，`probe.ok=true` 表示 cookie 当前可用；

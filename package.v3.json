@@ -3,13 +3,14 @@
     "name": "ANi Strm 自用版（CF中转）",
     "description": "在 honue 版 ANi-Strm 2.5.1 基础上迭代的自用插件：内置 CF 透传中转接口，播放与目录列表统一走插件自身的 API 端点，携带 cf_clearance 与验证时浏览器的 UA 以 HTTP/2 直连 openani 源站，解决源站加人机验证后 strm 无法播放的问题；cookie 过期只需在插件设置里更新（会话活跃期自动跟随 CF 滚动续期），已生成的 strm 文件无需重新生成，另支持一键改写存量旧直链。致谢原作者 honue 与 open ANi 字幕组。",
     "labels": "媒体库,动漫",
-    "version": "0.1.1",
+    "version": "0.1.2",
     "icon": "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/anistrm.png",
     "author": "JontyLee",
     "level": 2,
     "release": true,
     "system_version": ">=3.1.6",
     "history": {
+      "v0.1.2": "修复：cf_clearance 设置项粘贴了整串浏览器Cookie（_ga=…; cf_clearance=…）时，中转会拼出畸形 Cookie 请求头，导致浏览器里明明有效的凭证在插件侧一直触发CF挑战。现在加载配置自动提取其中的 cf_clearance token 生效并提示建议只保留该值，纯token粘贴行为不变；独立版代理（cf_forward_proxy.py）同样对 cf_session.json/env 来源做了该容错。",
       "v0.1.1": "修复：配置了中转访问令牌后，季度目录列表与季下拉框自身的 POST 不带 rt 参数，被中转 403 拦下，表现为「拉取不到任何季度/最新季为空」——现在目录请求统一携带令牌（直连模式不受影响）。中转与自检的挑战页判定放宽：除 Just a moment/challenge-platform 标记外，403/429/503 且响应含 Cloudflare 字样也判为失效并返回 502 提示；令牌无效与未配置 cookie 的拒访会写入插件日志便于排查。说明：拉取历史全部季度本就支持——「拉取季度」为多选下拉，选项来自远端根目录的完整季度列表，此前只因上述 403 缺陷退化为只显示本地推算季。",
       "v0.1.0": "内置CF中转：openani 源站 2026-08 起因超配额被 Cloudflare 整域强制人机挑战（honue/MoviePilot-Plugins#147），strm 直链播放全部 403。本迭代把透传代理做进插件自身的匿名 API 端点（GET/HEAD 文件流含 Range 断点续传、POST 目录列表），注入 cf_clearance 与验证时浏览器 UA，HTTP/2 出站；开启后目录拉取与 strm 生成地址统一指向中转入口，凭据不进 strm 文件，cookie 过期只改设置、存量文件不动。中转接口匿名可达，附可选访问令牌（strm 地址自动带 rt 参数）；/relay 自检端点回显建议的中转访问地址并实测上游连通性。跟随 CF 滚动续期：会话活跃期间放行响应重新下发 cf_clearance 时自动捕获热替换，按 5 分钟节流写回插件设置（重启不丢），一次手贴可覆盖整段连续观看期；DELETED 撤销类空值忽略，长期闲置彻底过期后重新贴一次即可。新增「改写已存在strm」开关，用于一次性把旧直链迁移到中转地址，内容相同自动跳过、可安全重复执行。cf_clearance 与出口IP+UA绑定，UA 必须与解题浏览器一致；中转模式下自动关闭「使用代理」（中转入口是宿主机地址）。目录接口、季度选择与刮削链路和 2.5.1 行为一致；插件 ID 独立（ANiStrmRelay），可与原版 ANiStrm 共存、互不覆盖升级，配置各自独立。致谢：本插件为 honue/MoviePilot-Plugins ANi-Strm 2.5.1（GPL-3.0）的自用迭代，失效排查依据上游 #147/#142 讨论，源站 openani worker 与 Alist 风格目录接口由 open ANi 字幕组提供。"
     }
