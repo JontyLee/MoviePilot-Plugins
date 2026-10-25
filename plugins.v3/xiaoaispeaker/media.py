@@ -11,6 +11,7 @@ media.py — 音箱可拉取的音频：目录浏览、路径安全边界与签�
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import mimetypes
@@ -21,7 +22,7 @@ import subprocess
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from urllib.parse import parse_qsl, unquote, urlencode, urlparse
+from urllib.parse import unquote, urlparse
 
 # 音箱能直接解码的容器/编码。flac 只有部分型号支持，ape/wv 这类基本不出声，
 # 所以默认列表偏保守，其余靠配置里的「音频扩展名」放开。
@@ -270,13 +271,43 @@ def _now() -> float:
     return time.time()
 
 
+def pack_link(secret: str, path: str, expires: int) -> str:
+    """把「有效期.签名.路径」压成一段纯 ASCII，直接当 URL 里唯一那个参数值。
+
+    小米云端会把交给它的 URL 里的 `&` 换成空格（实测：推过去的是
+    `path=...&exp=...&sig=...`，音箱发回来的是 `path=...%20exp=...%20sig=...`），
+    多参数直链在音箱那边必然散架。所以整条链只留一个值，并且这个值不含
+    `%`、`+`、`&`、空格 —— 中间任何一层再编码或解码都动不了它。
+    """
+    digest = sign_path(secret, path, int(expires))
+    body = base64.urlsafe_b64encode(path.encode("utf-8")).decode("ascii").rstrip("=")
+    return f"{int(expires)}.{digest}.{body}"
+
+
+def unpack_link(raw: str) -> Tuple[str, int, str]:
+    """还原 pack_link 的那一段；形状不对就回空，让调用方按「链接无效」处理。"""
+    parts = (raw or "").strip().split(".")
+    if len(parts) != 3:
+        return "", 0, ""
+    expires_text, signature, body = parts
+    # base64url 的字母表是 -_，标准解码器只认 +/：换回去再严格校验
+    standard = body.replace("-", "+").replace("_", "/")
+    try:
+        expires = int(expires_text)
+        path = base64.b64decode(standard + "=" * (-len(standard) % 4),
+                                validate=True).decode("utf-8")
+    except Exception:
+        return "", 0, ""
+    return path, expires, signature
+
+
 def stream_url(base_url: str, plugin_id: str, secret: str, path: Path,
                ttl: int) -> str:
     """拼出音箱要访问的完整直链。"""
     text = str(path)
     expires = int(_now()) + max(60, int(ttl))
-    query = urlencode({"path": text, "exp": expires, "sig": sign_path(secret, text, expires)})
-    return f"{base_url}/api/v1/plugin/{plugin_id}/stream?{query}"
+    return (f"{base_url}/api/v1/plugin/{plugin_id}/stream"
+            f"?k={pack_link(secret, text, expires)}")
 
 
 def status_text(status: Optional[int]) -> str:
@@ -388,25 +419,18 @@ def iter_transcode(proc: "subprocess.Popen") -> Iterable[bytes]:
 
 
 def parse_query(query: Any) -> Tuple[str, int, str]:
-    """从查询参数里取 path/exp/sig，容忍音箱与网关对编码的不同处理。
+    """从查询参数里取出 path/exp/sig，Mapping（FastAPI 的 query_params）和原始串都吃。
 
-    同时接受 Mapping（FastAPI 的 request.query_params）和原始查询串：
     parse_qsl 只吃字符串，直接把 Mapping 喂给它会只剩键名、什么都取不到。
     """
     if isinstance(query, str):
-        params: Dict[str, str] = dict(parse_qsl(query, keep_blank_values=True))
+        params: Dict[str, str] = {
+            key: value
+            for key, value in (item.split("=", 1) for item in query.split("&") if "=" in item)
+        }
     else:
         try:
             params = dict(query or {})
         except (TypeError, ValueError):
             params = {}
-    path = unquote(str(params.get("path") or ""))
-    try:
-        expires = int(str(params.get("exp") or "0"))
-    except (TypeError, ValueError):
-        expires = 0
-    signature = str(params.get("sig") or "").strip()
-    if path:
-        # 有些反代会把已经编码过一遍的值再编码一次
-        path = unquote(path)
-    return path, expires, signature
+    return unpack_link(str(params.get("k") or ""))

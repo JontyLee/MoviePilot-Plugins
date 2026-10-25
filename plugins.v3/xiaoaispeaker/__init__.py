@@ -254,7 +254,7 @@ class XiaoaiSpeaker(_PluginBase):
         "库内目录浏览与搜索、远程命令；播放直链由插件签名限时，不依赖媒体服务器。"
     )
     plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/xiaoai.svg"
-    plugin_version = "0.5.6"
+    plugin_version = "0.5.7"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "xiaoaispeaker_"
@@ -3175,7 +3175,10 @@ class XiaoaiSpeaker(_PluginBase):
         return self._status(force_devices=True)
 
     def api_stream(self, request: Request):
-        """GET /stream?path=&exp=&sig= —— 校验签名后按 Range 回文件（开了转码则回 mp3 流）。"""
+        """GET /stream?k=<有效期.签名.路径> —— 校验签名后按 Range 回文件（开了转码则回 mp3 流）。
+
+        只有这一个参数：小米云端会把 URL 里的 `&` 换成空格，多参数直链到音箱手里就散了。
+        """
         path, expires, signature = _media.parse_query(dict(request.query_params))
         # 先记「有人来取流」这一行：音箱不出声时，「云端没让它来」和「来了但没解码」
         # 是两个方向，而这句只有在真机上才分得出来。记文件名与请求端，不记签名

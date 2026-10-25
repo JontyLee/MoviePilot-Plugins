@@ -96,7 +96,7 @@ V3 新插件使用 `plugins.v3/<plugin_id_lower>/`、`tests/v3/<plugin_id_lower>
 | --- | --- |
 | 类名 / 目录 | `XiaoaiSpeaker` / `plugins.v3/xiaoaispeaker/` |
 | 配置前缀 | `xiaoaispeaker_` |
-| 版本 | 0.5.6 |
+| 版本 | 0.5.7 |
 | 元数据来源 | 无（不刮削，只播放）；设备与播放状态来自小米云端 Mina/ubus |
 | 图标 | `icons/xiaoai.svg`（仓库自绘，市场走 raw 地址） |
 | 使用说明 | [docs/xiaoaispeaker.md](./docs/xiaoaispeaker.md) |

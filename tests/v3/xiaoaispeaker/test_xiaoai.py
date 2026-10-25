@@ -512,12 +512,25 @@ class MediaBoundaryTest(unittest.TestCase):
         # 签名只取前 32 位，多余的尾巴不该放行
         self.assertFalse(media.verify_sign("k" * 16, path, expires, signature[:-1] + "z"))
 
-    def test_stream_url_shape(self) -> None:
+    def test_stream_url_is_one_ascii_param(self) -> None:
+        """整条直链只许有一个查询参数，且值里不含 & % + 空格。
+
+        小米云端会把 URL 里的 & 换成空格（实测音箱发回来的是
+        `path=…flac%20exp=…%20sig=…`），多参数链接到音箱手里必然散架。
+        """
         url = media.stream_url("http://mp:3000", "XiaoaiSpeaker", "sec",
                                self.root / "01 - 晴天.mp3", 60)
-        self.assertIn("http://mp:3000/api/v1/plugin/XiaoaiSpeaker/stream?", url)
-        self.assertIn("sig=", url)
-        self.assertIn("exp=", url)
+        self.assertIn("http://mp:3000/api/v1/plugin/XiaoaiSpeaker/stream?k=", url)
+        query = url.split("?", 1)[1]
+        self.assertEqual(query.count("="), 1)
+        self.assertNotIn("&", url)
+        self.assertFalse(any(char in url for char in "%+ "))
+        self.assertTrue(url.isascii())
+        # 解开来还是原来那条路径，签名与有效期都在
+        path, expires, signature = media.parse_query(query)
+        self.assertEqual(path, str(self.root / "01 - 晴天.mp3"))
+        self.assertGreater(expires, int(time.time()))
+        self.assertEqual(len(signature), 32)
 
     def test_parse_range_cases(self) -> None:
         self.assertEqual(media.parse_range(None, 1000), (0, 999))
@@ -578,11 +591,15 @@ class MediaBoundaryTest(unittest.TestCase):
 
     def test_parse_query_accepts_mapping_and_string(self) -> None:
         path = "/media/music/01 - 晴天.mp3"
-        query = {"path": path, "exp": "123", "sig": "abc"}
-        self.assertEqual(media.parse_query(query), (path, 123, "abc"))
-        text = "path=%2Fmedia%2Fmusic%2F01%20-%20%E6%99%B4%E5%A4%A9.mp3&exp=123&sig=abc"
-        self.assertEqual(media.parse_query(text), (path, 123, "abc"))
-        self.assertEqual(media.parse_query({"exp": "x"})[:2], ("", 0))
+        token = media.pack_link("sec", path, 123)
+        self.assertEqual(media.parse_query({"k": token}),
+                         (path, 123, media.sign_path("sec", path, 123)))
+        self.assertEqual(media.parse_query(f"k={token}"),
+                         (path, 123, media.sign_path("sec", path, 123)))
+        # 音箱或中间层把链接弄歪时，宁可回「没有链接」也不要猜一个路径
+        for broken in ("", "abc", "1.2", "1.2.3.4", "123.deadbeef.####"):
+            self.assertEqual(media.parse_query(f"k={broken}"), ("", 0, ""))
+        self.assertEqual(media.parse_query({"exp": "x"}), ("", 0, ""))
         self.assertEqual(media.parse_query(None), ("", 0, ""))
 
 
@@ -899,7 +916,7 @@ class PluginPlayTest(unittest.TestCase):
         pushed = [c for c in client.calls if c[0] == "play"][0]
         url = pushed[2]
         self.assertTrue(url.startswith("http://192.168.1.10:3000/api/v1/plugin/XiaoaiSpeaker/stream?"))
-        self.assertIn("sig=", url)
+        self.assertNotIn("&", url)
         # 推给音箱的必须是真实绝对路径，签名对它成立
         path, exp, sig = media.parse_query(url.split("?", 1)[1])
         self.assertEqual(path, str(self.track))
@@ -1242,12 +1259,10 @@ class PluginStreamTranscodeTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def _request(self, path: Path) -> Any:
-        target = str(path)
-        exp = int(time.time() + 600)
-        sig = media.sign_path(self.plugin._secret(), target, exp)
         request_type = sys.modules["fastapi"].Request
-        return request_type(query={"path": target, "exp": str(exp), "sig": sig},
-                            headers={"Range": "bytes=0-"})
+        return request_type(query={"k": media.pack_link(
+            self.plugin._secret(), str(path), int(time.time() + 600))},
+            headers={"Range": "bytes=0-"})
 
     def test_switch_only_affects_non_mp3(self) -> None:
         self.assertTrue(media.needs_transcode(self.track, True))
@@ -1341,16 +1356,16 @@ class PluginStreamEndpointTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def _request(self, path: str, expires: Optional[int] = None,
-                 signature: Optional[str] = None,
+                 secret: Optional[str] = None, token: Optional[str] = None,
                  range_header: Optional[str] = None) -> Any:
         target = str(path)
         exp = int(expires if expires is not None else time.time() + 600)
-        sig = signature if signature is not None else media.sign_path(
-            self.plugin._secret(), target, exp)
-        query = {"path": target, "exp": str(exp), "sig": sig}
+        if token is None:
+            token = media.pack_link(
+                self.plugin._secret() if secret is None else secret, target, exp)
         headers = {"Range": range_header} if range_header else {}
         request_type = sys.modules["fastapi"].Request
-        return request_type(query=query, headers=headers)
+        return request_type(query={"k": token}, headers=headers)
 
     def test_valid_signature_streams_file(self) -> None:
         response = self.plugin.api_stream(self._request(self.track))
@@ -1379,7 +1394,8 @@ class PluginStreamEndpointTest(unittest.TestCase):
         self.assertEqual(b"".join(response.iterator), self.track.read_bytes())
 
     def test_tampered_or_expired_or_foreign_is_403(self) -> None:
-        bad_sig = self.plugin.api_stream(self._request(self.track, signature="0" * 32))
+        # 换一把密钥：签名对不上
+        bad_sig = self.plugin.api_stream(self._request(self.track, secret="0" * 32))
         self.assertEqual(bad_sig.status_code, 403)
         expired = self.plugin.api_stream(self._request(self.track, expires=int(time.time()) - 5))
         self.assertEqual(expired.status_code, 403)
@@ -1389,8 +1405,11 @@ class PluginStreamEndpointTest(unittest.TestCase):
         self.assertIn("不在配置的音乐库目录内", foreign.body["detail"])
 
     def test_missing_signature_and_missing_file_are_refused(self) -> None:
-        # 不带签名（音箱把 URL 截断了也会这样）与签名指向已删除的文件，都是 403
-        self.assertEqual(self.plugin.api_stream(self._request(self.track, signature="")).status_code, 403)
+        # 链接被中间层弄坏（小米云端会把 & 换成空格，就是这样）与签名指向已删除
+        # 的文件，都是 403
+        mangled = self.plugin.api_stream(
+            self._request(self.track, token="1792950245." + "0" * 32 + ".not-base64!!"))
+        self.assertEqual(mangled.status_code, 403)
         gone = self.root / "deleted.mp3"
         response = self.plugin.api_stream(self._request(gone))
         self.assertEqual(response.status_code, 403)
