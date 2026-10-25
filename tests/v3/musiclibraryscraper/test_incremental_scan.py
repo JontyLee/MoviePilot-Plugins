@@ -1129,22 +1129,26 @@ class ContractTest(unittest.TestCase):
         )
 
     def test_builtin_sources_credit_upstream_and_license(self):
-        """内置源是把 Music Tag Web 的调用约定接过来用的：出处与许可要写在代码和 README 里。
+        """内置源是把 Music Tag Web 的调用约定接过来用的：出处与许可要写在代码和文档里。
 
         MTW 是 GPL-3.0、本仓库同为 GPL-3.0，引用与再分发本身没有障碍，缺的是说明；
         MusicBrainz 只取核心数据（CC0）这件事也必须写出来，否则读代码的人无从判断边界。
+        说明分两层：README 的「致谢」给一眼可见的署名与许可，逐插件的边界与许可正文
+        在它自己的使用说明里（README 只概述功能，不逐条讲引用了哪些代码）。
         """
         root = Path(mls.__file__).resolve().parents[2]
         sources = (Path(mls.__file__).parent / "sources.py").read_text(encoding="utf-8")
         readme = (root / "README.md").read_text(encoding="utf-8")
-        for surface in (sources, readme):
+        doc = (root / "docs" / "musiclibraryscraper.md").read_text(encoding="utf-8")
+        for surface in (sources, readme, doc):
             self.assertIn("music-tag-web", surface)
             self.assertIn("GPL-3.0", surface)
             self.assertIn("CC0", surface)
         # 仓库自己的许可要真是 GPL-3.0，上面那句"同等条款下可以引用"才成立
         self.assertIn("GNU GENERAL PUBLIC LICENSE", (root / "LICENSE").read_text(encoding="utf-8"))
         self.assertIn("Version 3", (root / "LICENSE").read_text(encoding="utf-8"))
-        self.assertIn("上游、许可与引用", readme)
+        self.assertIn("## 致谢", readme)
+        self.assertIn("上游与许可", doc)
 
 
     def test_norm_text_strips_space_and_punctuation(self):
