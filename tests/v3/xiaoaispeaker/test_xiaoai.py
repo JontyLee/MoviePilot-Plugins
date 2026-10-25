@@ -2306,15 +2306,102 @@ class LoginMethodTest(unittest.TestCase):
             token, detail = auth._walk_location("https://account.xiaomi.com/pass/rs")
         self.assertEqual(token, "FRESH", detail)
 
-    def test_identity_list_runs_before_second_factor(self) -> None:
-        """authStart 形态的二次校验要先建 identity 会话，否则填对码也过不了。"""
+    def test_second_factor_sends_the_code_instead_of_waiting_for_it(self) -> None:
+        """notificationUrl 只是「这步校验在哪儿做」的地址，码要插件点名去发。
+
+        少任何一步，页面就停在「请查收验证码」而用户永远等不到那条短信 ——
+        这一步在真机上最容易漏，因为小米不报错。
+        """
         seen: List[str] = []
 
         def handler(method, url, body):
             seen.append(f"{method} {url}")
-            if method == "POST":
-                return _Resp(payload={"code": 0, "location": "/pass/rs"}, prefixed=True)
+            if "serviceLogin?" in url:
+                return _Resp(payload={"code": 0, "sid": "micoapi", "_sign": "SIGN",
+                                      "qs": "http://qs", "callback": "http://cb"})
+            if "serviceLoginAuth2" in url:
+                return _Resp(payload={"code": 0, "notificationUrl":
+                                      "/fe/service/identity/authStart?context=CTX&sid=micoapi"},
+                             prefixed=True)
+            if "/identity/list" in url:
+                return _Resp(payload={"code": 0, "flag": 4}, prefixed=True)
+            if "/identity/auth/verifyPhone" in url:
+                return _Resp(payload={"code": 0}, prefixed=True)
+            if "/identity/auth/sendPhoneTicket" in url:
+                return _Resp(payload={"code": 0}, prefixed=True)
+            return _Resp(status=200, text="")
+
+        with _NetworkPatch(handler):
+            auth = mina.XiaoaiAuth("me@example.com", "pass")
+            state, _, message = auth.login()
+        self.assertEqual(state, mina.LOGIN_NEED_VERIFY)
+        self.assertIn("已发往账号绑定的手机短信", message)
+        self.assertTrue(auth._identity_open)
+        self.assertEqual(auth._verify_flag, 4)
+        joined = "\n".join(seen)
+        for want in (
+                "GET https://account.xiaomi.com/fe/service/identity/authStart?context=CTX&sid=micoapi",
+                "GET https://account.xiaomi.com/identity/list?sid=micoapi"
+                "&supportedMask=0&_locale=zh_CN&context=CTX",
+                "GET https://account.xiaomi.com/identity/auth/verifyPhone?_flag=4&_json=true",
+                "POST https://account.xiaomi.com/identity/auth/sendPhoneTicket"):
+            self.assertIn(want, joined, f"缺了这一步就不会真的发码: {want}")
+
+    def test_email_second_factor_skips_the_sms_endpoint(self) -> None:
+        seen: List[str] = []
+
+        def handler(method, url, body):
+            seen.append(f"{method} {url}")
+            if "serviceLogin?" in url:
+                return _Resp(payload={"code": 0, "sid": "micoapi", "_sign": "SIGN",
+                                      "qs": "http://qs", "callback": "http://cb"})
+            if "serviceLoginAuth2" in url:
+                return _Resp(payload={"code": 0, "notificationUrl":
+                                      "/fe/service/identity/authStart?context=CTX"}, prefixed=True)
+            if "/identity/list" in url:
+                return _Resp(payload={"code": 0, "flag": 8}, prefixed=True)
             return _Resp(payload={"code": 0}, prefixed=True)
+
+        with _NetworkPatch(handler):
+            auth = mina.XiaoaiAuth("me@example.com", "pass")
+            state, _, message = auth.login()
+        self.assertEqual(state, mina.LOGIN_NEED_VERIFY)
+        self.assertIn("邮箱", message)
+        self.assertIn("GET https://account.xiaomi.com/identity/auth/verifyEmail?_flag=8&_json=true",
+                      "\n".join(seen))
+        self.assertNotIn("sendPhoneTicket", "\n".join(seen))
+
+    def test_send_failure_says_the_code_was_not_dispatched(self) -> None:
+        """发码被拒不能说「已发往手机」—— 那会让人一直盯着短信箱等。"""
+        def handler(method, url, body):
+            if "serviceLogin?" in url:
+                return _Resp(payload={"code": 0, "sid": "micoapi", "_sign": "SIGN",
+                                      "qs": "http://qs", "callback": "http://cb"})
+            if "serviceLoginAuth2" in url:
+                return _Resp(payload={"code": 0, "notificationUrl":
+                                      "/fe/service/identity/authStart?context=CTX"}, prefixed=True)
+            if "/identity/list" in url:
+                return _Resp(payload={"code": 0, "flag": 4}, prefixed=True)
+            if "/identity/auth/sendPhoneTicket" in url:
+                return _Resp(payload={"code": 700011, "description": "请求过于频繁"}, prefixed=True)
+            return _Resp(payload={"code": 0}, prefixed=True)
+
+        with _NetworkPatch(handler):
+            auth = mina.XiaoaiAuth("me@example.com", "pass")
+            state, _, message = auth.login()
+        self.assertEqual(state, mina.LOGIN_NEED_VERIFY)
+        self.assertIn("没能发出去", message)
+        self.assertIn("700011", message)
+
+    def test_second_factor_resume_reopens_the_session(self) -> None:
+        """插件重启后直接填码续跑：会话不在了要先补建立，否则填对码也过不去。"""
+        seen: List[str] = []
+
+        def handler(method, url, body):
+            seen.append(f"{method} {url} {body or ''}")
+            if "/identity/list" in url:
+                return _Resp(payload={"code": 0, "flag": 8}, prefixed=True)
+            return _Resp(payload={"code": 0, "location": "/pass/rs"}, prefixed=True)
 
         auth = mina.XiaoaiAuth("me@example.com", "pass", device_id="D")
         auth._verify_url = ("https://account.xiaomi.com/fe/service/identity/authStart"
@@ -2322,8 +2409,35 @@ class LoginMethodTest(unittest.TestCase):
         with _NetworkPatch(handler):
             location = auth._verify_ticket("123456")
         self.assertTrue(location)
-        self.assertIn("GET https://account.xiaomi.com/identity/list?targetUrl=x", seen[0])
-        self.assertTrue(seen[1].startswith("POST https://account.xiaomi.com/identity/auth/verify"))
+        self.assertEqual(seen[0].split("?")[0],
+                         "GET https://account.xiaomi.com/fe/service/identity/authStart")
+        self.assertIn("GET https://account.xiaomi.com/identity/list?targetUrl=x", seen[1])
+        # 方式以 list 给的为准，而不是从 URL 里猜：这里 URL 里没有 email 字样
+        self.assertTrue(seen[2].startswith("POST https://account.xiaomi.com/identity/auth/verifyEmail"))
+        self.assertIn("_flag=8", seen[2])
+        self.assertIn("ticket=123456", seen[2])
+
+    def test_verify_code_continues_past_the_confirm_page(self) -> None:
+        """小米可能停在「确认手机号」页，它的 confirmUrl 才是发出 passToken 的那一跳。"""
+        seen: List[str] = []
+
+        def handler(method, url, body):
+            seen.append(url or "")
+            if "/identity/auth/verifyPhone" in url:
+                return _Resp(payload={"code": 0, "location": "/pass/rs"}, prefixed=True)
+            if url and url.endswith("/pass/end"):
+                return _Resp(status=200, text="done")
+            return _Resp(status=302,
+                         headers={"Location": "/fe/service/verifyPhone?confirmUrl=%2Fpass%2Fend"})
+
+        auth = mina.XiaoaiAuth("me@example.com", "pass", device_id="D")
+        auth._verify_url = "https://account.xiaomi.com/identity/auth/verifyPhone"
+        auth._verify_flag = 4
+        auth._identity_open = True
+        with _NetworkPatch(handler):
+            auth.submit_verify_code("123456")
+        self.assertIn("https://account.xiaomi.com/pass/end", seen,
+                      "confirmUrl 没跟上，passToken 就永远拿不到")
 
     def test_qrcode_session_refresh_asks_for_scan_not_password(self) -> None:
         auth = mina.XiaoaiAuth.from_token({"user_id": "1", "device_id": "D",

@@ -1434,7 +1434,7 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
               ])]),
               _: 1
             }, 8, ["loading"]),
-            loginResult.value?.state === "need_verify" ? (_openBlock$3(), _createElementBlock$3("span", _hoisted_24, " 收不到就点重发：小米把码发在建立那次会话时，重新发起才会有新码 ")) : _createCommentVNode$3("", true)
+            loginResult.value?.state === "need_verify" ? (_openBlock$3(), _createElementBlock$3("span", _hoisted_24, " 收不到就点重发：会重新走一遍登录与发码，小米才会再寄一次 ")) : _createCommentVNode$3("", true)
           ])
         ])) : _createCommentVNode$3("", true),
         devices.value.length ? (_openBlock$3(), _createElementBlock$3(_Fragment$3, { key: 7 }, [
@@ -1660,7 +1660,7 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
   }
 });
 
-const ConfigLogin = /* @__PURE__ */ _export_sfc(_sfc_main$3, [["__scopeId", "data-v-ff2fcf2d"]]);
+const ConfigLogin = /* @__PURE__ */ _export_sfc(_sfc_main$3, [["__scopeId", "data-v-ebbcc718"]]);
 
 const {defineComponent:_defineComponent$2} = await importShared('vue');
 

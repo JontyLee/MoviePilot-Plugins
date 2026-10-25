@@ -468,7 +468,7 @@ function removeGroup(name: string) {
                prepend-icon="mdi-send" @click="resendVerify">重发验证码
         </v-btn>
         <span v-if="loginResult?.state === 'need_verify'" class="text-caption text-grey align-self-center">
-          收不到就点重发：小米把码发在建立那次会话时，重新发起才会有新码
+          收不到就点重发：会重新走一遍登录与发码，小米才会再寄一次
         </span>
       </div>
     </div>

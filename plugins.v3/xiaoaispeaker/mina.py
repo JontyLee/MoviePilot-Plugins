@@ -276,6 +276,9 @@ class XiaoaiAuth:
         self._step1: Dict[str, Any] = {}
         self._captcha_url: str = ""
         self._verify_url: str = ""
+        # 二次校验：会话是否已建立、小米要的是手机(4)还是邮箱(8)
+        self._identity_open: bool = False
+        self._verify_flag: int = 0
         self._ssecurity: str = ""
         self._user_id: str = ""
         self._location: str = ""
@@ -301,19 +304,24 @@ class XiaoaiAuth:
         ).post_res(url, data=_form_body(params), allow_redirects=False,
                     raise_exception=False)
 
-    def _follow(self, url: str, max_hops: int = 10) -> None:
-        """跟随重定向链，只为了收集每一跳的 cookie（passToken/serviceToken）。"""
+    def _follow(self, url: str, max_hops: int = 10) -> str:
+        """跟随重定向链，只为了收集每一跳的 cookie（passToken/serviceToken）。
+
+        返回最后停下来的那个地址：二次校验那条链可能停在「确认手机号」页，
+        它的 confirmUrl 参数才是继续往下走、把 passToken 发出来的地址。
+        """
         current = url
         for _ in range(max_hops):
             response = self._get(current)
             if response is None:
-                return
+                return current
             _collect_cookies(response, self.cookies)
             if response.status_code not in (301, 302, 303, 307, 308):
-                return
+                return current
             current = _redirect_target(response, current)
             if not current:
-                return
+                return current
+        return current
 
     # ---------------- 登录流程 ----------------
 
@@ -339,8 +347,14 @@ class XiaoaiAuth:
         location = self._verify_ticket(code)
         if not location:
             return LOGIN_NEED_VERIFY, None, "验证码不正确或已失效"
-        self._follow(location)
+        final = self._follow(location)
+        # 有时会停在「确认手机号」那一页：它查询串里的 confirmUrl 才是继续往下走、
+        # 把 passToken 发出来的地址，不补这一脚后面就是「校验过了但换不到票」
+        confirm = (parse_qs(urlparse(final).query).get("confirmUrl") or [""])[0]
+        if confirm:
+            self._follow(self._abs_url(confirm))
         self._verify_url = ""
+        self._identity_open = False
         state, token, message = self._service_login()
         if state == LOGIN_SUCCESS:
             message = "二次校验通过，登录成功"
@@ -408,15 +422,30 @@ class XiaoaiAuth:
             f"code={data.get('code')} fields={sorted(str(k) for k in data)}"
         )
 
-        # 二次校验（手机/邮箱验证码）：小米在给出这个地址的同时就把码发出去了，
-        # 插件不需要（也不该）替用户去访问它 —— 那是浏览器里另一份会话。
+        # 二次校验（手机/邮箱验证码）：notificationUrl 只是「这步校验在哪儿做」的地址，
+        # 码要插件点名去发 —— 不发起 identity/list 与 verifyPhone/sendPhoneTicket 那几步，
+        # 页面就会停在「请查收验证码」而用户永远等不到那条短信。
         notification = data.get("notificationUrl")
         if notification:
             self._verify_url = self._abs_url(notification)
-            channel = "邮箱" if "email" in self._verify_url else "手机短信"
+            self._identity_open = False
+            flag, note = self._open_identity_session(self._verify_url)
+            self._verify_flag = flag
+            if not flag:
+                return (LOGIN_NEED_VERIFY, None,
+                        f"小米要求二次校验，但{note}；点「重发验证码」再试一次，"
+                        "或改用扫码登录")
+            channel = "邮箱" if flag == 8 else "手机短信"
+            sent, why = self._send_identity_code(flag)
+            if not sent:
+                logger.warning(f"{_LOG_TAG} 二次校验发码失败: {why}")
+                return (LOGIN_NEED_VERIFY, None,
+                        f"小米要求{channel}二次校验，但验证码没能发出去（{why}）；"
+                        "点「重发验证码」再试一次，或改用扫码登录")
+            logger.info(f"{_LOG_TAG} 二次校验验证码已发出: {channel}")
             return (LOGIN_NEED_VERIFY, None,
-                    f"小米要求{channel}二次校验，验证码已发往账号绑定的{channel}；"
-                    "收不到就点「重发」重新发起一次")
+                    f"小米要求{channel}二次校验，验证码已发往账号绑定的{channel}，"
+                    "查收后填进来提交；等不到就点「重发验证码」")
 
         # 图形验证码：兼容小米返回过的多种字段名
         captcha_raw = ""
@@ -555,35 +584,93 @@ class XiaoaiAuth:
         """取验证码图片，返回 data URI；同时收下 ick（提交验证码要带）。"""
         return _fetch_image(url, self.user_agent, self.cookies)
 
-    def _prepare_identity(self) -> None:
-        """authStart 形态的二次校验要先建立 identity 会话。
+    def _identity_json(self, url: str) -> Dict[str, Any]:
+        """GET 一个 identity 接口并把 cookie 并回来，失败回空表。"""
+        response = self._get(url)
+        if response is None:
+            return {}
+        _collect_cookies(response, self.cookies)
+        return _parse_json(response.text or "") or {}
 
-        小米把这类校验做成「先列可选方式、再验选中的那一种」两步：直接 POST
-        verifyPhone/verifyEmail 会没有会话上下文，用户填的码是对的也判失败 ——
-        这一步补不上，表现就是二次校验环节怎么试都过不去。
+    @staticmethod
+    def _identity_list_url(notification_url: str) -> str:
+        """由 authStart 地址拼出「这次校验有哪些方式」的 list 地址。
+
+        小米 App 抓到的链路是拿 notificationUrl 里的 context 与 sid 重新组 URL；
+        少了 context 就退化成把 authStart 换成 list（沿用原查询串），至少不空手。
         """
-        if IDENTITY_AUTH_START not in (self._verify_url or ""):
-            return
-        url = self._verify_url.replace(IDENTITY_AUTH_START, "/identity/list")
-        try:
-            response = self._get(url)
-            if response is not None:
-                _collect_cookies(response, self.cookies)
-        except Exception as err:  # pragma: no cover - 网络层异常形状不固定
-            logger.warning(f"{_LOG_TAG} 二次校验会话准备失败: {err}")
+        query = parse_qs(urlparse(notification_url).query)
+        context = (query.get("context") or [""])[0]
+        sid = (query.get("sid") or [MINA_SID])[0]
+        if context:
+            return (f"{ACCOUNT_BASE_URL}/identity/list?sid={quote(sid, safe='')}"
+                    f"&supportedMask=0&_locale=zh_CN&context={quote(context, safe='')}")
+        if IDENTITY_AUTH_START in notification_url:
+            return notification_url.replace(IDENTITY_AUTH_START, "/identity/list")
+        return f"{ACCOUNT_BASE_URL}/identity/list"
+
+    def _open_identity_session(self, notification_url: str) -> Tuple[int, str]:
+        """打开二次校验会话并问清方式：flag 4=手机短信、8=邮箱。
+
+        notificationUrl 只是「这步校验去哪儿做」的地址，码不会因为它自己寄出去：
+        要先 GET 它建立会话，再 GET /identity/list 拿方式。少了这一步，界面会停在
+        「请查收验证码」而用户永远等不到那条短信。
+        """
+        if self._get(notification_url) is None:
+            return 0, "打不开小米的二次校验页面"
+        data = self._identity_json(self._identity_list_url(notification_url))
+        flag = 4
+        if data:
+            try:
+                flag = int(data.get("flag") or 4)
+            except (TypeError, ValueError):
+                flag = 4
+            if flag not in (4, 8):
+                flag = 4
+        else:
+            # 读不出方式也要能往下走：小米绝大多数账号要的是手机短信
+            logger.info(f"{_LOG_TAG} 二次校验方式列表没解析出来，按手机短信处理")
+        self._identity_open = True
+        logger.info(f"{_LOG_TAG} 二次校验会话已建立: flag={flag} code={data.get('code')} "
+                    f"fields={sorted(str(k) for k in data)}")
+        return flag, ""
+
+    def _send_identity_code(self, flag: int) -> Tuple[bool, str]:
+        """让小米真的把码发出去：先 verifyPhone/verifyEmail 触发，手机再补一刀 sendPhoneTicket。"""
+        api = "verifyEmail" if flag == 8 else "verifyPhone"
+        data = self._identity_json(
+            f"{ACCOUNT_BASE_URL}/identity/auth/{api}?_flag={flag}&_json=true")
+        code = data.get("code")
+        if code not in (None, 0):
+            return False, f"{api} 触发发码被拒 code={code}"
+        if flag == 8:
+            return True, ""
+        response = self._post(f"{ACCOUNT_BASE_URL}/identity/auth/sendPhoneTicket",
+                              {"retry": "0", "icode": "", "_json": "true"})
+        if response is None:
+            return False, "发送短信的请求没拿到响应"
+        _collect_cookies(response, self.cookies)
+        sent = _parse_json(response.text or "") or {}
+        code = sent.get("code")
+        if code not in (None, 0):
+            return False, (f"sendPhoneTicket 被拒 code={code} "
+                           f"desc={str(sent.get('description') or sent.get('desc') or '')[:120]}")
+        return True, ""
 
     def _verify_ticket(self, code: str) -> str:
         """提交短信/邮箱验证码，成功时返回后续跳转地址。"""
-        self._prepare_identity()
-        is_email = "email" in (self._verify_url or "")
-        api = "/identity/auth/verifyEmail" if is_email else "/identity/auth/verifyPhone"
-        flag = "8" if is_email else "4"
+        if not self._identity_open and self._verify_url:
+            # 插件重启后直接续跑：会话不在了，补一次建立（不重发码，码早就发出去了）
+            flag, _ = self._open_identity_session(self._verify_url)
+            self._verify_flag = self._verify_flag or flag
+        flag = self._verify_flag or (8 if "email" in (self._verify_url or "") else 4)
+        api = "/identity/auth/verifyEmail" if flag == 8 else "/identity/auth/verifyPhone"
         url = f"{ACCOUNT_BASE_URL}{api}?_dc={int(time.time() * 1000)}"
         response = self._post(url, {
             "ticket": code,
             "trust": "true",
             "_json": "true",
-            "_flag": flag,
+            "_flag": str(flag),
         })
         if response is None:
             logger.warning(f"{_LOG_TAG} 二次校验提交没有拿到响应（网络或风控）: {api}")
