@@ -254,7 +254,7 @@ class XiaoaiSpeaker(_PluginBase):
         "库内目录浏览与搜索、远程命令；播放直链由插件签名限时，不依赖媒体服务器。"
     )
     plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/xiaoai.svg"
-    plugin_version = "0.5.5"
+    plugin_version = "0.5.6"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "xiaoaispeaker_"
@@ -3192,8 +3192,15 @@ class XiaoaiSpeaker(_PluginBase):
             if streamed is not None:
                 return streamed
             # 机器上没有 ffmpeg：回落到源格式继续播，开关不该把本来能放的弄成不能放
-        start, end = _media.parse_range(request.headers.get("Range"), size)
-        partial = start > 0 or end < size - 1
+        header = (request.headers.get("Range") or "").strip()
+        start, end = _media.parse_range(header, size)
+        # 音箱几乎都发 `Range: bytes=0-`。上游 songloft 对这一句回的是 206 并把
+        # Content-Range 对上整首（它的访问日志：range="bytes=0-" status=206
+        # content_range="bytes 0-N/N"），而回 200 时有些固件会把这条判成「不可分段的
+        # 音频」而不去解码。所以客户端明确要整首时也按 206 回。
+        # 越界那种（bytes=99999-）不在此列：那按「从头播」处理，仍回 200 整文件。
+        whole = (f"bytes=0-", f"bytes=0-{size - 1}")
+        partial = header.lower() in whole or start > 0 or end < size - 1
         headers = {
             "Accept-Ranges": "bytes",
             "Content-Length": str(end - start + 1),

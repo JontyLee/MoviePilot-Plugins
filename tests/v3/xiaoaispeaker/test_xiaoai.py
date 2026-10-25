@@ -1280,7 +1280,8 @@ class PluginStreamTranscodeTest(unittest.TestCase):
             response = self.plugin.api_stream(self._request(self.track))
         finally:
             media.ffmpeg_available = original
-        self.assertEqual(response.status_code, 200)
+        # 回的是源文件本身（上面那句 _request 带 bytes=0-，所以按新的对齐是 206）
+        self.assertEqual(response.status_code, 206)
         self.assertEqual(b"".join(response.iterator), self.track.read_bytes())
 
     def test_transcoded_stream_is_mp3_without_range_support(self) -> None:
@@ -1362,6 +1363,20 @@ class PluginStreamEndpointTest(unittest.TestCase):
         self.assertEqual(response.status_code, 206)
         self.assertEqual(response.headers["Content-Range"], f"bytes 10-19/{self.track.stat().st_size}")
         self.assertEqual(b"".join(response.iterator), self.track.read_bytes()[10:20])
+
+    def test_open_ended_range_answers_206_like_upstream(self) -> None:
+        """`bytes=0-` 也要按 206 回：音箱发的就是这一句。
+
+        上游 songloft 的访问日志里，音箱带 range="bytes=0-" 来取，回的是
+        status=206 + content_range="bytes 0-N/N"；我们原先回 200，有些固件就把这条
+        当成不可分段的音频而不去解码。
+        """
+        size = self.track.stat().st_size
+        response = self.plugin.api_stream(self._request(self.track, range_header="bytes=0-"))
+        self.assertEqual(response.status_code, 206)
+        self.assertEqual(response.headers["Content-Range"], f"bytes 0-{size - 1}/{size}")
+        self.assertEqual(response.headers["Content-Length"], str(size))
+        self.assertEqual(b"".join(response.iterator), self.track.read_bytes())
 
     def test_tampered_or_expired_or_foreign_is_403(self) -> None:
         bad_sig = self.plugin.api_stream(self._request(self.track, signature="0" * 32))
