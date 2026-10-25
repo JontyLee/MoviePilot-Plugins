@@ -241,12 +241,17 @@ class ConfigIn(BaseModel):
 
 
 class LoginIn(BaseModel):
-    """登录请求：首次带账密，续跑只带验证码。"""
+    """登录请求：首次带账密，续跑只带验证码，重发只带 resend。
+
+    Cookie 登录按两项填：浏览器 cookie 里的 userId 与 passToken（只取值本身）。
+    """
 
     username: Optional[str] = None
     password: Optional[str] = None
     code: Optional[str] = None
-    manual_token: Optional[str] = None
+    resend: bool = False
+    user_id: Optional[str] = None
+    pass_token: Optional[str] = None
 
 
 class QrIn(BaseModel):

@@ -762,7 +762,7 @@ function paneBadge(key: Pane): number {
               </div>
               <div class="xai-ov-line">
                 {{ status.logged_in ? (cfg.username_set ? cfg.username : '（未记录账号名）') : '还没有可用的登录票据' }}
-                <span v-if="status.manual_token" class="text-caption text-grey">｜手工粘贴的 cookie</span>
+                <span v-if="status.manual_token" class="text-caption text-grey">｜手工填的 Cookie 票据</span>
               </div>
               <div class="xai-ov-sub">
                 <template v-if="status.logged_in">票据保存于 {{ status.token_saved_at || '-' }}</template>

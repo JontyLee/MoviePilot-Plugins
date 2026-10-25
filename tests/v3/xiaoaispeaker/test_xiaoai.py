@@ -266,14 +266,6 @@ class MinaProtocolTest(unittest.TestCase):
         self.assertTrue(value.startswith("app_ios_"))
         self.assertEqual(len(value), len("app_ios_") + 30)
 
-    def test_manual_token_parses_cookie_blob(self) -> None:
-        token = mina.token_from_manual(
-            "999", "userId=999; serviceToken=STVALUE; passToken=PTVALUE; cUserId=abc")
-        self.assertEqual(token["user_id"], "999")
-        self.assertEqual(token["services"][mina.MINA_SID]["service_token"], "STVALUE")
-        self.assertEqual(token["pass_token"], "PTVALUE")
-        self.assertTrue(token["manual"])
-
     def test_login_sends_md5_hash_and_captcha_on_retry(self) -> None:
         seen: List[str] = []
 
@@ -2072,10 +2064,11 @@ class PluginTaskTest(unittest.TestCase):
 
 
 class LoginMethodTest(unittest.TestCase):
-    """三种登录方式（账密/扫码/粘贴 cookie）里最容易做错的那几处。
+    """三种登录方式（账密/扫码/Cookie 票据）里最容易做错的那几处。
 
     扫码的坑集中在「长轮询超时不是失败」「票据要沿用扫码那次的 deviceId」；
-    cookie 的坑集中在「passToken 能换到活票，粘来的 serviceToken 多半是死的」；
+    Cookie 只收 userId 与 passToken 两项，坑集中在「拿 passToken 现换一张活票」，
+    浏览器里那张 serviceToken 多半已经死了，所以不再接受它作为兜底。
     还有一种看不见的坑：deviceId 每次登录都换，小米就一直把你当新设备。
     """
 
@@ -2207,40 +2200,64 @@ class LoginMethodTest(unittest.TestCase):
         self.assertIsNone(token)
         self.assertIn("passToken 已失效", message)
 
-    def test_parse_cookie_blob_unquotes_and_lowercases_names(self) -> None:
-        values = mina.parse_cookie_blob('userId=77; serviceToken=a%3Db+c; "passToken"=PT ;x=y')
-        self.assertEqual(values["userid"], "77")
-        # unquote 只解百分号编码，+ 不是空格：serviceToken 里原样保留
-        self.assertEqual(values["servicetoken"], "a=b+c")
-        self.assertEqual(values["passtoken"], "PT")
-
-    def test_manual_cookie_prefers_pass_token_exchange(self) -> None:
+    def test_manual_cookie_exchanges_pass_token_for_ticket(self) -> None:
         plugin = _plugin()
         handler, seen = self._handler([])
         with _NetworkPatch(handler):
-            out = plugin._login_manual("userId=77; passToken=PT; cUserId=cu")
+            out = plugin._login_manual("77", "PT")
         self.assertEqual(out.state, mina.LOGIN_SUCCESS, out.message)
         saved = plugin.get_data("token")
         self.assertEqual(saved["services"][mina.MINA_SID]["service_token"], "QRTOKEN")
         self.assertEqual(saved["login_method"], "manual")
         self.assertTrue(any("sid=micoapi" in u for u in seen), "要用 passToken 现换一张活票")
 
-    def test_manual_cookie_falls_back_when_pass_token_dead(self) -> None:
+    def test_manual_cookie_rejects_a_whole_cookie_blob(self) -> None:
+        """只认两项：整串 cookie 粘进来要当场说清，而不是换票换出个莫名其妙的失败。"""
         plugin = _plugin()
-        handler, _ = self._handler([], micoapi_ok=False)
-        plugin._build_client = lambda token=None: _FakeClient(devices=[_device()])
-        with _NetworkPatch(handler):
-            out = plugin._login_manual("userId=77; passToken=PT; serviceToken=LIVE")
-        self.assertEqual(out.state, mina.LOGIN_SUCCESS, out.message)
-        self.assertEqual(plugin.get_data("token")["services"][mina.MINA_SID]["service_token"],
-                         "LIVE", "换票失败时才退回粘进来的 serviceToken")
-
-    def test_manual_cookie_without_any_credential_says_so(self) -> None:
-        plugin = _plugin()
-        out = plugin._login_manual("nothing=here")
+        out = plugin._login_manual("77", "userId=77; passToken=PT; serviceToken=LIVE")
         self.assertEqual(out.state, "failed")
-        self.assertIn("passToken", out.message)
-        self.assertIn("serviceToken", out.message)
+        self.assertIn("整串", out.message)
+
+    def test_manual_cookie_missing_either_field_says_so(self) -> None:
+        plugin = _plugin()
+        for user_id, pass_token in (("77", ""), ("", "PT")):
+            out = plugin._login_manual(user_id, pass_token)
+            self.assertEqual(out.state, "failed")
+            self.assertIn("userId", out.message)
+            self.assertIn("passToken", out.message)
+
+    def test_resend_restarts_the_login_session(self) -> None:
+        """「重发」必须重新发起一次：小米那次会话的码只发一遍，续跑拿不到新码。"""
+        plugin = _plugin()
+        started: List[bool] = []
+
+        class _Spy:
+            username = "me@example.com"
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def login(self):
+                started.append(True)
+                return mina.LOGIN_NEED_VERIFY, None, "小米要求短信二次校验"
+
+            def submit_verify_code(self, code):
+                return mina.LOGIN_NEED_VERIFY, None, "验证码不对"
+
+        original = x.XiaoaiAuth
+        x.XiaoaiAuth = _Spy
+        try:
+            first = plugin.api_login(
+                x.schemas.LoginIn(username="me@example.com", password="pass"))
+            self.assertEqual(first.state, mina.LOGIN_NEED_VERIFY)
+            # 原样带码提交是续跑那次会话，不会再发起一次登录
+            plugin.api_login(x.schemas.LoginIn(code="123456"))
+            self.assertEqual(len(started), 1)
+            resent = plugin.api_login(x.schemas.LoginIn(resend=True))
+            self.assertEqual(resent.state, mina.LOGIN_NEED_VERIFY)
+            self.assertEqual(len(started), 2, "重发要重新发起一次登录才会拿到新码")
+        finally:
+            x.XiaoaiAuth = original
 
     def test_device_id_stays_the_same_across_logins(self) -> None:
         plugin = _plugin()

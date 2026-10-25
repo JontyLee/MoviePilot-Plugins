@@ -50,42 +50,42 @@
 }
 
 /* 仅插件内局部样式；含 .v- 的选择器会被构建的 postcss 门禁整条删掉。配色取宿主变量。 */
-.xcl[data-v-46c707ad] {
+.xcl[data-v-ff2fcf2d] {
   display: flex; flex-direction: column;
   --xcl-radius: 14px;
   --xcl-ink: rgba(var(--v-theme-on-surface), .92);
   --xcl-ink-faint: rgba(var(--v-theme-on-surface), .5);
   --xcl-line: rgba(var(--v-border-color), var(--v-border-opacity));
 }
-.xcl-title[data-v-46c707ad] {
+.xcl-title[data-v-ff2fcf2d] {
   display: flex; align-items: center; gap: 8px; margin-bottom: 12px;
   font-size: 13px; font-weight: 650; letter-spacing: .3px; color: var(--xcl-ink);
 }
-.xcl-step[data-v-46c707ad] {
+.xcl-step[data-v-ff2fcf2d] {
   display: inline-flex; align-items: center; justify-content: center;
   width: 20px; height: 20px; border-radius: 7px; flex: 0 0 auto;
   font-size: 11.5px; font-weight: 700;
   color: rgb(var(--v-theme-primary)); background: rgba(var(--v-theme-primary), .14);
 }
-.xcl-sub[data-v-46c707ad] {
+.xcl-sub[data-v-ff2fcf2d] {
   display: flex; align-items: center; gap: 6px; margin-bottom: 8px;
   font-size: 12px; font-weight: 650; color: var(--xcl-ink-faint);
 }
-.xcl-now[data-v-46c707ad] {
+.xcl-now[data-v-ff2fcf2d] {
   border-radius: 12px; border: 1px solid var(--xcl-line);
   background: rgba(var(--v-theme-success), .07);
 }
-.xcl-device[data-v-46c707ad] {
+.xcl-device[data-v-ff2fcf2d] {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   padding: 7px 0; border-bottom: 1px dashed var(--xcl-line);
 }
-.xcl-qr[data-v-46c707ad] {
+.xcl-qr[data-v-ff2fcf2d] {
   width: 184px; height: 184px; flex: 0 0 auto;
   border: 1px dashed var(--xcl-line); background: rgba(var(--v-theme-on-surface), .03);
 }
-.xcl-device[data-v-46c707ad]:last-of-type { border-bottom: none;
+.xcl-device[data-v-ff2fcf2d]:last-of-type { border-bottom: none;
 }
-.xcl-card[data-v-46c707ad] { border-radius: var(--xcl-radius);
+.xcl-card[data-v-ff2fcf2d] { border-radius: var(--xcl-radius);
 }
 
 /* 仅插件内局部样式；含 .v- 的选择器会被构建的 postcss 门禁整条删掉。配色取宿主变量。 */

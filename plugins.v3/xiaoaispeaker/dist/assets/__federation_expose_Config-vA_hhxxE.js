@@ -773,62 +773,67 @@ const _hoisted_11$1 = {
   key: 1,
   class: "xcl-qr d-flex flex-column align-center justify-center rounded"
 };
-const _hoisted_12$1 = { style: { "min-width": "220px", "flex": "1 1 220px" } };
-const _hoisted_13$1 = { class: "text-body-2" };
-const _hoisted_14$1 = {
+const _hoisted_12$1 = { class: "text-caption text-grey mt-1" };
+const _hoisted_13$1 = { style: { "min-width": "220px", "flex": "1 1 220px" } };
+const _hoisted_14$1 = { class: "text-body-2" };
+const _hoisted_15 = {
   key: 0,
   class: "text-caption text-grey mt-1"
 };
-const _hoisted_15 = {
+const _hoisted_16 = {
   class: "d-flex mt-2",
   style: { "gap": "8px" }
 };
-const _hoisted_16 = {
-  class: "d-flex mt-1",
-  style: { "gap": "8px" }
-};
 const _hoisted_17 = {
+  class: "d-flex mt-3",
+  style: { "gap": "8px", "flex-wrap": "wrap" }
+};
+const _hoisted_18 = {
   key: 5,
   class: "mt-3"
 };
-const _hoisted_18 = { class: "text-body-2" };
-const _hoisted_19 = { class: "text-caption" };
-const _hoisted_20 = {
+const _hoisted_19 = { class: "text-body-2" };
+const _hoisted_20 = { class: "text-caption" };
+const _hoisted_21 = {
   key: 0,
   class: "text-caption"
 };
-const _hoisted_21 = {
+const _hoisted_22 = {
   key: 6,
   class: "mt-2"
 };
-const _hoisted_22 = {
+const _hoisted_23 = {
   class: "d-flex",
   style: { "gap": "8px", "flex-wrap": "wrap" }
 };
-const _hoisted_23 = { class: "xcl-sub mt-4" };
-const _hoisted_24 = { class: "text-caption text-grey ml-2" };
-const _hoisted_25 = { key: 0 };
-const _hoisted_26 = { style: { "min-width": "0", "flex": "1 1 200px" } };
-const _hoisted_27 = { class: "text-body-2" };
-const _hoisted_28 = { class: "text-caption text-grey" };
-const _hoisted_29 = {
+const _hoisted_24 = {
+  key: 0,
+  class: "text-caption text-grey align-self-center"
+};
+const _hoisted_25 = { class: "xcl-sub mt-4" };
+const _hoisted_26 = { class: "text-caption text-grey ml-2" };
+const _hoisted_27 = { key: 0 };
+const _hoisted_28 = { style: { "min-width": "0", "flex": "1 1 200px" } };
+const _hoisted_29 = { class: "text-body-2" };
+const _hoisted_30 = { class: "text-caption text-grey" };
+const _hoisted_31 = {
   key: 8,
   class: "text-caption text-warning mt-3"
 };
-const _hoisted_30 = {
+const _hoisted_32 = {
   key: 9,
   class: "text-caption text-grey mt-3"
 };
-const _hoisted_31 = { class: "xcl-sub mt-4" };
-const _hoisted_32 = { class: "text-caption text-grey ml-2" };
-const _hoisted_33 = {
+const _hoisted_33 = { class: "xcl-sub mt-4" };
+const _hoisted_34 = { class: "text-caption text-grey ml-2" };
+const _hoisted_35 = {
   class: "d-flex align-center",
   style: { "gap": "10px", "flex-wrap": "wrap" }
 };
-const _hoisted_34 = { style: { "min-width": "0", "flex": "1 1 200px" } };
-const _hoisted_35 = { class: "text-body-2" };
-const _hoisted_36 = { class: "text-caption text-grey" };
-const _hoisted_37 = {
+const _hoisted_36 = { style: { "min-width": "0", "flex": "1 1 200px" } };
+const _hoisted_37 = { class: "text-body-2" };
+const _hoisted_38 = { class: "text-caption text-grey" };
+const _hoisted_39 = {
   class: "d-flex align-center",
   style: { "gap": "8px", "flex-wrap": "wrap" }
 };
@@ -860,12 +865,12 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
     const credential = ref$3({ username: "", password: "" });
     const loginResult = ref$3(null);
     const verifyCode = ref$3("");
-    const manualToken = ref$3("");
+    const manual = ref$3({ user_id: "", pass_token: "" });
     const picker = ref$3(false);
     const loginStates = {
       success: { color: "success", text: "登录成功" },
       need_captcha: { color: "warning", text: "卡在图形验证码：照上面的图填验证码提交" },
-      need_verify: { color: "warning", text: "卡在二次校验：把小米发到手机/邮箱的验证码填进来提交" },
+      need_verify: { color: "warning", text: "卡在二次校验：小米已把验证码发往账号绑定的手机/邮箱，填进来提交" },
       failed: { color: "error", text: "登录失败" }
     };
     const loginState = computed$2(() => loginStates[loginResult.value?.state || ""] || null);
@@ -877,6 +882,7 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
     function switchMode(mode) {
       if (mode !== "qrcode") stopQr();
       loginMode.value = mode;
+      if (mode === "qrcode" && qr.value?.state !== "qr_waiting") startQr();
     }
     async function startLogin() {
       const body = {};
@@ -897,12 +903,21 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
       if (res) afterLogin(res);
     }
     async function submitManual() {
-      const rawCookie = manualToken.value.trim();
-      if (!rawCookie) {
-        notify("把整串 cookie 粘进来（要包含 userId 与 passToken/serviceToken）", "warning");
+      const userId = manual.value.user_id.trim();
+      const passToken = manual.value.pass_token.trim();
+      if (!userId || !passToken) {
+        notify("userId 与 passToken 都要填", "warning");
         return;
       }
-      const res = await raw("/login", { manual_token: rawCookie }, "校验票据");
+      const res = await raw(
+        "/login",
+        { user_id: userId, pass_token: passToken },
+        "校验票据"
+      );
+      if (res) afterLogin(res);
+    }
+    async function resendVerify() {
+      const res = await raw("/login", { resend: true }, "重发验证码");
       if (res) afterLogin(res);
     }
     async function afterLogin(res) {
@@ -912,7 +927,7 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
       if (res?.state === "success") {
         notify(res.message || "登录成功", "success");
         credential.value.password = "";
-        manualToken.value = "";
+        manual.value = { user_id: "", pass_token: "" };
         stopQr();
         qr.value = null;
         if (res.device_count) picker.value = true;
@@ -1008,7 +1023,7 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
         device_count: res.device_count
       };
       credential.value.password = "";
-      manualToken.value = "";
+      manual.value = { user_id: "", pass_token: "" };
       notify(res.message || "扫码登录成功", "success");
       emit("changed");
       if (res.device_count) picker.value = true;
@@ -1091,7 +1106,6 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
       const _component_v_img = _resolveComponent$3("v-img");
       const _component_v_icon = _resolveComponent$3("v-icon");
       const _component_v_progress_linear = _resolveComponent$3("v-progress-linear");
-      const _component_v_textarea = _resolveComponent$3("v-textarea");
       const _component_v_alert = _resolveComponent$3("v-alert");
       const _component_v_expand_transition = _resolveComponent$3("v-expand-transition");
       const _component_v_card = _resolveComponent$3("v-card");
@@ -1099,8 +1113,8 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
       const _component_v_snackbar = _resolveComponent$3("v-snackbar");
       return _openBlock$3(), _createElementBlock$3("div", _hoisted_1$3, [
         _createElementVNode$3("div", _hoisted_2$3, [
-          _cache[10] || (_cache[10] = _createElementVNode$3("span", { class: "xcl-step" }, "1", -1)),
-          _cache[11] || (_cache[11] = _createTextVNode$3(" 小米账号与音箱 ", -1)),
+          _cache[11] || (_cache[11] = _createElementVNode$3("span", { class: "xcl-step" }, "1", -1)),
+          _cache[12] || (_cache[12] = _createTextVNode$3(" 小米账号与音箱 ", -1)),
           _createVNode$3(_component_v_chip, {
             size: "x-small",
             variant: "tonal",
@@ -1135,7 +1149,7 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
               variant: "tonal",
               class: "ml-2"
             }, {
-              default: _withCtx$3(() => [..._cache[12] || (_cache[12] = [
+              default: _withCtx$3(() => [..._cache[13] || (_cache[13] = [
                 _createTextVNode$3("默认：第一台在线音箱", -1)
               ])]),
               _: 1
@@ -1144,7 +1158,7 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
           _createElementVNode$3("div", _hoisted_7$1, [
             _createTextVNode$3(" 票据保存于 " + _toDisplayString$3(props.status?.token_saved_at || "-") + " ", 1),
             props.status?.manual_token ? (_openBlock$3(), _createElementBlock$3(_Fragment$3, { key: 0 }, [
-              _createTextVNode$3("｜手工粘贴的 cookie")
+              _createTextVNode$3("｜手工填的 Cookie 票据")
             ], 64)) : _createCommentVNode$3("", true),
             props.status?.token_expired ? (_openBlock$3(), _createElementBlock$3(_Fragment$3, { key: 1 }, [
               _createTextVNode$3("｜" + _toDisplayString$3(reloginText.value), 1)
@@ -1159,7 +1173,7 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
             "prepend-icon": "mdi-refresh",
             onClick: refreshDevices
           }, {
-            default: _withCtx$3(() => [..._cache[13] || (_cache[13] = [
+            default: _withCtx$3(() => [..._cache[14] || (_cache[14] = [
               _createTextVNode$3("刷新设备 ", -1)
             ])]),
             _: 1
@@ -1172,7 +1186,7 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
             "prepend-icon": "mdi-logout",
             onClick: doLogout
           }, {
-            default: _withCtx$3(() => [..._cache[14] || (_cache[14] = [
+            default: _withCtx$3(() => [..._cache[15] || (_cache[15] = [
               _createTextVNode$3("退出登录 ", -1)
             ])]),
             _: 1
@@ -1237,13 +1251,13 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
               "prepend-icon": "mdi-login",
               onClick: startLogin
             }, {
-              default: _withCtx$3(() => [..._cache[15] || (_cache[15] = [
+              default: _withCtx$3(() => [..._cache[16] || (_cache[16] = [
                 _createTextVNode$3("登录 ", -1)
               ])]),
               _: 1
             }, 8, ["loading"])
           ]),
-          _cache[16] || (_cache[16] = _createElementVNode$3("div", { class: "text-caption text-grey mt-1" }, " 账号密码只存进本机配置、接口永不回显明文；点「登录」即先保存再发起，票据存在插件数据里。 小米判定「新设备」时会要图形验证码或手机/邮箱验证码，下面那步照提示填进来就行。 ", -1))
+          _cache[17] || (_cache[17] = _createElementVNode$3("div", { class: "text-caption text-grey mt-1" }, " 账号密码只存进本机配置、接口永不回显明文；点「登录」即先保存再发起，票据存在插件数据里。 小米判定「新设备」时会要图形验证码或手机/邮箱验证码，下面那步照提示填进来就行。 ", -1))
         ], 64)) : loginMode.value === "qrcode" ? (_openBlock$3(), _createElementBlock$3(_Fragment$3, { key: 3 }, [
           _createElementVNode$3("div", _hoisted_10$1, [
             qr.value?.qr_image ? (_openBlock$3(), _createBlock$2(_component_v_img, {
@@ -1259,11 +1273,11 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
                 color: qrBusy.value ? "primary" : "grey",
                 size: "40"
               }, null, 8, ["icon", "color"]),
-              _cache[17] || (_cache[17] = _createElementVNode$3("span", { class: "text-caption text-grey mt-1" }, "还没有二维码", -1))
+              _createElementVNode$3("span", _hoisted_12$1, _toDisplayString$3(qrBusy.value ? "二维码获取中…" : "没取到二维码"), 1)
             ])),
-            _createElementVNode$3("div", _hoisted_12$1, [
-              _createElementVNode$3("div", _hoisted_13$1, _toDisplayString$3(qrText.value || "取一张二维码，用手机 App 扫一下"), 1),
-              qr.value?.message && qrText.value ? (_openBlock$3(), _createElementBlock$3("div", _hoisted_14$1, _toDisplayString$3(qr.value.message), 1)) : _createCommentVNode$3("", true),
+            _createElementVNode$3("div", _hoisted_13$1, [
+              _createElementVNode$3("div", _hoisted_14$1, _toDisplayString$3(qrText.value || "切到这个标签就已经取好一张，直接用手机 App 扫"), 1),
+              qr.value?.message && qrText.value ? (_openBlock$3(), _createElementBlock$3("div", _hoisted_15, _toDisplayString$3(qr.value.message), 1)) : _createCommentVNode$3("", true),
               qr.value?.state === "qr_waiting" && qr.value.expires_in ? (_openBlock$3(), _createBlock$2(_component_v_progress_linear, {
                 key: 1,
                 height: "4",
@@ -1272,7 +1286,7 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
                 class: "mt-2",
                 "model-value": Math.max(0, Math.min(100, qrLeft.value / (qr.value.expires_in || 1) * 100))
               }, null, 8, ["model-value"])) : _createCommentVNode$3("", true),
-              _createElementVNode$3("div", _hoisted_15, [
+              _createElementVNode$3("div", _hoisted_16, [
                 _createVNode$3(_component_v_btn, {
                   size: "small",
                   variant: "tonal",
@@ -1302,16 +1316,29 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
           ]),
           _cache[19] || (_cache[19] = _createElementVNode$3("div", { class: "text-caption text-grey mt-2" }, " 用米家 / 小米音箱 App 扫码后在手机上确认，页面会自动问到结果；中途过期就点「换一张」。 这条路不走密码，也就绕开了「新设备登录」那套风控，账密反复登不上时通常它能用。 ", -1))
         ], 64)) : (_openBlock$3(), _createElementBlock$3(_Fragment$3, { key: 4 }, [
-          _createVNode$3(_component_v_textarea, {
-            modelValue: manualToken.value,
-            "onUpdate:modelValue": _cache[3] || (_cache[3] = ($event) => manualToken.value = $event),
-            class: "mt-3",
-            rows: 3,
-            density: "compact",
-            "hide-details": "",
-            placeholder: "userId=…; passToken=…; serviceToken=…（浏览器里登录过小米账号的整串 cookie）"
-          }, null, 8, ["modelValue"]),
-          _createElementVNode$3("div", _hoisted_16, [
+          _createElementVNode$3("div", _hoisted_17, [
+            _createVNode$3(_component_v_text_field, {
+              modelValue: manual.value.user_id,
+              "onUpdate:modelValue": _cache[3] || (_cache[3] = ($event) => manual.value.user_id = $event),
+              density: "compact",
+              "hide-details": "",
+              clearable: "",
+              label: "User ID",
+              placeholder: "浏览器 Cookie 里的 userId",
+              style: { "min-width": "160px", "flex": "1 1 160px" },
+              onKeyup: _withKeys(submitManual, ["enter"])
+            }, null, 8, ["modelValue"]),
+            _createVNode$3(_component_v_text_field, {
+              modelValue: manual.value.pass_token,
+              "onUpdate:modelValue": _cache[4] || (_cache[4] = ($event) => manual.value.pass_token = $event),
+              density: "compact",
+              "hide-details": "",
+              clearable: "",
+              label: "Pass Token",
+              placeholder: "浏览器 Cookie 里的 passToken",
+              style: { "min-width": "220px", "flex": "2 1 260px" },
+              onKeyup: _withKeys(submitManual, ["enter"])
+            }, null, 8, ["modelValue"]),
             _createVNode$3(_component_v_btn, {
               size: "small",
               variant: "tonal",
@@ -1328,7 +1355,7 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
             _createVNode$3(_component_v_btn, {
               size: "small",
               variant: "text",
-              onClick: _cache[4] || (_cache[4] = ($event) => manualToken.value = "")
+              onClick: _cache[5] || (_cache[5] = ($event) => manual.value = { user_id: "", pass_token: "" })
             }, {
               default: _withCtx$3(() => [..._cache[21] || (_cache[21] = [
                 _createTextVNode$3("清空", -1)
@@ -1336,9 +1363,15 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
               _: 1
             })
           ]),
-          _cache[22] || (_cache[22] = _createElementVNode$3("div", { class: "text-caption text-grey mt-1" }, " 前两种都不方便时的兜底：先拿 passToken 现换一张活票（换到了才说明这串 cookie 真的有效）， 换不到才退回直接用粘进来的 serviceToken。 ", -1))
+          _cache[22] || (_cache[22] = _createElementVNode$3("div", { class: "text-caption text-grey mt-1" }, [
+            _createTextVNode$3(" 在浏览器里登录过 "),
+            _createElementVNode$3("span", { class: "text-no-wrap" }, "i.api.xiaomi.com"),
+            _createTextVNode$3(" 后，从 DevTools 的 Cookie 里 取 userId 和 passToken 两项的"),
+            _createElementVNode$3("b", null, "值"),
+            _createTextVNode$3("填进来（别粘整串 cookie）。凭据只发给本插件用于换票， 不写日志、接口不回显。后端拿 passToken 现换一张活票，换到了才算这串凭据真的有效。 ")
+          ], -1))
         ], 64)),
-        loginResult.value ? (_openBlock$3(), _createElementBlock$3("div", _hoisted_17, [
+        loginResult.value ? (_openBlock$3(), _createElementBlock$3("div", _hoisted_18, [
           _createVNode$3(_component_v_alert, {
             type: loginState.value?.color || "info",
             variant: "tonal",
@@ -1346,9 +1379,9 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
             icon: loginState.value ? void 0 : "mdi-information-outline"
           }, {
             default: _withCtx$3(() => [
-              _createElementVNode$3("div", _hoisted_18, _toDisplayString$3(loginState.value?.text || loginResult.value.state), 1),
-              _createElementVNode$3("div", _hoisted_19, _toDisplayString$3(loginResult.value.message), 1),
-              loginResult.value.state === "success" ? (_openBlock$3(), _createElementBlock$3("div", _hoisted_20, [
+              _createElementVNode$3("div", _hoisted_19, _toDisplayString$3(loginState.value?.text || loginResult.value.state), 1),
+              _createElementVNode$3("div", _hoisted_20, _toDisplayString$3(loginResult.value.message), 1),
+              loginResult.value.state === "success" ? (_openBlock$3(), _createElementBlock$3("div", _hoisted_21, [
                 _createTextVNode$3(" 取到 " + _toDisplayString$3(loginResult.value.device_count) + " 台音箱 ", 1),
                 loginResult.value.device_count ? (_openBlock$3(), _createElementBlock$3(_Fragment$3, { key: 0 }, [
                   _createTextVNode$3("｜下面已列出，点「选它」设为默认")
@@ -1358,7 +1391,7 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
             _: 1
           }, 8, ["type", "icon"])
         ])) : _createCommentVNode$3("", true),
-        loginState.value?.color === "warning" ? (_openBlock$3(), _createElementBlock$3("div", _hoisted_21, [
+        loginState.value?.color === "warning" ? (_openBlock$3(), _createElementBlock$3("div", _hoisted_22, [
           loginResult.value?.captcha_image ? (_openBlock$3(), _createBlock$2(_component_v_img, {
             key: 0,
             src: loginResult.value.captcha_image,
@@ -1367,10 +1400,10 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
             style: { "max-width": "240px" },
             contain: ""
           }, null, 8, ["src"])) : _createCommentVNode$3("", true),
-          _createElementVNode$3("div", _hoisted_22, [
+          _createElementVNode$3("div", _hoisted_23, [
             _createVNode$3(_component_v_text_field, {
               modelValue: verifyCode.value,
-              "onUpdate:modelValue": _cache[5] || (_cache[5] = ($event) => verifyCode.value = $event),
+              "onUpdate:modelValue": _cache[6] || (_cache[6] = ($event) => verifyCode.value = $event),
               density: "compact",
               "hide-details": "",
               label: loginResult.value?.state === "need_verify" ? "邮箱/短信验证码" : "图形验证码",
@@ -1391,26 +1424,29 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
             }, 8, ["loading"]),
             _createVNode$3(_component_v_btn, {
               size: "small",
-              variant: "text",
-              onClick: startLogin
+              variant: "tonal",
+              loading: _unref$3(busy) === "重发验证码",
+              "prepend-icon": "mdi-send",
+              onClick: resendVerify
             }, {
               default: _withCtx$3(() => [..._cache[24] || (_cache[24] = [
-                _createTextVNode$3("重新发起登录", -1)
+                _createTextVNode$3("重发验证码 ", -1)
               ])]),
               _: 1
-            })
+            }, 8, ["loading"]),
+            loginResult.value?.state === "need_verify" ? (_openBlock$3(), _createElementBlock$3("span", _hoisted_24, " 收不到就点重发：小米把码发在建立那次会话时，重新发起才会有新码 ")) : _createCommentVNode$3("", true)
           ])
         ])) : _createCommentVNode$3("", true),
         devices.value.length ? (_openBlock$3(), _createElementBlock$3(_Fragment$3, { key: 7 }, [
-          _createElementVNode$3("div", _hoisted_23, [
+          _createElementVNode$3("div", _hoisted_25, [
             _cache[25] || (_cache[25] = _createTextVNode$3(" 音箱 ", -1)),
-            _createElementVNode$3("span", _hoisted_24, _toDisplayString$3(picker.value ? `${devices.value.length} 台可选` : "点标题展开"), 1),
+            _createElementVNode$3("span", _hoisted_26, _toDisplayString$3(picker.value ? `${devices.value.length} 台可选` : "点标题展开"), 1),
             _createVNode$3(_component_v_btn, {
               size: "x-small",
               variant: "text",
               class: "text-none ml-1",
               "prepend-icon": picker.value ? "mdi-chevron-up" : "mdi-chevron-down",
-              onClick: _cache[6] || (_cache[6] = ($event) => picker.value = !picker.value)
+              onClick: _cache[7] || (_cache[7] = ($event) => picker.value = !picker.value)
             }, {
               default: _withCtx$3(() => [
                 _createTextVNode$3(_toDisplayString$3(picker.value ? "收起" : "选择默认音箱"), 1)
@@ -1420,7 +1456,7 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
           ]),
           _createVNode$3(_component_v_expand_transition, null, {
             default: _withCtx$3(() => [
-              picker.value ? (_openBlock$3(), _createElementBlock$3("div", _hoisted_25, [
+              picker.value ? (_openBlock$3(), _createElementBlock$3("div", _hoisted_27, [
                 (_openBlock$3(true), _createElementBlock$3(_Fragment$3, null, _renderList$2(pickerDevices.value, (device) => {
                   return _openBlock$3(), _createElementBlock$3("div", {
                     key: device.device_id,
@@ -1430,8 +1466,8 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
                       icon: device.presence === "online" ? "mdi-speaker" : "mdi-speaker-off",
                       color: device.is_default ? "primary" : device.presence === "online" ? "success" : "grey"
                     }, null, 8, ["icon", "color"]),
-                    _createElementVNode$3("div", _hoisted_26, [
-                      _createElementVNode$3("div", _hoisted_27, [
+                    _createElementVNode$3("div", _hoisted_28, [
+                      _createElementVNode$3("div", _hoisted_29, [
                         _createTextVNode$3(_toDisplayString$3(device.name || device.alias || device.device_id) + " ", 1),
                         device.is_default ? (_openBlock$3(), _createBlock$2(_component_v_chip, {
                           key: 0,
@@ -1446,7 +1482,7 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
                           _: 1
                         })) : _createCommentVNode$3("", true)
                       ]),
-                      _createElementVNode$3("div", _hoisted_28, [
+                      _createElementVNode$3("div", _hoisted_30, [
                         _createTextVNode$3(_toDisplayString$3(device.model || device.hardware || "未知型号") + "｜" + _toDisplayString$3(device.presence === "online" ? "在线" : "离线") + " ", 1),
                         device.needs_music_api ? (_openBlock$3(), _createElementBlock$3(_Fragment$3, { key: 0 }, [
                           _createTextVNode$3("｜该型号需走 play_music，直链可能被当成电台播放")
@@ -1485,11 +1521,11 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
             ]),
             _: 1
           })
-        ], 64)) : props.status?.logged_in ? (_openBlock$3(), _createElementBlock$3("div", _hoisted_29, " 设备列表是空的：可能票据已失效，点上面的「刷新设备」重试。 ")) : (_openBlock$3(), _createElementBlock$3("div", _hoisted_30, " 登录成功后这里才会列出音箱，也要选了默认音箱，后面的配置与播放才有意义。 ")),
+        ], 64)) : props.status?.logged_in ? (_openBlock$3(), _createElementBlock$3("div", _hoisted_31, " 设备列表是空的：可能票据已失效，点上面的「刷新设备」重试。 ")) : (_openBlock$3(), _createElementBlock$3("div", _hoisted_32, " 登录成功后这里才会列出音箱，也要选了默认音箱，后面的配置与播放才有意义。 ")),
         devices.value.length > 1 ? (_openBlock$3(), _createElementBlock$3(_Fragment$3, { key: 10 }, [
-          _createElementVNode$3("div", _hoisted_31, [
+          _createElementVNode$3("div", _hoisted_33, [
             _cache[29] || (_cache[29] = _createTextVNode$3(" 设备分组 ", -1)),
-            _createElementVNode$3("span", _hoisted_32, _toDisplayString$3(groups.value.length) + " 组", 1)
+            _createElementVNode$3("span", _hoisted_34, _toDisplayString$3(groups.value.length) + " 组", 1)
           ]),
           (_openBlock$3(true), _createElementBlock$3(_Fragment$3, null, _renderList$2(groups.value, (row) => {
             return _openBlock$3(), _createBlock$2(_component_v_card, {
@@ -1498,13 +1534,13 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
               class: "xcl-card pa-3 mb-2"
             }, {
               default: _withCtx$3(() => [
-                _createElementVNode$3("div", _hoisted_33, [
+                _createElementVNode$3("div", _hoisted_35, [
                   _createVNode$3(_component_v_icon, {
                     icon: "mdi-home-group",
                     color: "primary"
                   }),
-                  _createElementVNode$3("div", _hoisted_34, [
-                    _createElementVNode$3("div", _hoisted_35, [
+                  _createElementVNode$3("div", _hoisted_36, [
+                    _createElementVNode$3("div", _hoisted_37, [
                       _createTextVNode$3(_toDisplayString$3(row.name) + " ", 1),
                       defaultGroup.value === row.name ? (_openBlock$3(), _createBlock$2(_component_v_chip, {
                         key: 0,
@@ -1519,7 +1555,7 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
                         _: 1
                       })) : _createCommentVNode$3("", true)
                     ]),
-                    _createElementVNode$3("div", _hoisted_36, _toDisplayString$3(row.devices.join("、") || row.device_ids.join("、")), 1)
+                    _createElementVNode$3("div", _hoisted_38, _toDisplayString$3(row.devices.join("、") || row.device_ids.join("、")), 1)
                   ]),
                   _createVNode$3(_component_v_btn, {
                     size: "x-small",
@@ -1554,10 +1590,10 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
             class: "xcl-card pa-3"
           }, {
             default: _withCtx$3(() => [
-              _createElementVNode$3("div", _hoisted_37, [
+              _createElementVNode$3("div", _hoisted_39, [
                 _createVNode$3(_component_v_text_field, {
                   modelValue: groupForm.value.name,
-                  "onUpdate:modelValue": _cache[7] || (_cache[7] = ($event) => groupForm.value.name = $event),
+                  "onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => groupForm.value.name = $event),
                   density: "compact",
                   "hide-details": "",
                   clearable: "",
@@ -1567,7 +1603,7 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
                 }, null, 8, ["modelValue", "label"]),
                 _createVNode$3(_component_v_combobox, {
                   modelValue: groupForm.value.device_ids,
-                  "onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => groupForm.value.device_ids = $event),
+                  "onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => groupForm.value.device_ids = $event),
                   items: groupDeviceItems.value,
                   "item-title": "title",
                   "item-value": "value",
@@ -1609,7 +1645,7 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
         ], 64)) : _createCommentVNode$3("", true),
         _createVNode$3(_component_v_snackbar, {
           modelValue: _unref$3(snackbar).show,
-          "onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => _unref$3(snackbar).show = $event),
+          "onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => _unref$3(snackbar).show = $event),
           color: _unref$3(snackbar).color,
           timeout: "3500",
           location: "bottom"
@@ -1624,7 +1660,7 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
   }
 });
 
-const ConfigLogin = /* @__PURE__ */ _export_sfc(_sfc_main$3, [["__scopeId", "data-v-46c707ad"]]);
+const ConfigLogin = /* @__PURE__ */ _export_sfc(_sfc_main$3, [["__scopeId", "data-v-ff2fcf2d"]]);
 
 const {defineComponent:_defineComponent$2} = await importShared('vue');
 

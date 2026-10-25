@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import Config from './__federation_expose_Config-CPGkaX7F.js';
+import Config from './__federation_expose_Config-vA_hhxxE.js';
 import { a as activeLine, s as statusColor, m as modeText, f as fmtSeconds, M as MODE_ITEMS, b as fmtSize, c as fmtTime, q as query, _ as _export_sfc } from './types-CVxekbje.js';
 
 const {defineComponent:_defineComponent} = await importShared('vue');
@@ -1068,7 +1068,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     ]),
                     _createElementVNode("div", _hoisted_19, [
                       _createTextVNode(_toDisplayString(status.value.logged_in ? cfg.value.username_set ? cfg.value.username : "（未记录账号名）" : "还没有可用的登录票据") + " ", 1),
-                      status.value.manual_token ? (_openBlock(), _createElementBlock("span", _hoisted_20, "｜手工粘贴的 cookie")) : _createCommentVNode("", true)
+                      status.value.manual_token ? (_openBlock(), _createElementBlock("span", _hoisted_20, "｜手工填的 Cookie 票据")) : _createCommentVNode("", true)
                     ]),
                     _createElementVNode("div", _hoisted_21, [
                       status.value.logged_in ? (_openBlock(), _createElementBlock(_Fragment, { key: 0 }, [
@@ -2544,6 +2544,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const AppPage = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-ff94eeda"]]);
+const AppPage = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-13d6c8eb"]]);
 
 export { AppPage as default };

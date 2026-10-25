@@ -6,7 +6,7 @@ import { type Device, type GroupRow, type LoginResult, type QrResult } from './t
 /**
  * 配置页的第一项：小米账号 → 登录 → 取音箱 → 选默认音箱（顺带设备分组）。
  *
- * 登录只在这一个地方做，三种方式任选其一：账号密码、扫码、粘贴 cookie。
+ * 登录只在这一个地方做，三种方式任选其一：账号密码、扫码、Cookie 票据。
  * 账号密码先落进配置再发登录，理由是后端只认配置里那一份：
  * 票据过期要重登、语音轮询要换票，都从配置读，只在请求体里带一次等于没存。
  */
@@ -40,14 +40,15 @@ const loginMode = ref<'password' | 'qrcode' | 'cookie'>('password')
 const credential = ref({ username: '', password: '' })
 const loginResult = ref<LoginResult | null>(null)
 const verifyCode = ref('')
-const manualToken = ref('')
+// 手工票据只要两项（与 songloft 的小爱插件一致）：浏览器 cookie 里的 userId 与 passToken
+const manual = ref({ user_id: '', pass_token: '' })
 // 登录成功后自动把音箱列表端上来，登完了还得自己找地方点「刷新设备」是原来那套的毛病
 const picker = ref(false)
 
 const loginStates: Record<string, { color: string; text: string }> = {
   success: { color: 'success', text: '登录成功' },
   need_captcha: { color: 'warning', text: '卡在图形验证码：照上面的图填验证码提交' },
-  need_verify: { color: 'warning', text: '卡在二次校验：把小米发到手机/邮箱的验证码填进来提交' },
+  need_verify: { color: 'warning', text: '卡在二次校验：小米已把验证码发往账号绑定的手机/邮箱，填进来提交' },
   failed: { color: 'error', text: '登录失败' }
 }
 
@@ -66,6 +67,9 @@ const pickerDevices = computed<Device[]>(() => devices.value.slice().sort((a, b)
 function switchMode(mode: 'password' | 'qrcode' | 'cookie') {
   if (mode !== 'qrcode') stopQr()
   loginMode.value = mode
+  // 点「扫码」就该看到码，不该还要再点一次「获取二维码」：
+  // 没有正在等的会话（第一次进来、或上一张已过期）就当场取一张
+  if (mode === 'qrcode' && qr.value?.state !== 'qr_waiting') startQr()
 }
 
 async function startLogin() {
@@ -91,12 +95,19 @@ async function submitVerify() {
 }
 
 async function submitManual() {
-  const rawCookie = manualToken.value.trim()
-  if (!rawCookie) {
-    notify('把整串 cookie 粘进来（要包含 userId 与 passToken/serviceToken）', 'warning')
+  const userId = manual.value.user_id.trim()
+  const passToken = manual.value.pass_token.trim()
+  if (!userId || !passToken) {
+    notify('userId 与 passToken 都要填', 'warning')
     return
   }
-  const res = await raw('/login', { manual_token: rawCookie }, '校验票据')
+  const res = await raw('/login',
+    { user_id: userId, pass_token: passToken }, '校验票据')
+  if (res) afterLogin(res as LoginResult)
+}
+
+async function resendVerify() {
+  const res = await raw('/login', { resend: true }, '重发验证码')
   if (res) afterLogin(res as LoginResult)
 }
 
@@ -107,7 +118,7 @@ async function afterLogin(res: LoginResult) {
   if (res?.state === 'success') {
     notify(res.message || '登录成功', 'success')
     credential.value.password = ''
-    manualToken.value = ''
+    manual.value = { user_id: '', pass_token: '' }
     stopQr()
     qr.value = null
     // 后端登录成功时已经强制刷过一遍设备，这里只负责把它直接端到人面前
@@ -220,7 +231,7 @@ function afterQrSuccess(res: QrResult) {
     device_count: res.device_count
   }
   credential.value.password = ''
-  manualToken.value = ''
+  manual.value = { user_id: '', pass_token: '' }
   notify(res.message || '扫码登录成功', 'success')
   emit('changed')
   if (res.device_count) picker.value = true
@@ -339,7 +350,7 @@ function removeGroup(name: string) {
       </div>
       <div class="text-caption text-grey">
         票据保存于 {{ props.status?.token_saved_at || '-' }}
-        <template v-if="props.status?.manual_token">｜手工粘贴的 cookie</template>
+        <template v-if="props.status?.manual_token">｜手工填的 Cookie 票据</template>
         <template v-if="props.status?.token_expired">｜{{ reloginText }}</template>
       </div>
     </div>
@@ -387,10 +398,10 @@ function removeGroup(name: string) {
         <div v-else class="xcl-qr d-flex flex-column align-center justify-center rounded">
           <v-icon :icon="qrBusy ? 'mdi-loading mdi-refresh' : 'mdi-qrcode-scan'"
                   :color="qrBusy ? 'primary' : 'grey'" size="40" />
-          <span class="text-caption text-grey mt-1">还没有二维码</span>
+          <span class="text-caption text-grey mt-1">{{ qrBusy ? '二维码获取中…' : '没取到二维码' }}</span>
         </div>
         <div style="min-width: 220px; flex: 1 1 220px">
-          <div class="text-body-2">{{ qrText || '取一张二维码，用手机 App 扫一下' }}</div>
+          <div class="text-body-2">{{ qrText || '切到这个标签就已经取好一张，直接用手机 App 扫' }}</div>
           <div v-if="qr?.message && qrText" class="text-caption text-grey mt-1">{{ qr.message }}</div>
           <v-progress-linear v-if="qr?.state === 'qr_waiting' && qr.expires_in" height="4" rounded
                              color="primary" class="mt-2"
@@ -410,19 +421,24 @@ function removeGroup(name: string) {
       </div>
     </template>
 
-    <!-- 三、粘贴 cookie -->
+    <!-- 三、Cookie 票据 -->
     <template v-else>
-      <v-textarea v-model="manualToken" class="mt-3" :rows="3" density="compact" hide-details
-                  placeholder="userId=…; passToken=…; serviceToken=…（浏览器里登录过小米账号的整串 cookie）" />
-      <div class="d-flex mt-1" style="gap: 8px">
+      <div class="d-flex mt-3" style="gap: 8px; flex-wrap: wrap">
+        <v-text-field v-model="manual.user_id" density="compact" hide-details clearable
+                      label="User ID" placeholder="浏览器 Cookie 里的 userId"
+                      style="min-width: 160px; flex: 1 1 160px" @keyup.enter="submitManual" />
+        <v-text-field v-model="manual.pass_token" density="compact" hide-details clearable
+                      label="Pass Token" placeholder="浏览器 Cookie 里的 passToken"
+                      style="min-width: 220px; flex: 2 1 260px" @keyup.enter="submitManual" />
         <v-btn size="small" variant="tonal" color="primary" :loading="busy === '校验票据'"
                prepend-icon="mdi-key-variant" @click="submitManual">校验并使用
         </v-btn>
-        <v-btn size="small" variant="text" @click="manualToken = ''">清空</v-btn>
+        <v-btn size="small" variant="text" @click="manual = { user_id: '', pass_token: '' }">清空</v-btn>
       </div>
       <div class="text-caption text-grey mt-1">
-        前两种都不方便时的兜底：先拿 passToken 现换一张活票（换到了才说明这串 cookie 真的有效），
-        换不到才退回直接用粘进来的 serviceToken。
+        在浏览器里登录过 <span class="text-no-wrap">i.api.xiaomi.com</span> 后，从 DevTools 的 Cookie 里
+        取 userId 和 passToken 两项的<b>值</b>填进来（别粘整串 cookie）。凭据只发给本插件用于换票，
+        不写日志、接口不回显。后端拿 passToken 现换一张活票，换到了才算这串凭据真的有效。
       </div>
     </template>
 
@@ -448,7 +464,12 @@ function removeGroup(name: string) {
         <v-btn size="small" variant="tonal" color="info" :loading="busy === '提交验证码'"
                @click="submitVerify">提交
         </v-btn>
-        <v-btn size="small" variant="text" @click="startLogin">重新发起登录</v-btn>
+        <v-btn size="small" variant="tonal" :loading="busy === '重发验证码'"
+               prepend-icon="mdi-send" @click="resendVerify">重发验证码
+        </v-btn>
+        <span v-if="loginResult?.state === 'need_verify'" class="text-caption text-grey align-self-center">
+          收不到就点重发：小米把码发在建立那次会话时，重新发起才会有新码
+        </span>
       </div>
     </div>
 

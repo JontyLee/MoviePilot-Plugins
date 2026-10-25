@@ -408,13 +408,15 @@ class XiaoaiAuth:
             f"code={data.get('code')} fields={sorted(str(k) for k in data)}"
         )
 
-        # 二次校验（手机/邮箱验证码）
+        # 二次校验（手机/邮箱验证码）：小米在给出这个地址的同时就把码发出去了，
+        # 插件不需要（也不该）替用户去访问它 —— 那是浏览器里另一份会话。
         notification = data.get("notificationUrl")
         if notification:
             self._verify_url = self._abs_url(notification)
-            channel = "邮箱" if "email" in self._verify_url else "手机/邮箱"
+            channel = "邮箱" if "email" in self._verify_url else "手机短信"
             return (LOGIN_NEED_VERIFY, None,
-                    f"小米要求{channel}二次校验，请查收验证码后填写")
+                    f"小米要求{channel}二次校验，验证码已发往账号绑定的{channel}；"
+                    "收不到就点「重发」重新发起一次")
 
         # 图形验证码：兼容小米返回过的多种字段名
         captcha_raw = ""
@@ -584,10 +586,18 @@ class XiaoaiAuth:
             "_flag": flag,
         })
         if response is None:
+            logger.warning(f"{_LOG_TAG} 二次校验提交没有拿到响应（网络或风控）: {api}")
             return ""
         _collect_cookies(response, self.cookies)
         data = _parse_json(response.text or "")
-        if not data or int(data.get("code") or 0) != 0:
+        if not data:
+            logger.warning(f"{_LOG_TAG} 二次校验响应无法解析: HTTP="
+                           f"{getattr(response, 'status_code', '?')}")
+            return ""
+        if int(data.get("code") or 0) != 0:
+            # 「码填错了」和「会话已经不是那次会话」在界面上长得一样，只有这里分得开
+            logger.info(f"{_LOG_TAG} 二次校验被拒: {api} code={data.get('code')} "
+                        f"desc={str(data.get('description') or data.get('desc') or '')[:120]}")
             return ""
         location = data.get("location")
         return self._abs_url(location) if location else ""
@@ -1220,34 +1230,20 @@ class XiaoaiClient:
         return bool(data) and int(data.get("code") or 0) == 0
 
 
-def parse_cookie_blob(raw: str) -> Dict[str, str]:
-    """把人粘进来的一串 cookie 拆成 名字（小写）→ 值。
-
-    名字统一小写：手工粘贴的大小写和顺序都不确定（userId / userid / UserID）。
-    值要 unquote：从浏览器里抄出来的 serviceToken 常带 %3D 这类转义，不解开就是
-    一张废票据，而小米对坏票据只回 401，不会告诉你「你粘错了」。
-    """
-    out: Dict[str, str] = {}
-    for part in (raw or "").replace("\n", ";").split(";"):
-        if "=" not in part:
-            continue
-        name, _, value = part.partition("=")
-        name = name.strip().strip('"').lower()
-        if name:
-            out[name] = unquote(value.strip()).strip('"')
-    return out
-
-
 def exchange_pass_token(pass_token: str, user_id: str, c_user_id: str = "",
                         device_id: str = "", login_method: str = "manual",
                         extra_cookies: Optional[Dict[str, str]] = None
                         ) -> Tuple[str, Optional[Dict[str, Any]], str]:
     """拿一个 passToken 去换 micoapi 的 serviceToken，返回 (state, token, message)。
 
-    扫码确认与手工粘贴 cookie 都收敛到这一步：passToken 是长期票据，能换到
-    serviceToken 就说明这一串 cookie 真的有效 —— 比直接相信粘进来的 serviceToken
-    可靠得多，也顺手把票据续上了。
+    扫码确认与手工填 cookie 都收敛到这一步：passToken 是长期票据，能换到
+    serviceToken 就说明这串凭据真的有效 —— 比直接相信浏览器里那张多半已经躺了
+    十几个小时的 serviceToken 可靠得多，也顺手把票据续上了。
     """
+    if "%" in pass_token:
+        # 从原始请求头里复制的值是百分号编码的；passToken 本身是 base64，不含 %，
+        # 所以看见 % 就该解开 —— 小米对坏票据只回 401，不会说「你粘错了」
+        pass_token = unquote(pass_token)
     auth = XiaoaiAuth(username="", password="", device_id=device_id,
                       login_method=login_method)
     for name, value in (extra_cookies or {}).items():
@@ -1261,31 +1257,3 @@ def exchange_pass_token(pass_token: str, user_id: str, c_user_id: str = "",
         auth.cookies["cUserId"] = c_user_id
     auth._user_id = user_id or ""
     return auth._service_login()
-
-
-def token_from_manual(userId: str, serviceToken: str, ssecurity: str = "",
-                      device_id: str = "") -> Dict[str, Any]:
-    """手工粘贴票据：从浏览器 cookie 里抄 userId/serviceToken 的兜底入口。"""
-    cookies: Dict[str, str] = {}
-    for part in (serviceToken or "").split(";"):
-        if "=" in part:
-            name, _, value = part.partition("=")
-            cookies[name.strip()] = unquote(value.strip()).strip('"')
-    token = {
-        "user_id": (userId or "").strip(),
-        "device_id": (device_id or "").strip() or generate_device_id(),
-        "services": {
-            MINA_SID: {
-                # 允许整串 cookie 粘进来：那种情况下 serviceToken= 前缀已经被拆掉
-                "service_token": cookies.get("serviceToken") or (serviceToken or "").strip(),
-                "ssecurity": (ssecurity or "").strip(),
-                "expires_at": time.time() + SERVICE_TOKEN_VALID_HOURS * 3600,
-            }
-        },
-        "pass_token": cookies.get("passToken", ""),
-        "c_user_id": cookies.get("cUserId", ""),
-        "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "login_method": "manual",
-        "manual": True,
-    }
-    return token

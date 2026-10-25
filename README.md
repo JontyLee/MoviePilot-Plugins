@@ -96,7 +96,7 @@ V3 新插件使用 `plugins.v3/<plugin_id_lower>/`、`tests/v3/<plugin_id_lower>
 | --- | --- |
 | 类名 / 目录 | `XiaoaiSpeaker` / `plugins.v3/xiaoaispeaker/` |
 | 配置前缀 | `xiaoaispeaker_` |
-| 版本 | 0.4.0 |
+| 版本 | 0.5.0 |
 | 元数据来源 | 无（不刮削，只播放）；设备与播放状态来自小米云端 Mina/ubus |
 | 图标 | `icons/xiaoai.svg`（仓库自绘，市场走 raw 地址） |
 | 使用说明 | [docs/xiaoaispeaker.md](./docs/xiaoaispeaker.md) |
@@ -104,8 +104,9 @@ V3 新插件使用 `plugins.v3/<plugin_id_lower>/`、`tests/v3/<plugin_id_lower>
 把 MP 音乐库里的音频推送到小爱音箱上听。播放地址由插件本机签发限时直链，不经过媒体
 服务器转码；库内路径与音频内容不出本机。
 
-- 登录支持账号密码、扫码、粘贴 cookie 三种方式，小米要图形验证码或手机/邮箱二次校验时
-  照提示填码续跑；票据只落本机插件数据，账号只回掩码、密码永不回显。
+- 登录支持账号密码、扫码、Cookie 票据三种方式（Cookie 只填 userId 与 passToken 两项），
+  小米要图形验证码或手机/邮箱二次校验时照提示填码、等不到码可重发；票据只落本机插件
+  数据，账号只回掩码、密码与凭据永不回显、也不写日志。
 - 曲库索引与文本匹配：一次扫盘把目录与 m3u 收成「歌曲 / 歌单」两张表，「播放周杰伦的
   稻香」这类说法能落到具体文件。
 - 侧栏运行视图六栏：运行总览 / 播放台 / 音乐库 / 歌单与收藏 / 定时任务 / 语音控制；
