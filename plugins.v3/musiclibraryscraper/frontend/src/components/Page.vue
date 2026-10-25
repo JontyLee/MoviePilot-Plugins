@@ -861,7 +861,7 @@ onMounted(() => {
       <v-card variant="flat">
         <div class="mls-dlg-head">
           <v-avatar color="primary" variant="tonal" rounded="lg" size="36" class="mr-3">
-            <v-icon icon="mdi-music-box-edit-outline" size="20" />
+            <v-icon icon="mdi-music-box-outline" size="20" />
           </v-avatar>
           <div class="mls-dlg-head-text">
             <div class="text-subtitle-1">补齐缺项</div>

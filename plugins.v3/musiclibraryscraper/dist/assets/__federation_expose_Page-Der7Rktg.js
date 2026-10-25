@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { s as stageCounts, F as FlowPipeline, a as FLOW_STEPS, _ as _export_sfc } from './flow-BYkeE1Vm.js';
+import { s as stageCounts, F as FlowPipeline, a as FLOW_STEPS, _ as _export_sfc } from './flow-BVjcb_2i.js';
 
 const {defineComponent:_defineComponent} = await importShared('vue');
 
@@ -1296,7 +1296,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     }, {
                       default: _withCtx(() => [
                         _createVNode(_component_v_icon, {
-                          icon: "mdi-music-box-edit-outline",
+                          icon: "mdi-music-box-outline",
                           size: "20"
                         })
                       ]),
@@ -1482,6 +1482,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const Page = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-7b483ddc"]]);
+const Page = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-b64a4149"]]);
 
 export { Page as default };

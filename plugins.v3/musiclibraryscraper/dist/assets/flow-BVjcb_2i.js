@@ -143,7 +143,7 @@ const FLOW_STEPS = [
   },
   {
     key: "ledger",
-    icon: "mdi-bookcheck-outline",
+    icon: "mdi-book-check-outline",
     title: "记账",
     caption: "故障不算文件失败"
   }
