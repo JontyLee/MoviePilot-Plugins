@@ -617,6 +617,7 @@ class XiaoaiAuth:
         「请查收验证码」而用户永远等不到那条短信。
         """
         if self._get(notification_url) is None:
+            logger.warning(f"{_LOG_TAG} 打不开小米的二次校验页面（网络或风控）")
             return 0, "打不开小米的二次校验页面"
         data = self._identity_json(self._identity_list_url(notification_url))
         flag = 4

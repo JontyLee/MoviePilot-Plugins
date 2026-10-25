@@ -2052,6 +2052,8 @@ class XiaoaiSpeaker(_PluginBase):
         state, token, message = exchange_pass_token(
             pass_token, user_id, device_id=self._device_id(), login_method="manual")
         if state != LOGIN_SUCCESS or not token:
+            # 小米只回一个 70016，说不清是票据过期、复制错了还是没带对 userId
+            logger.warning(f"{_LOG} Cookie 登录换票失败: {message or '小米没有给出原因'}")
             return LoginOut(state="failed",
                             message=f"passToken 换票失败：{message}；"
                                     "重新复制一份 userId 与 passToken，或改用扫码登录",
