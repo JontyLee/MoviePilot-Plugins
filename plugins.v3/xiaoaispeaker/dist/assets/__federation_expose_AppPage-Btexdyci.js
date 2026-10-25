@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import Config from './__federation_expose_Config-fxbyRJLr.js';
+import Config from './__federation_expose_Config-suvaqd0y.js';
 import { a as activeLine, s as statusColor, m as modeText, f as fmtSeconds, M as MODE_ITEMS, b as fmtSize, c as fmtTime, q as query, _ as _export_sfc } from './types-CVxekbje.js';
 
 const {defineComponent:_defineComponent} = await importShared('vue');
@@ -357,6 +357,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
         base_url_source: "",
         play_mode: "auto",
         audio_exts: "",
+        force_mp3: false,
         audio_id: "",
         stream_ttl: 3600,
         default_volume: 0,
@@ -2544,6 +2545,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const AppPage = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-13d6c8eb"]]);
+const AppPage = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-6568c80e"]]);
 
 export { AppPage as default };

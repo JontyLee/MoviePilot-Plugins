@@ -39,6 +39,7 @@ const form = ref<Record<string, any>>({
   base_url: '',
   play_mode: 'auto',
   audio_exts: '',
+  force_mp3: false,
   audio_id: '',
   stream_ttl: 3600,
   default_volume: 0,
@@ -113,6 +114,7 @@ function fillFromStatus(data: Status) {
     base_url: c.base_url || '',
     play_mode: c.play_mode || 'auto',
     audio_exts: c.audio_exts || '',
+    force_mp3: !!c.force_mp3,
     audio_id: c.audio_id || '',
     stream_ttl: c.stream_ttl ?? 3600,
     default_volume: c.default_volume ?? 0,
@@ -242,6 +244,14 @@ defineExpose({ loadConfig, save })
         <v-row dense class="mt-2">
           <v-col cols="12" md="6">
             <v-text-field v-model="form.audio_id" hide-details label="play_music audioID（留空用默认）" />
+          </v-col>
+          <v-col cols="12" md="6">
+            <v-switch v-model="form.force_mp3" color="success" hide-details inset
+                      label="非 mp3 现场转成 mp3（需要本机有 ffmpeg）" />
+            <div class="text-caption text-grey mt-n3">
+              小爱只稳当解码 mp3；m4a/flac 推过去常是「云端受理、音箱不出声」。开着这
+              项时插件边放边用 ffmpeg 转，转出来的长度未知，所以这一条不支持拖动进度。
+            </div>
           </v-col>
         </v-row>
       </div>

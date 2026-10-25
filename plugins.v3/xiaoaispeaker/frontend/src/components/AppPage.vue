@@ -77,7 +77,7 @@ const EMPTY_STATUS: Status = {
     enabled: false, show_sidebar_nav: true, username: '', username_set: false, password_set: false,
     default_device_id: '', music_dirs: '', dir_count: 0, missing_dirs: [],
     base_url: '', base_url_effective: '', base_url_source: '', play_mode: 'auto',
-    audio_exts: '', audio_id: '', stream_ttl: 3600, default_volume: 0,
+    audio_exts: '', force_mp3: false, audio_id: '', stream_ttl: 3600, default_volume: 0,
     auto_next: true, keep_light: false, tts_announce: false,
     voice_enabled: false, voice_devices: '', voice_poll: 2, voice_interrupt: true,
     voice_hint_tts: false, voice_hint_text: '正在搜索，请稍候', voice_reply: true,

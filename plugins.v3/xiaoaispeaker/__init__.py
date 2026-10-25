@@ -201,6 +201,7 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
     "base_url": "",
     "play_mode": "auto",
     "audio_exts": "",
+    "force_mp3": False,
     "audio_id": "",
     "stream_ttl": 3600,
     "default_volume": 0,
@@ -235,7 +236,10 @@ _FORM_NOTES = (
     "请在侧栏页的登录区填写，插件会把这次登录会话保留到验证码交回来。\n"
     "5. 「播放接口」选不定就用自动：白名单内的型号（部分带触屏/新固件的音箱）只认 "
     "player_play_music，其余走 player_play_url。推上去不出声可以先切成另一种再试。\n"
-    "6. 登录票据约 12 小时到期，插件会用 passToken 静默续期；续期失败才需要重新登录。"
+    "6. 库里的 m4a/flac 推过去常常是「云端受理、音箱不出声」——小爱只稳当解码 mp3。"
+    "打开「非 mp3 现场转成 mp3」后，/stream 边放边用本机 ffmpeg 转；这一条不再支持"
+    "拖动进度，也要求机器上有 ffmpeg。\n"
+    "7. 登录票据约 12 小时到期，插件会用 passToken 静默续期；续期失败才需要重新登录。"
 )
 
 _LOG = "[xiaoai]"
@@ -250,7 +254,7 @@ class XiaoaiSpeaker(_PluginBase):
         "库内目录浏览与搜索、远程命令；播放直链由插件签名限时，不依赖媒体服务器。"
     )
     plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/xiaoai.svg"
-    plugin_version = "0.5.4"
+    plugin_version = "0.5.5"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "xiaoaispeaker_"
@@ -267,6 +271,7 @@ class XiaoaiSpeaker(_PluginBase):
     _base_url: str = ""
     _play_mode: str = "auto"
     _audio_exts: str = ""
+    _force_mp3: bool = False
     _audio_id: str = ""
     _stream_ttl: int = 3600
     _default_volume: int = 0
@@ -319,6 +324,7 @@ class XiaoaiSpeaker(_PluginBase):
             self._base_url = _media.normalize_base_url(str(config.get("base_url") or ""))
             self._play_mode = self._clamp_play_mode(config.get("play_mode"))
             self._audio_exts = str(config.get("audio_exts") or "")
+            self._force_mp3 = bool(config.get("force_mp3"))
             self._audio_id = str(config.get("audio_id") or "").strip()
             self._stream_ttl = self._clamp_stream_ttl(config.get("stream_ttl"))
             self._default_volume = self._clamp_volume(config.get("default_volume"))
@@ -482,6 +488,7 @@ class XiaoaiSpeaker(_PluginBase):
             "base_url": self._base_url,
             "play_mode": self._play_mode,
             "audio_exts": self._audio_exts,
+            "force_mp3": self._force_mp3,
             "audio_id": self._audio_id,
             "stream_ttl": self._stream_ttl,
             "default_volume": self._default_volume,
@@ -835,9 +842,15 @@ class XiaoaiSpeaker(_PluginBase):
         # 是两个完全不同的方向，而只存最近一次播放的话，日志里什么痕迹都没有。
         # 直链本身带签名，不落日志；落的是音箱被要求去访问的地址与这条链接的格式。
         base, base_src = self._effective_base_url()
+        kind = "外链"
+        if path:
+            kind = _media.content_type(Path(path))
+            if _media.needs_transcode(Path(path), self._force_mp3):
+                # 音箱实际拿到的是转好的 mp3，日志报源格式会让人以为转码没生效
+                kind = f"{kind}→mp3"
         logger.info(
             f"{_LOG} 已推送 {Path(path).name or title or '外部直链'}"
-            f" 接口={api} 类型={_media.content_type(Path(path)) if path else '外链'}"
+            f" 接口={api} 类型={kind}"
             f" 设备={device.get('name') or device_id}"
             f" 拉流地址={base or '未配置'}（来源={base_src or '无'}）"
         )
@@ -2225,6 +2238,7 @@ class XiaoaiSpeaker(_PluginBase):
                 base_url_source=base_source,
                 play_mode=self._play_mode,
                 audio_exts=self._audio_exts,
+                force_mp3=self._force_mp3,
                 audio_id=self._audio_id or _mina.DEFAULT_MUSIC_AUDIO_ID,
                 stream_ttl=self._stream_ttl,
                 default_volume=self._default_volume,
@@ -3132,7 +3146,8 @@ class XiaoaiSpeaker(_PluginBase):
                     value = data.pop(key)
                     setattr(self, attr, bool(value) if as_bool else str(value or "").strip())
             for key in ("voice_enabled", "voice_interrupt", "voice_hint_tts",
-                        "voice_reply", "voice_memory", "ai_enabled", "ai_chat"):
+                        "voice_reply", "voice_memory", "ai_enabled", "ai_chat",
+                        "force_mp3"):
                 if key in data:
                     setattr(self, f"_{key}", bool(data.pop(key)))
             if "voice_hint_text" in data:
@@ -3160,7 +3175,7 @@ class XiaoaiSpeaker(_PluginBase):
         return self._status(force_devices=True)
 
     def api_stream(self, request: Request):
-        """GET /stream?path=&exp=&sig= —— 校验签名后按 Range 回文件。"""
+        """GET /stream?path=&exp=&sig= —— 校验签名后按 Range 回文件（开了转码则回 mp3 流）。"""
         path, expires, signature = _media.parse_query(dict(request.query_params))
         if not _media.verify_sign(self._secret(), path, expires, signature):
             return JSONResponse(status_code=403, content={"detail": "链接无效或已过期"})
@@ -3172,6 +3187,11 @@ class XiaoaiSpeaker(_PluginBase):
             size = real.stat().st_size
         except OSError as exc:
             return JSONResponse(status_code=404, content={"detail": f"读不到文件：{exc}"})
+        if _media.needs_transcode(real, self._force_mp3):
+            streamed = self._stream_transcoded(real)
+            if streamed is not None:
+                return streamed
+            # 机器上没有 ffmpeg：回落到源格式继续播，开关不该把本来能放的弄成不能放
         start, end = _media.parse_range(request.headers.get("Range"), size)
         partial = start > 0 or end < size - 1
         headers = {
@@ -3187,6 +3207,31 @@ class XiaoaiSpeaker(_PluginBase):
             status_code=206 if partial else 200,
             media_type=_media.content_type(real),
             headers=headers,
+        )
+
+    def _stream_transcoded(self, real: Path):
+        """现场转 mp3 的回流。返回 None 表示这台机器没有 ffmpeg，交回调用方播源格式。
+
+        转码是流式的、长度未知，所以这一条不能给 Content-Length，也不能装成支持
+        Range：音箱拖动进度时会被当作整首重传，而 mp3 是小爱唯一稳当吃的格式。
+        """
+        if not _media.ffmpeg_available():
+            logger.warning(f"{_LOG} 开了转码开关但这台机器上没有 ffmpeg，改为直接播源格式")
+            return None
+        try:
+            proc = _media.start_transcode(real)
+        except _media.TranscodeError as exc:
+            logger.warning(f"{_LOG} 转码失败 {real.name}: {exc}")
+            return JSONResponse(status_code=502, content={"detail": str(exc)})
+        return StreamingResponse(
+            _media.iter_transcode(proc),
+            status_code=200,
+            media_type="audio/mpeg",
+            headers={
+                "Accept-Ranges": "none",
+                "Cache-Control": "no-cache",
+                "Content-Disposition": f'inline; filename="{real.stem}.mp3"',
+            },
         )
 
     # ---------------- 页面 / 渲染 ----------------
@@ -3300,9 +3345,14 @@ class XiaoaiSpeaker(_PluginBase):
                         ]},
                     ]},
                     {"component": "VRow", "content": [
-                        {"component": "VCol", "props": {"cols": 12}, "content": [
+                        {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                             {"component": "VSwitch", "props": {"model": "tts_announce",
                                                                "label": "连播时先播报下一曲"}}
+                        ]},
+                        {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                            {"component": "VSwitch", "props": {
+                                "model": "force_mp3",
+                                "label": "非 mp3 现场转成 mp3（需要本机有 ffmpeg）"}}
                         ]},
                     ]},
                     {"component": "VRow", "content": [

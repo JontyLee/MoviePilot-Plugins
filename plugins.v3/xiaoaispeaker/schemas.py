@@ -174,6 +174,7 @@ class ConfigOut(BaseModel):
     base_url_source: str = ""
     play_mode: str = "auto"
     audio_exts: str = ""
+    force_mp3: bool = False
     audio_id: str = ""
     stream_ttl: int = 3600
     default_volume: int = 0
@@ -219,6 +220,7 @@ class ConfigIn(BaseModel):
     base_url: Optional[str] = None
     play_mode: Optional[str] = None
     audio_exts: Optional[str] = None
+    force_mp3: Optional[bool] = None
     audio_id: Optional[str] = None
     stream_ttl: Optional[int] = None
     default_volume: Optional[int] = None

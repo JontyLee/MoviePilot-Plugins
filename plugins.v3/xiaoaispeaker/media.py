@@ -16,6 +16,8 @@ import hmac
 import mimetypes
 import os
 import re
+import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -37,6 +39,12 @@ SKIP_DIRS = {".trickplay", "@eaDir", "#recycle", ".thumbnails", "node_modules"}
 _CHUNK_SIZE = 512 * 1024
 
 _RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)$", re.I)
+
+# 非 mp3 现场转成 mp3：小爱的 player_play_url 只稳当吃 mp3，m4a/flac 推过去常常是
+# 「云端受理、设备亮灯不出声」（上游 songloft-plugin-miot 把它做成 force_mp3 开关，
+# 他们的 issue #62 就是这个现象）。主程序镜像里带 ffmpeg，转码留在本机，不外发。
+FFMPEG_BIN = "ffmpeg"
+MP3_SUFFIXES = (".mp3",)
 
 
 def parse_dirs(raw: Any) -> List[Path]:
@@ -323,6 +331,60 @@ def iter_file(path: Path, start: int, end: int) -> Iterable[bytes]:
                 break
             remaining -= len(block)
             yield block
+
+
+class TranscodeError(RuntimeError):
+    """转码起不来（ffmpeg 没了、文件坏了）。调用方当次回 502，不静默降级。"""
+
+
+def ffmpeg_available() -> bool:
+    """本机有没有 ffmpeg。开关开着但机器上没有时宁可播源格式，不要把播放整条弄坏。"""
+    return bool(shutil.which(FFMPEG_BIN))
+
+
+def needs_transcode(path: Path, force: bool) -> bool:
+    """只在开了开关、且这条本来就不是 mp3 时才转 —— 能给音箱播的 mp3 不必再拉一次 ffmpeg。"""
+    return bool(force) and path.suffix.lower() not in MP3_SUFFIXES
+
+
+def transcode_command(path: Path) -> List[str]:
+    """转 mp3 的 argv。列表形式交给 exec，不经过 shell，路径里的空格与引号都不参与解析。"""
+    return [
+        FFMPEG_BIN, "-hide_banner", "-loglevel", "error", "-nostdin",
+        "-i", str(path),
+        # m4a/flac 常带封面图流，只取第一条音频
+        "-map", "0:a:0", "-vn",
+        "-acodec", "libmp3lame", "-q:a", "2",
+        "-f", "mp3", "pipe:1",
+    ]
+
+
+def start_transcode(path: Path) -> "subprocess.Popen":
+    """拉起 ffmpeg。在回响应头之前起，坏文件与起不来才能当成一次明确的失败回给人。"""
+    try:
+        return subprocess.Popen(
+            transcode_command(path),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        raise TranscodeError(f"起不了 ffmpeg：{exc}")
+
+
+def iter_transcode(proc: "subprocess.Popen") -> Iterable[bytes]:
+    """把 ffmpeg 的输出边转边给（长度未知，所以整条不给 Range）。"""
+    try:
+        while True:
+            block = proc.stdout.read(_CHUNK_SIZE) if proc.stdout else b""
+            if not block:
+                break
+            yield block
+    finally:
+        # 页面关掉、音箱断开都要把 ffmpeg 收掉，不然每次中断留一个进程
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
 
 
 def parse_query(query: Any) -> Tuple[str, int, str]:

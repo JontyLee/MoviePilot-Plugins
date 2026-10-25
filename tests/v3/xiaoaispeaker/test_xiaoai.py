@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import io
 import json
 import re
 import sys
@@ -1219,6 +1220,107 @@ class PluginControlCommandTest(unittest.TestCase):
         plugin.handle_command(_stub_env._Event(event_data={"action": "xiaoai_control",
                                                            "arg_str": "pause"}))
         self.assertIn("小爱音箱命令执行失败", plugin.messages[-1]["title"])
+
+
+class PluginStreamTranscodeTest(unittest.TestCase):
+    """force_mp3：非 mp3 现场转码，长度未知所以不给 Range。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        base = Path(self._tmp.name).resolve()
+        self.root = base / "music"
+        self.root.mkdir()
+        self.track = self.root / "song.m4a"
+        self.track.write_bytes(b"FAKE" * 40)
+        self.mp3 = self.root / "already.mp3"
+        self.mp3.write_bytes(b"ID3" * 40)
+        self.plugin = x.XiaoaiSpeaker()
+        self.plugin.init_plugin({**media_defaults, "music_dirs": str(self.root),
+                                 "force_mp3": True})
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _request(self, path: Path) -> Any:
+        target = str(path)
+        exp = int(time.time() + 600)
+        sig = media.sign_path(self.plugin._secret(), target, exp)
+        request_type = sys.modules["fastapi"].Request
+        return request_type(query={"path": target, "exp": str(exp), "sig": sig},
+                            headers={"Range": "bytes=0-"})
+
+    def test_switch_only_affects_non_mp3(self) -> None:
+        self.assertTrue(media.needs_transcode(self.track, True))
+        self.assertFalse(media.needs_transcode(self.mp3, True))
+        self.assertFalse(media.needs_transcode(self.track, False))
+
+    def test_config_endpoint_turns_the_switch_on_and_off(self) -> None:
+        """配置页那个开关要真的落到属性上：漏一条赋值等于开关是画的。"""
+        plugin = _plugin()
+        self.assertFalse(plugin._force_mp3)
+        out = plugin.api_config(x.schemas.ConfigIn(force_mp3=True))
+        self.assertTrue(plugin._force_mp3, out.config.force_mp3)
+        self.assertTrue(out.config.force_mp3)
+        plugin.api_config(x.schemas.ConfigIn(force_mp3=False))
+        self.assertFalse(plugin._force_mp3)
+
+    def test_transcode_command_has_no_shell_and_no_secret(self) -> None:
+        # argv 列表交给 exec：路径里的空格引号都不参与解析；直链的签名不进命令行
+        argv = media.transcode_command(Path("/media/我 的 \"歌.m4a\""))
+        self.assertIsInstance(argv, list)
+        self.assertIn("-acodec", argv)
+        self.assertEqual(argv[argv.index("-i") + 1], "/media/我 的 \"歌.m4a\"")
+        self.assertNotIn("/stream", " ".join(argv))
+
+    def test_missing_ffmpeg_falls_back_to_the_source_file(self) -> None:
+        """开着开关但机器上没有 ffmpeg，不能把本来能放的弄成不能放。"""
+        original = media.ffmpeg_available
+        media.ffmpeg_available = lambda: False
+        try:
+            response = self.plugin.api_stream(self._request(self.track))
+        finally:
+            media.ffmpeg_available = original
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(b"".join(response.iterator), self.track.read_bytes())
+
+    def test_transcoded_stream_is_mp3_without_range_support(self) -> None:
+        started: List[Any] = []
+
+        class _Proc:
+            stdout = io.BytesIO(b"\xff\xfb" + b"x" * 500)
+            returncode = None
+
+            def poll(self): return None
+            def kill(self): pass
+            def wait(self): pass
+
+        original_available, original_start = media.ffmpeg_available, media.start_transcode
+        media.ffmpeg_available = lambda: True
+        media.start_transcode = lambda path: started.append(path) or _Proc()
+        try:
+            response = self.plugin.api_stream(self._request(self.track))
+        finally:
+            media.ffmpeg_available = original_available
+            media.start_transcode = original_start
+        self.assertEqual(started, [self.track])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.media_type, "audio/mpeg")
+        self.assertEqual(response.headers["Accept-Ranges"], "none")
+        self.assertNotIn("Content-Length", response.headers)
+        self.assertIn("song.mp3", response.headers["Content-Disposition"])
+
+    def test_transcode_that_wont_start_is_a_clear_502(self) -> None:
+        original_available, original_start = media.ffmpeg_available, media.start_transcode
+        media.ffmpeg_available = lambda: True
+        media.start_transcode = lambda path: (_ for _ in ()).throw(
+            media.TranscodeError("起不了 ffmpeg：坏文件"))
+        try:
+            response = self.plugin.api_stream(self._request(self.track))
+        finally:
+            media.ffmpeg_available = original_available
+            media.start_transcode = original_start
+        self.assertEqual(response.status_code, 502)
+        self.assertIn("坏文件", response.body["detail"])
 
 
 class PluginStreamEndpointTest(unittest.TestCase):

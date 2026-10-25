@@ -94,6 +94,7 @@ export interface PluginConfig {
   base_url_source: string
   play_mode: string
   audio_exts: string
+  force_mp3: boolean
   audio_id: string
   stream_ttl: number
   default_volume: number

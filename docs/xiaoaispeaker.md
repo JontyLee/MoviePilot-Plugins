@@ -160,6 +160,16 @@
 - 播放接口两档：`player_play_url` 推签名直链；硬件码命中型号白名单的（`LX05` / `LX04`
   等一批较新的音箱）走 `player_play_music`。白名单判错时用 `play_mode="url"` 强制覆盖。
   设备行上标了「该型号需走 play_music，直链可能被当成电台播放」的就是命中白名单的。
+- **格式与接口是两件事**：`player_play_url` 实际只稳当吃 mp3 —— 把 m4a（`audio/mp4`）或
+  flac 的直链推过去，多半是云端回 `code=0` 「受理了」而设备一声不出，看起来像地址不可达、
+  其实是解码器不接。`player_play_music` 走的是音箱自己的音乐管线，编码兼容面宽得多，库里
+  以 m4a/flac 为主时先切这一档。
+- **一首 mp3 都没有时**，打开配置页的「非 mp3 现场转成 mp3」：`/stream` 边放边用本机
+  ffmpeg 转成 mp3 再回给音箱（上游 songloft-plugin-miot 的 `force_mp3` 同一做法）。三个
+  边界：转码是流式的、长度未知，所以这一条**不支持拖动进度**（`Accept-Ranges: none`，也不
+  带 `Content-Length`）；机器上没有 ffmpeg 时插件直说并照旧播源格式，不会因为开了关反而
+  把本来能放的弄坏；本来就是 mp3 的不经 ffmpeg。转码只在插件本机发生，音频不出这台机器。
+  代价是每个在听的连接起一个 ffmpeg 进程，所以默认关着。
 - 控制 `player_play_operation`、音量 `player_set_volume`、播报 `text_to_speech`
   （失败回落 `player_play_tts`）。小米对同一句播报会返回设备码 `3012`，那被译成
   「可能已经播报」而不是报错。
@@ -204,6 +214,7 @@
 | 外部访问地址 | `base_url` | 空（取宿主域名） | 直链的 host，音箱必须能访问到 |
 | 播放接口 | `play_mode` | `auto` | `auto` 按型号白名单选，`url` / `music` 强制 |
 | 可播放扩展名 | `audio_exts` | 空（内置名单） | 白名单 |
+| 非 mp3 现场转成 mp3 | `force_mp3` | 关 | `/stream` 用本机 ffmpeg 边放边转，见「播放与接口选择」 |
 | play_music audioID | `audio_id` | 空（内置默认） | 走 `player_play_music` 时的音频标识 |
 | 播放前设置音量 | `default_volume` | 0（不改） | 每次起播前拉一次音量 |
 | 直链有效期（秒） | `stream_ttl` | 3600 | `/stream` 的 `exp` |
@@ -348,7 +359,7 @@ provider/model/key/base_url）判意图，或开自由对话；插件不再另�
 | 登录成功但没有音箱 | 票据失效或账号名下确实没有音箱，点「刷新设备」重试 |
 | 点了没声音 / 音箱当电台放 | 先看日志那行「已推送 …」：接口、音频类型、设备、拉流地址与来源都在里面。型号该走 `player_play_music` 时把播放接口从 `auto` 改一下试 |
 | 音箱拉不到直链（403/超时） | 外部访问地址是不是音箱可达的（填内网 IP:端口最稳；公网域名要看路由器支持 hairpin 与证书是否受信）、`stream_ttl` 是否太短、路径是否在库内 |
-| 有 flac/wav 却不出声 | 库里这三种格式都可能出现：`player_play_url` 对 mp3 最稳，flac/wav 在不少型号上是「云端受理、设备不动」—— 先放一首 mp3 把格式与地址两件事分开验 |
+| 有 m4a/flac 却不出声 | `player_play_url` 只稳当吃 mp3，m4a（`audio/mp4`）与 flac 在多数型号上是「云端受理、设备不动」。先把播放接口从 `auto` 改 `music`（走设备自己的音乐管线，编码兼容好得多）；这条免费的路不通就打开「非 mp3 现场转成 mp3」，让 `/stream` 用本机 ffmpeg 现转成 mp3 |
 | 语音口令不响应 | `voice_enabled`、监听设备是否包含这台、`/voice` 里 last_poll_at 有没有在动 |
 | 直链播放到一半断 | 连播判定依赖 20 秒巡检 + 两次读到停止，宽限期内不会续播 |
 | 页面空白 / 组件加载错误 | `dist/assets/` 是否与 `remoteEntry.js` 里的分片名一致、市场包是否完整 |
