@@ -589,6 +589,20 @@ class MediaBoundaryTest(unittest.TestCase):
         self.assertEqual(media.status_text(1), "播放中")
         self.assertEqual(media.status_text(None), "未知")
 
+    def test_content_disposition_survives_latin1_headers(self) -> None:
+        """中文文件名进 HTTP 头必须转义，否则整个取流请求变成 500。"""
+        plain = media.content_disposition("01 - Sunny.mp3")
+        self.assertIn('filename="01 - Sunny.mp3"', plain)
+        self.assertIn("filename*=UTF-8''01%20-%20Sunny.mp3", plain)
+
+        chinese = media.content_disposition("03 - 晴天.flac")
+        # 真框架按 latin-1 编码头：这一句就是线上那个 500 的形状
+        chinese.encode("latin-1")
+        self.assertIn('filename="03 -.flac"', chinese)
+        self.assertIn("filename*=UTF-8''03%20-%20%E6%99%B4%E5%A4%A9.flac", chinese)
+        # 整个文件名都不是 ASCII 时兜底成 audio.flac，不能留个只有扩展名的空名
+        self.assertIn('filename="audio.flac"', media.content_disposition("晴天.flac"))
+
     def test_parse_query_accepts_mapping_and_string(self) -> None:
         path = "/media/music/01 - 晴天.mp3"
         token = media.pack_link("sec", path, 123)

@@ -121,6 +121,13 @@ class _StreamingResponse:
         self.status_code = status_code
         self.media_type = media_type
         self.headers = dict(headers or {})
+        # 真框架在这里会把头按 latin-1 编码（starlette 的 init_headers），非 ASCII
+        # 的头名/值当场抛 UnicodeEncodeError。桩不编码就等于把这类 bug 全放过，
+        # 所以照做一遍：中文文件名塞进 Content-Disposition 才会被用例抓到。
+        for key, value in self.headers.items():
+            key.encode("latin-1")
+            value.encode("latin-1")
+        media_type.encode("latin-1")
 
 
 class _RequestUtils:

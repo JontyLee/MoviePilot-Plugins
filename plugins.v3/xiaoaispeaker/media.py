@@ -22,7 +22,7 @@ import subprocess
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 # 音箱能直接解码的容器/编码。flac 只有部分型号支持，ape/wv 这类基本不出声，
 # 所以默认列表偏保守，其余靠配置里的「音频扩展名」放开。
@@ -308,6 +308,21 @@ def stream_url(base_url: str, plugin_id: str, secret: str, path: Path,
     expires = int(_now()) + max(60, int(ttl))
     return (f"{base_url}/api/v1/plugin/{plugin_id}/stream"
             f"?k={pack_link(secret, text, expires)}")
+
+
+def content_disposition(name: str) -> str:
+    """能安全塞进 HTTP 头的 Content-Disposition。
+
+    头必须是 latin-1 编码，直接把中文名塞进 filename= 会让框架在编码头时抛
+    UnicodeEncodeError —— 整个取流请求变成 500，而且只有文件名带非 ASCII 的
+    歌曲才踩得到。这里给一个 ASCII 兜底名，再用 RFC 5987 的 filename* 带上原名。
+    """
+    name = str(name or "")
+    stem, suffix = os.path.splitext(name)
+    fallback = re.sub(r"[^\x20-\x7e]", "", stem).replace('"', "").strip() or "audio"
+    tail = re.sub(r"[^\x20-\x7e]", "", suffix).strip()
+    return (f'inline; filename="{fallback}{tail}"; '
+            f"filename*=UTF-8''{quote(name, safe='')}")
 
 
 def status_text(status: Optional[int]) -> str:
