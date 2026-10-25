@@ -250,7 +250,7 @@ class XiaoaiSpeaker(_PluginBase):
         "库内目录浏览与搜索、远程命令；播放直链由插件签名限时，不依赖媒体服务器。"
     )
     plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/xiaoai.svg"
-    plugin_version = "0.5.3"
+    plugin_version = "0.5.4"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "xiaoaispeaker_"
@@ -831,6 +831,16 @@ class XiaoaiSpeaker(_PluginBase):
             "at": self._now_text(),
         })
         self.__dict__["_idle_ticks"] = 0
+        # 成功也留一行：音箱不出声时，「压根没推出去」和「云端受理了但设备没去拉流」
+        # 是两个完全不同的方向，而只存最近一次播放的话，日志里什么痕迹都没有。
+        # 直链本身带签名，不落日志；落的是音箱被要求去访问的地址与这条链接的格式。
+        base, base_src = self._effective_base_url()
+        logger.info(
+            f"{_LOG} 已推送 {Path(path).name or title or '外部直链'}"
+            f" 接口={api} 类型={_media.content_type(Path(path)) if path else '外链'}"
+            f" 设备={device.get('name') or device_id}"
+            f" 拉流地址={base or '未配置'}（来源={base_src or '无'}）"
+        )
         return True, (f"已推送到 {device.get('name') or device_id}"
                       + self._group_suffix(members, failures)), api
 
