@@ -708,7 +708,7 @@ class PluginConfigTest(unittest.TestCase):
         class _Boom:
             username = "me@example.com"
 
-            def __init__(self, username: str, password: str) -> None:
+            def __init__(self, username: str, password: str, device_id: str = "") -> None:
                 pass
 
             def login(self):
@@ -789,7 +789,8 @@ class PluginConfigTest(unittest.TestCase):
         keys = [(a["path"], tuple(a["methods"])) for a in apis]
         self.assertEqual(len(keys), len(set(keys)), "同一路径的同一方法不能重复")
         for path in ("/mode", "/timer", "/favorites", "/library", "/library/refresh",
-                     "/playlists", "/playlist", "/voice", "/voice/test", "/commands"):
+                     "/playlists", "/playlist", "/voice", "/voice/test", "/commands",
+                     "/login/qrcode"):
             self.assertIn(path, paths, path)
         stream = [a for a in apis if a["path"] == "/stream"][0]
         self.assertTrue(stream.get("allow_anonymous"))
@@ -2068,6 +2069,276 @@ class PluginTaskTest(unittest.TestCase):
         self.assertEqual(len(plugin._task_logs()), x._TASK_LOG_KEEP)
         self.assertEqual(plugin._task_logs()[-1]["task_id"], "t299", "留下的是最近的")
         self.assertEqual(len(plugin._task_logs(10)), 10)
+
+
+class LoginMethodTest(unittest.TestCase):
+    """三种登录方式（账密/扫码/粘贴 cookie）里最容易做错的那几处。
+
+    扫码的坑集中在「长轮询超时不是失败」「票据要沿用扫码那次的 deviceId」；
+    cookie 的坑集中在「passToken 能换到活票，粘来的 serviceToken 多半是死的」；
+    还有一种看不见的坑：deviceId 每次登录都换，小米就一直把你当新设备。
+    """
+
+    @staticmethod
+    def _handler(lp: List[Optional[_Resp]], micoapi_ok: bool = True):
+        """造一个扫码全流程的替身：lp 按顺序给响应，用完即「一直超时」。"""
+        queue = list(lp)
+        seen: List[str] = []
+
+        def handler(method, url, body):
+            seen.append(url or "")
+            if "serviceLogin?" in url and "sid=mijia" in url:
+                return _Resp(payload={"code": 0, "sid": "mijia", "_sign": "SIGN",
+                                      "qs": "http://qs", "callback": "http://cb"},
+                             prefixed=True)
+            if "longPolling/loginUrl" in url:
+                return _Resp(payload={"code": 0,
+                                      "qr": "https://account.xiaomi.com/pass/qr/login?ticket=T",
+                                      "loginUrl": "https://ak.account.xiaomi.com/longPolling/login?ticket=T",
+                                      "lp": "https://ak.lp.account.xiaomi.com/lp/s?k=K",
+                                      "qrTips": "可用小米手机扫码", "timeout": 300},
+                             prefixed=True)
+            if "/pass/qr/login" in url:
+                return _Resp(status=200, content=b"QRPNG", headers={"Content-Type": "image/png"})
+            if "/lp/s" in url:
+                return queue.pop(0) if queue else None
+            if "serviceLogin?" in url and "sid=micoapi" in url:
+                if not micoapi_ok:
+                    return _Resp(payload={"code": 7, "desc": "passToken 已失效"}, prefixed=True)
+                return _Resp(payload={"code": 0, "sid": "micoapi", "location": "/pass/rs?sid=micoapi",
+                                      "ssecurity": "SS", "userId": 77, "nonce": 9},
+                             prefixed=True)
+            return _Resp(status=302, headers={"Location": "https://api2.mina.mi.com/next",
+                                              "Set-Cookie": "serviceToken=QRTOKEN; Path=/"})
+
+        return handler, seen
+
+    def test_qr_login_exchanges_pass_token_for_service_token(self) -> None:
+        qr = mina.XiaoaiQrLogin(device_id="QRDEVICE000000")
+        handler, _ = self._handler([
+            None,                                                   # lp 超时 = 还没人扫
+            _Resp(payload={"code": 0}, prefixed=True),               # 回了包但没票据 = 还没确认
+            _Resp(payload={"code": 0, "passToken": "PT", "userId": 77,
+                           "cUserId": "cu"}, prefixed=True),
+        ])
+        with _NetworkPatch(handler):
+            ok, err = qr.start()
+            self.assertTrue(ok, err)
+            out = qr.poll()
+            self.assertEqual(out[0], mina.LOGIN_QR_WAITING)
+            self.assertEqual(qr.poll()[0], mina.LOGIN_QR_WAITING)
+            state, token, message = qr.poll()
+        self.assertEqual(state, mina.LOGIN_SUCCESS, message)
+        self.assertEqual(token["services"][mina.MINA_SID]["service_token"], "QRTOKEN")
+        self.assertEqual(token["user_id"], "77")
+        self.assertEqual(token["login_method"], "qrcode")
+        # deviceId 必须还是扫码那一次的：换掉等于又造出一台「新设备」
+        self.assertEqual(token["device_id"], "QRDEVICE000000")
+
+    def test_qr_start_returns_image_tips_and_countdown(self) -> None:
+        qr = mina.XiaoaiQrLogin()
+        with _NetworkPatch(self._handler([])[0]):
+            ok, err = qr.start()
+            # 图片也要在替身还在场时取：image() 走的是同一个网络入口
+            image = qr.image()
+        self.assertTrue(ok, err)
+        self.assertTrue(image.startswith("data:image/png;base64,"), image[:32])
+        self.assertEqual(qr.tips, "可用小米手机扫码")
+        self.assertEqual(qr.seconds_left(), 300)
+
+    def test_qr_poll_before_start_is_a_clear_failure(self) -> None:
+        qr = mina.XiaoaiQrLogin()
+        state, token, message = qr.poll()
+        self.assertEqual(state, mina.LOGIN_FAILED)
+        self.assertIsNone(token)
+        self.assertIn("获取二维码", message)
+
+    def test_qr_second_nonzero_code_expires_the_session(self) -> None:
+        qr = mina.XiaoaiQrLogin()
+        lp = [_Resp(payload={"code": -1, "desc": "reconnect"}, prefixed=True),
+              _Resp(payload={"code": -1, "desc": "expired"}, prefixed=True)]
+        with _NetworkPatch(self._handler(lp)[0]):
+            qr.start()
+            self.assertEqual(qr.poll()[0], mina.LOGIN_QR_WAITING, "单次非零码是长轮询的抖动")
+            self.assertEqual(qr.poll()[0], mina.LOGIN_QR_EXPIRED)
+            self.assertEqual(qr.poll()[0], mina.LOGIN_QR_EXPIRED)
+
+    def test_qr_expired_before_poll_makes_no_request(self) -> None:
+        qr = mina.XiaoaiQrLogin()
+        called: List[str] = []
+
+        def handler(method, url, body):
+            called.append(url or "")
+            return _Resp(payload={"code": 0}, prefixed=True)
+
+        with _NetworkPatch(self._handler([])[0]):
+            qr.start()
+        qr._expires_at = time.time() - 1
+        with _NetworkPatch(handler):
+            state, _token, message = qr.poll()
+        self.assertEqual(state, mina.LOGIN_QR_EXPIRED)
+        self.assertIn("过期", message)
+        self.assertEqual(called, [], "过期了就不该再去问小米")
+
+    def test_qr_403_on_poll_is_expired_not_failed(self) -> None:
+        qr = mina.XiaoaiQrLogin()
+        with _NetworkPatch(self._handler([_Resp(status=403)])[0]):
+            qr.start()
+            self.assertEqual(qr.poll()[0], mina.LOGIN_QR_EXPIRED)
+
+    def test_qr_start_without_login_url_params_fails_cleanly(self) -> None:
+        def handler(method, url, body):
+            if "serviceLogin?" in url:
+                return _Resp(payload={"code": 0}, prefixed=True)
+            return _Resp(payload={"code": 0}, prefixed=True)
+
+        with _NetworkPatch(handler):
+            ok, message = mina.XiaoaiQrLogin().start()
+        self.assertFalse(ok)
+        self.assertIn("签名", message)
+
+    def test_exchange_pass_token_reports_micoapi_refusal(self) -> None:
+        qr = mina.XiaoaiQrLogin()
+        lp = [_Resp(payload={"code": 0, "passToken": "PT", "userId": 77}, prefixed=True)]
+        with _NetworkPatch(self._handler(lp, micoapi_ok=False)[0]):
+            qr.start()
+            state, token, message = qr.poll()
+        self.assertEqual(state, mina.LOGIN_FAILED)
+        self.assertIsNone(token)
+        self.assertIn("passToken 已失效", message)
+
+    def test_parse_cookie_blob_unquotes_and_lowercases_names(self) -> None:
+        values = mina.parse_cookie_blob('userId=77; serviceToken=a%3Db+c; "passToken"=PT ;x=y')
+        self.assertEqual(values["userid"], "77")
+        # unquote 只解百分号编码，+ 不是空格：serviceToken 里原样保留
+        self.assertEqual(values["servicetoken"], "a=b+c")
+        self.assertEqual(values["passtoken"], "PT")
+
+    def test_manual_cookie_prefers_pass_token_exchange(self) -> None:
+        plugin = _plugin()
+        handler, seen = self._handler([])
+        with _NetworkPatch(handler):
+            out = plugin._login_manual("userId=77; passToken=PT; cUserId=cu")
+        self.assertEqual(out.state, mina.LOGIN_SUCCESS, out.message)
+        saved = plugin.get_data("token")
+        self.assertEqual(saved["services"][mina.MINA_SID]["service_token"], "QRTOKEN")
+        self.assertEqual(saved["login_method"], "manual")
+        self.assertTrue(any("sid=micoapi" in u for u in seen), "要用 passToken 现换一张活票")
+
+    def test_manual_cookie_falls_back_when_pass_token_dead(self) -> None:
+        plugin = _plugin()
+        handler, _ = self._handler([], micoapi_ok=False)
+        plugin._build_client = lambda token=None: _FakeClient(devices=[_device()])
+        with _NetworkPatch(handler):
+            out = plugin._login_manual("userId=77; passToken=PT; serviceToken=LIVE")
+        self.assertEqual(out.state, mina.LOGIN_SUCCESS, out.message)
+        self.assertEqual(plugin.get_data("token")["services"][mina.MINA_SID]["service_token"],
+                         "LIVE", "换票失败时才退回粘进来的 serviceToken")
+
+    def test_manual_cookie_without_any_credential_says_so(self) -> None:
+        plugin = _plugin()
+        out = plugin._login_manual("nothing=here")
+        self.assertEqual(out.state, "failed")
+        self.assertIn("passToken", out.message)
+        self.assertIn("serviceToken", out.message)
+
+    def test_device_id_stays_the_same_across_logins(self) -> None:
+        plugin = _plugin()
+        first = plugin._device_id()
+        self.assertEqual(plugin._device_id(), first)
+        self.assertEqual(plugin.get_data("device_id"), first)
+        self.assertEqual(len(first), 16)
+
+    def test_password_login_uses_the_stored_device_id(self) -> None:
+        plugin = _plugin()
+        stored = plugin._device_id()
+        captured: Dict[str, Any] = {}
+        original = x.XiaoaiAuth
+
+        class _Spy:
+            username = ""
+
+            def __init__(self, username, password, device_id="", login_method="password"):
+                captured["device_id"] = device_id
+                captured["login_method"] = login_method
+
+            def login(self):
+                return mina.LOGIN_FAILED, None, "不试了"
+
+        x.XiaoaiAuth = _Spy
+        try:
+            plugin.api_login(x.schemas.LoginIn(username="me@example.com", password="pass"))
+        finally:
+            x.XiaoaiAuth = original
+        self.assertEqual(captured["device_id"], stored)
+
+    def test_walk_location_takes_the_last_hop_service_token(self) -> None:
+        """跳转链末端自己下的那颗才算数：cookie 表里可能留着别的服务的同名票据。"""
+        hops = [
+            _Resp(status=302, headers={"Location": "https://api2.mina.mi.com/second",
+                                       "Set-Cookie": "serviceToken=FRESH; Path=/"}),
+            _Resp(status=200, text="done"),
+        ]
+
+        def handler(method, url, body):
+            return hops.pop(0) if hops else _Resp(status=200, text="")
+
+        auth = mina.XiaoaiAuth("me@example.com", "pass", device_id="D")
+        auth.cookies["serviceToken"] = "STALE_OTHER_SID"
+        with _NetworkPatch(handler):
+            token, detail = auth._walk_location("https://account.xiaomi.com/pass/rs")
+        self.assertEqual(token, "FRESH", detail)
+
+    def test_identity_list_runs_before_second_factor(self) -> None:
+        """authStart 形态的二次校验要先建 identity 会话，否则填对码也过不了。"""
+        seen: List[str] = []
+
+        def handler(method, url, body):
+            seen.append(f"{method} {url}")
+            if method == "POST":
+                return _Resp(payload={"code": 0, "location": "/pass/rs"}, prefixed=True)
+            return _Resp(payload={"code": 0}, prefixed=True)
+
+        auth = mina.XiaoaiAuth("me@example.com", "pass", device_id="D")
+        auth._verify_url = ("https://account.xiaomi.com/fe/service/identity/authStart"
+                            "?targetUrl=x&_js_version=1")
+        with _NetworkPatch(handler):
+            location = auth._verify_ticket("123456")
+        self.assertTrue(location)
+        self.assertIn("GET https://account.xiaomi.com/identity/list?targetUrl=x", seen[0])
+        self.assertTrue(seen[1].startswith("POST https://account.xiaomi.com/identity/auth/verify"))
+
+    def test_qrcode_session_refresh_asks_for_scan_not_password(self) -> None:
+        auth = mina.XiaoaiAuth.from_token({"user_id": "1", "device_id": "D",
+                                           "login_method": "qrcode"})
+        state, token, message = auth.refresh()
+        self.assertEqual(state, mina.LOGIN_FAILED)
+        self.assertIn("扫码", message)
+        self.assertNotIn("密码", message)
+
+    def test_login_out_point_uses_the_login_lock_and_reports_state(self) -> None:
+        plugin = _plugin()
+        plugin.del_data("token")
+        handler, _ = self._handler([
+            _Resp(payload={"code": 0, "passToken": "PT", "userId": 77}, prefixed=True)])
+        with _NetworkPatch(handler):
+            started = plugin.api_login_qrcode(x.schemas.QrIn(action="start"))
+            self.assertEqual(started.state, mina.LOGIN_QR_WAITING)
+            self.assertTrue(started.qr_image.startswith("data:image/png;base64,"))
+            self.assertEqual(started.expires_in, 300)
+            done = plugin.api_login_qrcode(x.schemas.QrIn(action="poll"))
+        self.assertEqual(done.state, mina.LOGIN_SUCCESS, done.message)
+        self.assertGreaterEqual(done.device_count, 0)
+        self.assertTrue(done.logged_in)
+        # 二维码的 loginUrl 是一次性凭证，绝不从接口出去
+        self.assertNotIn("loginUrl", started.model_dump_json())
+        self.assertNotIn("longPolling/login", started.model_dump_json())
+
+    def test_status_exposes_login_method(self) -> None:
+        plugin = _plugin()
+        plugin.save_data("token", {**_token(), "login_method": "qrcode"})
+        plugin._client = lambda: (_FakeClient(devices=[_device()]), "")
+        self.assertEqual(plugin._status(force_devices=True).login_method, "qrcode")
 
 
 if __name__ == "__main__":

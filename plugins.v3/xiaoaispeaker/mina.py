@@ -3,11 +3,11 @@ mina.py — 小米账号登录 + 小爱音箱（Mina/MIoT）云端控制协议�
 
 出处与许可：本模块把 Songloft「智能音箱」插件 songloft-plugin-miot
 （https://github.com/songloft-org/songloft-plugin-miot ，Apache-2.0 © 2026 hanxi，
-TypeScript/QuickJS）的小米云端接入约定移植到 Python：登录三步流程、clientSign 算法、
-ubus 请求体、设备型号白名单与 play_music 载荷都按它的契约实现，并按 Yonsm/MiService（MIT）与
-Music Tag Web（GPL-3.0，其小米协议本身转调 miservice）的同类实现交叉核对。
-两处与 miot 取值不一致的地方在对应位置的注释里点明。移植而非复制：语言、运行时、
-错误处理与网络层都是本仓库自己的写法（宿主 RequestUtils + requests 会话）。
+TypeScript/QuickJS）的小米云端接入约定移植到 Python：登录三步流程、扫码登录流程、
+clientSign 算法、ubus 请求体、设备型号白名单与 play_music 载荷都按它的契约实现，并按
+Yonsm/MiService（MIT）与 Music Tag Web（GPL-3.0，其小米协议本身转调 miservice）的
+同类实现交叉核对。两处与 miot 取值不一致的地方在对应位置的注释里点明。移植而非复制：
+语言、运行时、错误处理与网络层都是本仓库自己的写法（宿主 RequestUtils + requests 会话）。
 上游只在 README 与 plugin.json 里声明 Apache-2.0、仓库内没有 LICENSE 正文，本目录的
 LICENSE.upstream-songloft-miot.txt 用的是 apache.org 的规范全文（未改动一个字），
 并按 Apache-2.0 4(b) 在此声明这些约定经过修改与重写；本仓库整体是 GPL-3.0，
@@ -26,6 +26,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import random
 import re
 import string
@@ -55,6 +56,12 @@ PASS_TOKEN_VALID_DAYS = 30
 
 # 播放走云端 ubus，慢的时候能到十几秒；太短的超时会被当成设备离线
 HTTP_TIMEOUT = 20
+
+# 登录的跳转链长度上限（小米的 STS 跳转通常 2~3 跳）
+MAX_REDIRECTS = 10
+
+# 这类二次校验地址要先访问对应的 /identity/list 建立会话，直接提交验证码必失败
+IDENTITY_AUTH_START = "/fe/service/identity/authStart"
 
 # 需要走 player_play_music 的型号（miot DEFAULT_MUSIC_API_MODELS）。
 # miservice 的那份是这里的子集，取更全的这份；配不准时用 play_mode="url" 覆盖。
@@ -87,10 +94,28 @@ MINA_ASK_HARDWARE: Tuple[str, ...] = ("M01",)
 # 每轮取几条。语音一来就播歌，5 条足够覆盖"连着说两句"且不把响应体撑大
 CONVERSATION_LIMIT = 5
 
+# 日志前缀与插件保持一致：出问题时一条 grep 就能把整条登录链路捞出来
+_LOG_TAG = "[xiaoai]"
+
 LOGIN_SUCCESS = "success"
 LOGIN_NEED_CAPTCHA = "need_captcha"
 LOGIN_NEED_VERIFY = "need_verify"
 LOGIN_FAILED = "failed"
+
+# 扫码登录（对齐 miot src/qrcode/qrcode.ts）：二维码挂在 mijia 会话上，
+# 手机确认后拿到 passToken，再换成本插件真正要的 micoapi serviceToken。
+QR_LOGIN_SID = "mijia"
+QR_LONG_POLLING_URL = f"{ACCOUNT_BASE_URL}/longPolling/loginUrl"
+# 二维码有效期以接口回的 timeout 为准，这个是取不到时的兜底（秒）
+QR_DEFAULT_VALID_SECONDS = 300
+# lp 是服务端长轮询：没人扫就一直挂着。客户端只等这么久就当「还在等」，
+# 否则前端每点一次要转满 20 秒，看着像卡死
+QR_POLL_TIMEOUT = 8
+# 轮询次数上限：expires_at 已经能判过期，这一层防的是网络一直超时、状态却永不过期
+QR_MAX_POLLS = 60
+
+LOGIN_QR_WAITING = "qr_waiting"
+LOGIN_QR_EXPIRED = "qr_expired"
 
 
 class MinaError(Exception):
@@ -157,6 +182,22 @@ def _cookie_value(cookies: Dict[str, str], name: str) -> str:
     return value.strip('"')
 
 
+def _set_cookie_map(response: Any) -> Dict[str, str]:
+    """只看这一次响应头里的 Set-Cookie，名字 → 值。
+
+    单独拆出来是因为重定向链末端的 serviceToken 必须以「这一跳自己下的」为准：
+    cookie 表里可能还留着别的 sid 换过的同名票据。
+    """
+    out: Dict[str, str] = {}
+    for header in str((response.headers or {}).get("Set-Cookie", "") or "").split(", "):
+        if not header or "=" not in header:
+            continue
+        name, _, value = header.split(";")[0].partition("=")
+        if name:
+            out[name.strip()] = value.strip('"')
+    return out
+
+
 def _collect_cookies(response: Any, cookies: Dict[str, str]) -> None:
     """把响应里的 Set-Cookie 并进调用方维护的 cookie 表。
 
@@ -168,13 +209,7 @@ def _collect_cookies(response: Any, cookies: Dict[str, str]) -> None:
             cookies[key] = str(value)
     except Exception:  # pragma: no cover - 极端情况下 cookie jar 不是映射
         pass
-    for header in response.headers.get("Set-Cookie", "").split(", "):
-        if not header or "=" not in header:
-            continue
-        pair = header.split(";")[0]
-        name, _, value = pair.partition("=")
-        if name:
-            cookies[name.strip()] = value.strip('"')
+    cookies.update(_set_cookie_map(response))
 
 
 def _redirect_target(response: Any, current_url: str) -> Optional[str]:
@@ -190,6 +225,34 @@ def _redirect_target(response: Any, current_url: str) -> Optional[str]:
     return f"{base}/{location}"
 
 
+def _fetch_image(url: str, user_agent: str, cookies: Dict[str, str]) -> str:
+    """取一张小米回的二进制图（验证码、二维码），返回 data URI。
+
+    图和票据在同一次响应里：验证码那次要顺带收下 ick，提交验证码时得带上，
+    所以 cookies 就地更新，不返回新表。
+    """
+    try:
+        response = RequestUtils(
+            headers={"User-Agent": user_agent},
+            cookies=dict(cookies),
+            timeout=HTTP_TIMEOUT,
+        ).get_res(url, allow_redirects=False, raise_exception=False)
+    except Exception as err:  # pragma: no cover - 网络层异常形状不固定
+        logger.warning(f"{_LOG_TAG} 图片请求异常: {err}")
+        return ""
+    if response is None:
+        return ""
+    _collect_cookies(response, cookies)
+    raw = response.content or b""
+    if not raw:
+        return ""
+    mime = "image/png"
+    ctype = str((response.headers or {}).get("Content-Type") or "").split(";")[0].strip().lower()
+    if ctype.startswith("image/"):
+        mime = ctype
+    return f"data:{mime};base64," + base64.b64encode(raw).decode("ascii")
+
+
 class XiaoaiAuth:
     """小米账号登录状态机。
 
@@ -199,9 +262,11 @@ class XiaoaiAuth:
     都存在 self 上，由插件持有实例本身。
     """
 
-    def __init__(self, username: str, password: str, device_id: str = "") -> None:
+    def __init__(self, username: str, password: str, device_id: str = "",
+                 login_method: str = "password") -> None:
         self.username = username
         self.password = password
+        self.login_method = login_method or "password"
         self.device_id = device_id or generate_device_id()
         self.user_agent = USER_AGENT_TEMPLATE % self.device_id
         self.cookies: Dict[str, str] = {
@@ -217,11 +282,12 @@ class XiaoaiAuth:
 
     # ---------------- 请求 ----------------
 
-    def _get(self, url: str, allow_redirects: bool = False) -> Any:
+    def _get(self, url: str, allow_redirects: bool = False,
+             timeout: int = HTTP_TIMEOUT) -> Any:
         return RequestUtils(
             headers={"User-Agent": self.user_agent},
             cookies=dict(self.cookies),
-            timeout=HTTP_TIMEOUT,
+            timeout=timeout,
         ).get_res(url, allow_redirects=allow_redirects, raise_exception=False)
 
     def _post(self, url: str, params: Dict[str, Any]) -> Any:
@@ -289,6 +355,7 @@ class XiaoaiAuth:
             username=str(token.get("username") or ""),
             password="",
             device_id=str(token.get("device_id") or ""),
+            login_method=str(token.get("login_method") or "password"),
         )
         auth._user_id = str(token.get("user_id") or "")
         auth._ssecurity = str(mina.get("ssecurity") or "")
@@ -302,8 +369,9 @@ class XiaoaiAuth:
     def refresh(self) -> Tuple[str, Optional[Dict[str, Any]], str]:
         """用 passToken 静默换一个新的 serviceToken。"""
         if not _cookie_value(self.cookies, "passToken"):
+            hint = "请重新扫码" if self.login_method == "qrcode" else "请填写账号密码重新登录"
             return (LOGIN_FAILED, None,
-                    "本地没有 passToken，无法静默续期，请填写账号密码重新登录")
+                    f"本地没有 passToken，无法静默续期，{hint}")
         return self._service_login()
 
     def _step1_login(self) -> Optional[Dict[str, Any]]:
@@ -333,12 +401,18 @@ class XiaoaiAuth:
         data = _parse_json(response.text or "")
         if not data:
             return LOGIN_FAILED, None, "小米登录响应无法解析"
+        # 只记字段名与返回码：这一步是分岔口，事后光看「登录失败」没人知道
+        # 小米到底要验证码、要短信还是直接拒了（字段值可能是票据，不落日志）
+        logger.info(
+            f"{_LOG_TAG} 登录第二步 HTTP={getattr(response, 'status_code', '?')} "
+            f"code={data.get('code')} fields={sorted(str(k) for k in data)}"
+        )
 
         # 二次校验（手机/邮箱验证码）
         notification = data.get("notificationUrl")
         if notification:
             self._verify_url = self._abs_url(notification)
-            channel = "邮箱" if "email" in self._verify_url else "手机"
+            channel = "邮箱" if "email" in self._verify_url else "手机/邮箱"
             return (LOGIN_NEED_VERIFY, None,
                     f"小米要求{channel}二次校验，请查收验证码后填写")
 
@@ -359,8 +433,14 @@ class XiaoaiAuth:
 
         location = data.get("location")
         if not location:
-            return (LOGIN_FAILED, None,
-                    f"登录失败：code={data.get('code')}, desc={data.get('description')}")
+            code = data.get("code")
+            desc = str(data.get("description") or data.get("desc") or "").strip()
+            message = f"小米拒绝了本次登录：code={code}"
+            if desc:
+                message += f"，说明：{desc}"
+            # 密码这条路被风控时不会给理由，扫码是同一账号下另一条能走通的路
+            message += "；账密反复登不上就改用扫码登录"
+            return LOGIN_FAILED, None, message
 
         self._ssecurity = str(data.get("ssecurity") or "")
         self._user_id = str(data.get("userId") or "")
@@ -375,22 +455,40 @@ class XiaoaiAuth:
         """跟随 location 的重定向链，从 cookie 收 serviceToken。"""
         if not self._location:
             return LOGIN_FAILED, None, "登录会话已过期，请重新发起登录"
+        service_token, detail = self._walk_location(self._location)
+        if not service_token:
+            return LOGIN_FAILED, None, f"没有取到 serviceToken：{detail}"
+        return self._finish(service_token, "登录成功")
+
+    def _walk_location(self, location: str) -> Tuple[str, str]:
+        """走完跳转链取 serviceToken，失败时给一句能查的原因。
+
+        认「最后一跳自己下的」那颗 serviceToken：cookie 表里可能还留着别的
+        sid 换过的同名票据，只读表会把上一个服务的票据当成这次的（小米不报错，
+        后面每次 ubus 都 401，最难查的一种失败）。
+        """
         service_token = ""
-        current = self._location
-        for _ in range(10):
+        current = (location or "").strip()
+        hops = 0
+        last_status = 0
+        while current and hops < MAX_REDIRECTS:
+            hops += 1
             response = self._get(current)
             if response is None:
-                break
+                return "", f"第 {hops} 跳没有响应（网络或风控中断）"
             _collect_cookies(response, self.cookies)
-            hop_token = _cookie_value(self.cookies, "serviceToken")
+            hop_token = _set_cookie_map(response).get("serviceToken") or ""
             if hop_token:
                 service_token = hop_token
-            if response.status_code not in (301, 302, 303, 307, 308):
+            last_status = response.status_code
+            if last_status not in (301, 302, 303, 307, 308):
                 break
             current = _redirect_target(response, current)
-            if not current:
-                break
-        return self._finish(service_token, "登录成功")
+        if not service_token:
+            service_token = _cookie_value(self.cookies, "serviceToken")
+        if not service_token:
+            return "", f"跳转走了 {hops} 跳，最后 HTTP {last_status}，链上没出现 serviceToken"
+        return service_token, ""
 
     def _service_login(self) -> Tuple[str, Optional[Dict[str, Any]], str]:
         """用 passToken 换 serviceToken（serviceToken 会到期，passToken 不会）。"""
@@ -411,7 +509,8 @@ class XiaoaiAuth:
         data = _parse_json(response.text or "")
         if not data or int(data.get("code") or 0) != 0:
             return (LOGIN_FAILED, None,
-                    f"静默续期失败：desc={(data or {}).get('desc') or '未知原因'}")
+                    f"静默续期失败：code={(data or {}).get('code')}, "
+                    f"desc={(data or {}).get('desc') or '未知原因'}")
         location = data.get("location")
         if not location:
             return LOGIN_FAILED, None, "静默续期没有返回跳转地址"
@@ -423,21 +522,9 @@ class XiaoaiAuth:
             "clientSign": _client_sign(data.get("nonce"), ssecurity),
         })
         self._ssecurity = ssecurity or self._ssecurity
-        service_token = ""
-        current = self._location
-        for _ in range(10):
-            response = self._get(current)
-            if response is None:
-                break
-            _collect_cookies(response, self.cookies)
-            hop_token = _cookie_value(self.cookies, "serviceToken")
-            if hop_token:
-                service_token = hop_token
-            if response.status_code not in (301, 302, 303, 307, 308):
-                break
-            current = _redirect_target(response, current)
-            if not current:
-                break
+        service_token, detail = self._walk_location(self._location)
+        if not service_token:
+            return LOGIN_FAILED, None, f"没有取到 serviceToken：{detail}"
         return self._finish(service_token, "已用 passToken 静默续期")
 
     def _finish(self, service_token: str, ok_message: str) -> Tuple[str, Optional[Dict[str, Any]], str]:
@@ -448,6 +535,7 @@ class XiaoaiAuth:
             "username": self.username,
             "user_id": self._user_id,
             "device_id": self.device_id,
+            "login_method": self.login_method,
             "services": {
                 MINA_SID: {
                     "service_token": service_token,
@@ -463,25 +551,28 @@ class XiaoaiAuth:
 
     def _fetch_captcha(self, url: str) -> str:
         """取验证码图片，返回 data URI；同时收下 ick（提交验证码要带）。"""
+        return _fetch_image(url, self.user_agent, self.cookies)
+
+    def _prepare_identity(self) -> None:
+        """authStart 形态的二次校验要先建立 identity 会话。
+
+        小米把这类校验做成「先列可选方式、再验选中的那一种」两步：直接 POST
+        verifyPhone/verifyEmail 会没有会话上下文，用户填的码是对的也判失败 ——
+        这一步补不上，表现就是二次校验环节怎么试都过不去。
+        """
+        if IDENTITY_AUTH_START not in (self._verify_url or ""):
+            return
+        url = self._verify_url.replace(IDENTITY_AUTH_START, "/identity/list")
         try:
-            response = RequestUtils(
-                headers={"User-Agent": self.user_agent},
-                cookies=dict(self.cookies),
-                timeout=HTTP_TIMEOUT,
-            ).get_res(url, allow_redirects=False, raise_exception=False)
+            response = self._get(url)
+            if response is not None:
+                _collect_cookies(response, self.cookies)
         except Exception as err:  # pragma: no cover - 网络层异常形状不固定
-            logger.warning(f"[xiaoai] 验证码图片请求异常: {err}")
-            return ""
-        if response is None:
-            return ""
-        _collect_cookies(response, self.cookies)
-        raw = response.content or b""
-        if not raw:
-            return ""
-        return "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
+            logger.warning(f"{_LOG_TAG} 二次校验会话准备失败: {err}")
 
     def _verify_ticket(self, code: str) -> str:
         """提交短信/邮箱验证码，成功时返回后续跳转地址。"""
+        self._prepare_identity()
         is_email = "email" in (self._verify_url or "")
         api = "/identity/auth/verifyEmail" if is_email else "/identity/auth/verifyPhone"
         flag = "8" if is_email else "4"
@@ -515,6 +606,191 @@ class XiaoaiAuth:
         sep = "&" if "?" in url else "?"
         return url + sep + "&".join(
             f"{quote(k)}={quote(v)}" for k, v in params.items())
+
+
+class XiaoaiQrLogin:
+    """小米扫码登录：mijia 会话取二维码 → 长轮询等确认 → passToken 换 micoapi 票据。
+
+    接口约定对齐 miot 的 src/qrcode/qrcode.ts。和账密相比，扫码不走「新设备登录」
+    那套风控分支，也不用把密码放进配置：密码反复登不上时，这条通常是同一个账号
+    走得通的路。
+    """
+
+    def __init__(self, device_id: str = "") -> None:
+        self.device_id = device_id or generate_device_id()
+        self.user_agent = USER_AGENT_TEMPLATE % self.device_id
+        self.cookies: Dict[str, str] = {
+            "sdkVersion": "3.8.6",
+            "deviceId": self.device_id,
+        }
+        self.qr_image_url = ""
+        self.tips = ""
+        # loginUrl 是二维码的内容，等于一次性的登录凭证：只在服务端拿着，
+        # 绝不回给前端 —— 谁拿到它都能替这个人完成登录
+        self.login_url = ""
+        self._sign = ""
+        self._qs = ""
+        self._callback = ""
+        self._poll_url = ""
+        self._expires_at = 0.0
+        self._polls = 0
+        self._non_zero = 0
+        # 判过死刑的二维码要一直保持「已过期」：轮询方是个自动循环，
+        # 一个终端状态回退成「继续等」会让界面永远停不下来
+        self._dead = ""
+
+    # ---------------- 状态 ----------------
+
+    def ready(self) -> bool:
+        return bool(self._poll_url)
+
+    def expired(self) -> bool:
+        return bool(self._expires_at) and time.time() >= self._expires_at
+
+    def seconds_left(self) -> int:
+        # 向上取整：刚取到的二维码要显示整 300 秒，而不是截断出来的 299
+        return max(0, math.ceil(self._expires_at - time.time())) if self._expires_at else 0
+
+    def reset(self) -> None:
+        self.qr_image_url = ""
+        self.tips = ""
+        self.login_url = ""
+        self._sign = self._qs = self._callback = self._poll_url = ""
+        self._expires_at = 0.0
+        self._polls = 0
+        self._non_zero = 0
+        self._dead = ""
+
+    # ---------------- 请求 ----------------
+
+    def _get(self, url: str, timeout: int = HTTP_TIMEOUT) -> Any:
+        return RequestUtils(
+            headers={"User-Agent": self.user_agent},
+            cookies=dict(self.cookies),
+            timeout=timeout,
+        ).get_res(url, allow_redirects=False, raise_exception=False)
+
+    # ---------------- 二维码 ----------------
+
+    def start(self) -> Tuple[bool, str]:
+        """取一张新二维码；成功才能取图并开始轮询。"""
+        self.reset()
+        step1 = self._get_json(f"{ACCOUNT_BASE_URL}/pass/serviceLogin"
+                               f"?sid={QR_LOGIN_SID}&_json=true")
+        if step1 is None:
+            return False, "获取小米扫码签名失败（网络或接口变更）"
+        self._sign = str(step1.get("_sign") or "")
+        self._qs = str(step1.get("qs") or "")
+        self._callback = str(step1.get("callback") or "")
+        if not (self._sign and self._qs and self._callback):
+            return False, f"扫码签名不完整：code={step1.get('code')}"
+
+        query = _form_body({
+            "_qrsize": "240",
+            "qs": self._qs,
+            "sid": QR_LOGIN_SID,
+            "_sign": self._sign,
+            "callback": self._callback,
+            "_json": "true",
+            "_dc": int(time.time() * 1000),
+        })
+        qr = self._get_json(f"{QR_LONG_POLLING_URL}?{query}")
+        if qr is None:
+            return False, "获取二维码失败（网络或接口变更）"
+        if int(qr.get("code") or 0) != 0:
+            return False, f"小米没有给出二维码：code={qr.get('code')}, " \
+                          f"desc={qr.get('desc') or qr.get('description') or '未说明'}"
+        self.qr_image_url = str(qr.get("qr") or "")
+        self.login_url = str(qr.get("loginUrl") or "")
+        self._poll_url = str(qr.get("lp") or "")
+        self.tips = str(qr.get("qrTips") or "")
+        if not self._poll_url:
+            return False, "扫码接口没有返回轮询地址"
+        if not self.qr_image_url:
+            return False, "扫码接口没有返回二维码图片"
+        self._expires_at = time.time() + (_as_int(qr.get("timeout"))
+                                          or QR_DEFAULT_VALID_SECONDS)
+        logger.info(f"{_LOG_TAG} 二维码已就绪，有效期 {self.seconds_left()} 秒")
+        return True, ""
+
+    def image(self) -> str:
+        """二维码图片（data URI）；拿不到就返回空串，由调用方提示重新获取。"""
+        if not self.qr_image_url:
+            return ""
+        return _fetch_image(self.qr_image_url, self.user_agent, self.cookies)
+
+    def poll(self) -> Tuple[str, Optional[Dict[str, Any]], str]:
+        """问一次「扫了吗」。
+
+        lp 是服务端长轮询：没人扫就一直挂着，所以客户端超时是常态而不是故障，
+        一次超时都不能算登录失败。
+        """
+        if not self._poll_url:
+            return LOGIN_FAILED, None, "还没有拿到二维码，先点「获取二维码」"
+        if self._dead:
+            return LOGIN_QR_EXPIRED, None, self._dead
+        if self.expired():
+            return self._expire("二维码已过期，重新获取一张再扫")
+        self._polls += 1
+        if self._polls > QR_MAX_POLLS:
+            return self._expire("等扫码等得太久，重新获取一张二维码")
+        response = self._get(self._poll_url, timeout=QR_POLL_TIMEOUT)
+        if response is None:
+            return LOGIN_QR_WAITING, None, ""
+        if response.status_code == 403:
+            return self._expire("这张二维码已经作废（过期或在别处扫过），重新获取一张")
+        if response.status_code >= 400:
+            return LOGIN_FAILED, None, f"查询扫码状态失败：HTTP {response.status_code}"
+        data = _parse_json(response.text or "")
+        if data is None:
+            return LOGIN_QR_WAITING, None, ""
+        code = int(data.get("code") or 0)
+        if code != 0:
+            self._non_zero += 1
+            if self._non_zero >= 2:
+                return self._expire(
+                    f"二维码已过期：code={code}, desc={data.get('desc') or '小米未说明'}")
+            # 单次非零码多是长轮询自己的重连抖动，一次就判过期会把正在扫码的人赶走
+            return LOGIN_QR_WAITING, None, ""
+        self._non_zero = 0
+        pass_token = str(data.get("passToken") or "")
+        user_id = str(data.get("userId") or "")
+        if not pass_token or not user_id:
+            # 正常回包但没有票据：还没确认，或这是一次空的重连响应
+            return LOGIN_QR_WAITING, None, ""
+        state, token, message = self._exchange(
+            pass_token, user_id, str(data.get("cUserId") or ""))
+        if state != LOGIN_SUCCESS:
+            return LOGIN_FAILED, None, message
+        logger.info(f"{_LOG_TAG} 扫码登录拿到票据，userId 已确认")
+        return LOGIN_SUCCESS, token, "扫码登录成功"
+
+    def _expire(self, message: str) -> Tuple[str, Optional[Dict[str, Any]], str]:
+        """把这次扫码会话钉死成「已过期」，并保留原因给界面照着说。"""
+        self._dead = message
+        return LOGIN_QR_EXPIRED, None, message
+
+    def _exchange(self, pass_token: str, user_id: str,
+                  c_user_id: str) -> Tuple[str, Optional[Dict[str, Any]], str]:
+        """把扫码换来的 passToken 换成小爱服务（micoapi）的 serviceToken。
+
+        deviceId 沿用扫码这一套：小米把票据绑在设备标识上，中途换一个反而更像
+        异常登录。
+        """
+        state, token, message = exchange_pass_token(
+            pass_token, user_id, c_user_id, device_id=self.device_id,
+            login_method="qrcode", extra_cookies=self.cookies)
+        if state == LOGIN_SUCCESS and token:
+            # 扫码不知道账号叫什么，留 userId 供界面标出这是哪个账号
+            token.setdefault("qr_user_id", user_id)
+        return state, token, message
+
+    def _get_json(self, url: str) -> Optional[Dict[str, Any]]:
+        response = self._get(url)
+        if response is None:
+            return None
+        _collect_cookies(response, self.cookies)
+        return _parse_json(response.text or "")
 
 
 class XiaoaiClient:
@@ -944,6 +1220,49 @@ class XiaoaiClient:
         return bool(data) and int(data.get("code") or 0) == 0
 
 
+def parse_cookie_blob(raw: str) -> Dict[str, str]:
+    """把人粘进来的一串 cookie 拆成 名字（小写）→ 值。
+
+    名字统一小写：手工粘贴的大小写和顺序都不确定（userId / userid / UserID）。
+    值要 unquote：从浏览器里抄出来的 serviceToken 常带 %3D 这类转义，不解开就是
+    一张废票据，而小米对坏票据只回 401，不会告诉你「你粘错了」。
+    """
+    out: Dict[str, str] = {}
+    for part in (raw or "").replace("\n", ";").split(";"):
+        if "=" not in part:
+            continue
+        name, _, value = part.partition("=")
+        name = name.strip().strip('"').lower()
+        if name:
+            out[name] = unquote(value.strip()).strip('"')
+    return out
+
+
+def exchange_pass_token(pass_token: str, user_id: str, c_user_id: str = "",
+                        device_id: str = "", login_method: str = "manual",
+                        extra_cookies: Optional[Dict[str, str]] = None
+                        ) -> Tuple[str, Optional[Dict[str, Any]], str]:
+    """拿一个 passToken 去换 micoapi 的 serviceToken，返回 (state, token, message)。
+
+    扫码确认与手工粘贴 cookie 都收敛到这一步：passToken 是长期票据，能换到
+    serviceToken 就说明这一串 cookie 真的有效 —— 比直接相信粘进来的 serviceToken
+    可靠得多，也顺手把票据续上了。
+    """
+    auth = XiaoaiAuth(username="", password="", device_id=device_id,
+                      login_method=login_method)
+    for name, value in (extra_cookies or {}).items():
+        # 旧的 serviceToken 不带：那是别的会话/别的服务的，混进去只会拿错票据
+        if value and name != "serviceToken":
+            auth.cookies[name] = value
+    auth.cookies["passToken"] = pass_token
+    if user_id:
+        auth.cookies["userId"] = user_id
+    if c_user_id:
+        auth.cookies["cUserId"] = c_user_id
+    auth._user_id = user_id or ""
+    return auth._service_login()
+
+
 def token_from_manual(userId: str, serviceToken: str, ssecurity: str = "",
                       device_id: str = "") -> Dict[str, Any]:
     """手工粘贴票据：从浏览器 cookie 里抄 userId/serviceToken 的兜底入口。"""
@@ -966,6 +1285,7 @@ def token_from_manual(userId: str, serviceToken: str, ssecurity: str = "",
         "pass_token": cookies.get("passToken", ""),
         "c_user_id": cookies.get("cUserId", ""),
         "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "login_method": "manual",
         "manual": True,
     }
     return token

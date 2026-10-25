@@ -318,6 +318,7 @@ export interface Status {
   token_saved_at: string
   token_expired: boolean
   manual_token: boolean
+  login_method: string
   needs: string[]
   notices: string[]
   devices: Device[]
@@ -332,6 +333,20 @@ export interface LoginResult {
   state: string
   message: string
   captcha_image: string
+  logged_in: boolean
+  device_count: number
+}
+
+/**
+ * POST /login/qrcode 的一次结果。
+ *
+ * 只有图片：二维码的内容（loginUrl）是一次性登录凭证，后端不把它回出来。
+ */
+export interface QrResult {
+  state: string
+  message: string
+  qr_image: string
+  expires_in: number
   logged_in: boolean
   device_count: number
 }

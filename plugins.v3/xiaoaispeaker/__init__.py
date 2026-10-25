@@ -61,13 +61,19 @@ from . import intents as _intents
 from . import speech as _speech
 from . import voice as _voice
 from .mina import (
+    LOGIN_FAILED,
     LOGIN_NEED_CAPTCHA,
     LOGIN_NEED_VERIFY,
+    LOGIN_QR_EXPIRED,
+    LOGIN_QR_WAITING,
     LOGIN_SUCCESS,
     MinaAuthError,
     MinaError,
     XiaoaiAuth,
     XiaoaiClient,
+    XiaoaiQrLogin,
+    exchange_pass_token,
+    parse_cookie_blob,
     token_from_manual,
 )
 from .schemas import (
@@ -101,6 +107,8 @@ from .schemas import (
     PlaylistsOut,
     PlayOut,
     PlayingOut,
+    QrIn,
+    QrOut,
     QueueIn,
     QueueItemOut,
     QueueOut,
@@ -127,6 +135,8 @@ except Exception:  # pragma: no cover - 老版本主程序没有该模块
 
 # plugindata 键：票据、设备缓存、队列、签名密钥、最近一次推流、收藏、睡眠定时、语音记忆
 _KEY_TOKEN = "token"
+# 本机固定的小米 deviceId：跟着这台实例走，换账号也不换（见 _device_id）
+_KEY_DEVICE = "device_id"
 _KEY_DEVICES = "devices"
 _KEY_QUEUE = "queue"
 _KEY_SECRET = "secret"
@@ -242,7 +252,7 @@ class XiaoaiSpeaker(_PluginBase):
         "库内目录浏览与搜索、远程命令；播放直链由插件签名限时，不依赖媒体服务器。"
     )
     plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/xiaoai.svg"
-    plugin_version = "0.3.3"
+    plugin_version = "0.4.0"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "xiaoaispeaker_"
@@ -288,6 +298,7 @@ class XiaoaiSpeaker(_PluginBase):
         self.__dict__.setdefault("_auth", None)
         self.__dict__.setdefault("_auth_state", "")
         self.__dict__.setdefault("_captcha_image", "")
+        self.__dict__.setdefault("_qr_login", None)
         self.__dict__.setdefault("_status_cache", {})
         self.__dict__.setdefault("_devices_cache", {})
         self.__dict__.setdefault("_refresh_attempt_at", 0.0)
@@ -507,6 +518,42 @@ class XiaoaiSpeaker(_PluginBase):
         return secret
 
     # ---------------- 票据与客户端 ----------------
+
+    def _device_id(self) -> str:
+        """本机固定的小米 deviceId，登录、扫码与 UA 都用它。
+
+        每次重新登录换一个新 deviceId，小米会当成「又一台新设备」：于是每回都要
+        图形验证码或二次校验，而上一次存的 passToken 也随之作废 —— 表现就是
+        「明明填对了却总说登录失败」。首次生成后留在本机，换账号也不换。
+        """
+        stored = self.get_data(_KEY_DEVICE)
+        if isinstance(stored, str) and stored.strip():
+            return stored.strip()
+        fresh = _mina.generate_device_id()
+        self.save_data(_KEY_DEVICE, fresh)
+        return fresh
+
+    def _remember_device_id(self, device_id: str) -> None:
+        """票据里带的 deviceId 以票据为准（扫码那次的会话绑的就是它）。"""
+        if not device_id:
+            return
+        if str(self.get_data(_KEY_DEVICE) or "") != device_id:
+            self.save_data(_KEY_DEVICE, device_id)
+
+    def _save_token(self, token: Dict[str, Any]) -> int:
+        """登录成功后的统一落账：存票据、丢掉上一个账号的缓存、拉一次设备。"""
+        self.save_data(_KEY_TOKEN, token)
+        self._remember_device_id(str(token.get("device_id") or ""))
+        self.__dict__["_auth"] = None
+        self.__dict__["_auth_state"] = ""
+        self.__dict__["_captcha_image"] = ""
+        self.__dict__["_qr_login"] = None
+        self.__dict__["_devices_cache"] = {}
+        self.__dict__["_status_cache"] = {}
+        devices, _ = self._devices_cached(force=True)
+        logger.info(f"{_LOG} 登录成功（{token.get('login_method') or 'password'}），"
+                    f"设备 {len(devices)} 台")
+        return len(devices)
 
     def _token(self) -> Optional[Dict[str, Any]]:
         data = self.get_data(_KEY_TOKEN)
@@ -1905,7 +1952,7 @@ class XiaoaiSpeaker(_PluginBase):
                 if not username or not password:
                     return LoginOut(state="failed", message="请填写小米账号和密码",
                                     logged_in=bool(self._token()))
-                auth = XiaoaiAuth(username, password)
+                auth = XiaoaiAuth(username, password, device_id=self._device_id())
                 self.__dict__["_auth"] = auth
                 state, token, message = auth.login()
             return self._finish_login(state, token, message, auth)
@@ -1921,14 +1968,9 @@ class XiaoaiSpeaker(_PluginBase):
         if state == LOGIN_SUCCESS and token:
             if auth is not None:
                 token.setdefault("username", auth.username)
-            self.save_data(_KEY_TOKEN, token)
-            self.__dict__["_auth"] = None
-            self.__dict__["_captcha_image"] = ""
-            self.__dict__["_devices_cache"] = {}
-            devices, _ = self._devices_cached(force=True)
-            logger.info(f"{_LOG} 登录成功，设备 {len(devices)} 台")
+            count = self._save_token(token)
             return LoginOut(state=state, message=message or "登录成功",
-                            logged_in=True, device_count=len(devices))
+                            logged_in=True, device_count=count)
         if state == LOGIN_FAILED:
             self.__dict__["_auth"] = None
             self.__dict__["_captcha_image"] = ""
@@ -1940,20 +1982,85 @@ class XiaoaiSpeaker(_PluginBase):
                         logged_in=bool(self._token()),
                         device_count=len(self.__dict__.get("_devices_cache", {}).get("devices") or []))
 
+    def _qr(self, action: str) -> QrOut:
+        """扫码登录：start 取一张新的二维码，poll 问一次「扫了没」。
+
+        轮询由前端驱动，插件不起线程：一次 poll 最长阻塞 QR_POLL_TIMEOUT 秒，
+        页面一关就没有后续请求，不会留下一个没人收结果的后台循环。
+        """
+        polling = str(action or "").strip().lower() == "poll"
+        with self._login_lock:
+            cached = len(((self.__dict__.get("_devices_cache") or {}).get("devices") or []))
+            qr: Optional[XiaoaiQrLogin] = self.__dict__.get("_qr_login")
+            if not polling:
+                qr = XiaoaiQrLogin(device_id=self._device_id())
+                self.__dict__["_qr_login"] = qr
+                ok, err = qr.start()
+                if not ok:
+                    self.__dict__["_qr_login"] = None
+                    logger.warning(f"{_LOG} 获取二维码失败: {err or '小米没有给出原因'}")
+                    return QrOut(state=LOGIN_FAILED, message=err or "获取二维码失败",
+                                 logged_in=bool(self._token()), device_count=cached)
+                image = qr.image()
+                if not image:
+                    logger.warning(f"{_LOG} 二维码图片取回来了是空的，重新获取一张试试")
+                return QrOut(state=LOGIN_QR_WAITING,
+                             message=qr.tips or "用小米音箱/米家 App 扫下面的二维码",
+                             qr_image=image, expires_in=qr.seconds_left(),
+                             logged_in=bool(self._token()), device_count=cached)
+
+            if qr is None or not qr.ready():
+                return QrOut(state=LOGIN_QR_EXPIRED,
+                             message="没有进行中的扫码会话，点「获取二维码」重新开始",
+                             logged_in=bool(self._token()), device_count=cached)
+            state, token, message = qr.poll()
+            if state == LOGIN_SUCCESS and token:
+                return QrOut(state=LOGIN_SUCCESS, message=message or "扫码登录成功",
+                             logged_in=True, device_count=self._save_token(token))
+            if state == LOGIN_QR_WAITING:
+                return QrOut(state=LOGIN_QR_WAITING, message=message,
+                             expires_in=qr.seconds_left(),
+                             logged_in=bool(self._token()), device_count=cached)
+            self.__dict__["_qr_login"] = None
+            logger.info(f"{_LOG} 扫码未成功: {state} {message or '小米没有给出原因'}")
+            return QrOut(state=state, message=message,
+                         logged_in=bool(self._token()), device_count=cached)
+
     def _login_manual(self, raw: str) -> LoginOut:
-        """粘贴 cookie 兜底：账密登不上（风控/无手机号）时仍可接进音箱。"""
-        values: Dict[str, str] = {}
-        for part in raw.replace("\n", ";").split(";"):
-            if "=" in part:
-                name, _, value = part.partition("=")
-                values[name.strip().lower()] = value.strip().strip('"')
+        """粘贴 cookie：账密与扫码都不方便时的兜底。
+
+        先拿 passToken 现换一张 serviceToken，而不是直接相信粘进来的那一张：
+        浏览器里的 serviceToken 通常已经躺了十几个小时，硬拿去用会「粘贴成功、
+        事事 401」，而且换过票之后本机就有了能续期的长期票据。
+        """
+        values = parse_cookie_blob(raw)
         user_id = values.get("userid") or ""
-        service_token = values.get("servicetoken") or raw
-        token = token_from_manual(user_id, service_token,
-                                  device_id=values.get("deviceid", ""))
-        if not token.get("user_id"):
-            return LoginOut(state="failed", message="粘贴内容里没有 userId，请把整串 cookie 粘进来",
+        pass_token = values.get("passtoken") or ""
+        service_token = values.get("servicetoken") or ""
+        device_id = values.get("deviceid") or self._device_id()
+        if not (user_id or pass_token or service_token):
+            return LoginOut(state="failed",
+                            message="粘贴的内容里既没有 userId/serviceToken，也没有 passToken",
                             logged_in=bool(self._token()))
+        if pass_token:
+            state, token, message = exchange_pass_token(
+                pass_token, user_id, values.get("cuserid") or "",
+                device_id=device_id, login_method="manual")
+            if state == LOGIN_SUCCESS and token:
+                count = self._save_token(token)
+                return LoginOut(state=LOGIN_SUCCESS,
+                                message=f"粘贴的 passToken 有效，已换到新票据（设备 {count} 台）",
+                                logged_in=True, device_count=count)
+            if not service_token:
+                return LoginOut(state="failed",
+                                message=f"passToken 换票失败：{message}；请重新复制整串 cookie",
+                                logged_in=bool(self._token()))
+            logger.info(f"{_LOG} passToken 换票失败，退回直接用粘贴的 serviceToken: {message}")
+        if not user_id or not service_token:
+            return LoginOut(state="failed",
+                            message="要同时有 userId 与 serviceToken（连 passToken 一起粘更好，能自动续期）",
+                            logged_in=bool(self._token()))
+        token = token_from_manual(user_id, service_token, device_id=device_id)
         client = self._build_client(token)
         try:
             alive = client.validate()
@@ -1961,13 +2068,13 @@ class XiaoaiSpeaker(_PluginBase):
             alive = False
             logger.info(f"{_LOG} 手工票据校验失败: {exc}")
         if not alive:
-            return LoginOut(state="failed", message="手工票据校验没通过（device_list 非 0），请重新粘贴或改回账密登录",
+            return LoginOut(state="failed",
+                            message="这串 cookie 没能通过小米云端校验（device_list 非 0）："
+                                    "重新复制一份，或改用扫码登录",
                             logged_in=bool(self._token()))
-        self.save_data(_KEY_TOKEN, token)
-        self.__dict__["_devices_cache"] = {}
-        devices, _ = self._devices_cached(force=True)
-        return LoginOut(state=LOGIN_SUCCESS, message=f"手工票据已生效，设备 {len(devices)} 台",
-                        logged_in=True, device_count=len(devices))
+        count = self._save_token(token)
+        return LoginOut(state=LOGIN_SUCCESS, message=f"手工票据已生效，设备 {count} 台",
+                        logged_in=True, device_count=count)
 
     def _logout(self) -> LoginOut:
         for key in (_KEY_TOKEN, _KEY_LAST):
@@ -1977,6 +2084,7 @@ class XiaoaiSpeaker(_PluginBase):
                 logger.warning(f"{_LOG} 清除 {key} 失败: {exc}")
         self.__dict__["_auth"] = None
         self.__dict__["_auth_state"] = ""
+        self.__dict__["_qr_login"] = None
         self.__dict__["_devices_cache"] = {}
         self.__dict__["_status_cache"] = {}
         self.save_data(_KEY_QUEUE, {"device_id": "", "index": -1, "items": []})
@@ -2069,7 +2177,7 @@ class XiaoaiSpeaker(_PluginBase):
         needs: List[str] = []
         notices: List[str] = []
         if not token:
-            needs.append("登录：填写小米账号密码，或在高级里粘贴 cookie 票据")
+            needs.append("登录：填账号密码、扫码，或粘贴 cookie 票据，任选一种")
         if not roots:
             needs.append("配置：填写「音乐库路径」")
         elif missing:
@@ -2094,6 +2202,7 @@ class XiaoaiSpeaker(_PluginBase):
             logged_in=bool(token),
             token_saved_at=str(token.get("saved_at") or ""),
             manual_token=bool(token.get("manual")),
+            login_method=str(token.get("login_method") or ""),
             token_expired=token_expired,
             needs=needs,
             notices=notices,
@@ -2312,6 +2421,14 @@ class XiaoaiSpeaker(_PluginBase):
                 "auth": "bear",
                 "response_model": LoginOut,
                 "summary": "登录小米账号（含验证码续跑与手工票据）",
+            },
+            {
+                "path": "/login/qrcode",
+                "endpoint": self.api_login_qrcode,
+                "methods": ["POST"],
+                "auth": "bear",
+                "response_model": QrOut,
+                "summary": "扫码登录：获取二维码 / 查询扫码结果",
             },
             {
                 "path": "/logout",
@@ -2603,6 +2720,19 @@ class XiaoaiSpeaker(_PluginBase):
     def api_logout(self) -> LoginOut:
         """POST /logout —— 清除本机票据。"""
         return self._logout()
+
+    def api_login_qrcode(self, payload: QrIn) -> QrOut:
+        """POST /login/qrcode —— {action:"start"} 取二维码，{action:"poll"} 问一次结果。
+
+        和 /login 一样不把异常抛给页面：小米这条链路上的异常名字千奇百怪，
+        折成一句可读的 message 才有排查价值。
+        """
+        try:
+            return self._qr(payload.action)
+        except Exception as exc:
+            logger.warning(f"{_LOG} 扫码流程异常: {exc}")
+            return QrOut(state=LOGIN_FAILED, message=f"扫码流程出错：{exc}",
+                         logged_in=bool(self._token()))
 
     def api_play(self, payload: PlayIn) -> PlayOut:
         """POST /play —— {path} | {url} | {keyword}，可带 queue 路径列表。"""

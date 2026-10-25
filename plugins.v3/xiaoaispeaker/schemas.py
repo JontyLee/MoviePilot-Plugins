@@ -122,6 +122,21 @@ class LoginOut(BaseModel):
     device_count: int = 0
 
 
+class QrOut(BaseModel):
+    """扫码登录的一次结果。
+
+    只回图片本身：二维码的内容（loginUrl）是一次性的登录凭证，回出去等于
+    谁都能替本人把这次登录做完，所以它只留在服务端。
+    """
+
+    state: str = "failed"
+    message: str = ""
+    qr_image: str = ""
+    expires_in: int = 0
+    logged_in: bool = False
+    device_count: int = 0
+
+
 class ActionOut(BaseModel):
     """只关心成功与否的操作结果。"""
 
@@ -232,6 +247,12 @@ class LoginIn(BaseModel):
     password: Optional[str] = None
     code: Optional[str] = None
     manual_token: Optional[str] = None
+
+
+class QrIn(BaseModel):
+    """扫码登录：action=start 取一张新的，action=poll 问一次扫码结果。"""
+
+    action: str = "start"
 
 
 class PlayIn(BaseModel):
@@ -526,6 +547,7 @@ class StatusOut(BaseModel):
     token_saved_at: str = ""
     token_expired: bool = False
     manual_token: bool = False
+    login_method: str = ""
     needs: List[str] = Field(default_factory=list)
     notices: List[str] = Field(default_factory=list)
     devices: List[DeviceOut] = Field(default_factory=list)

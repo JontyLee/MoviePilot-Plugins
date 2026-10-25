@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 import { useApi } from './useApi'
-import { type Device, type GroupRow, type LoginResult } from './types'
+import { type Device, type GroupRow, type LoginResult, type QrResult } from './types'
 
 /**
  * 配置页的第一项：小米账号 → 登录 → 取音箱 → 选默认音箱（顺带设备分组）。
  *
- * 登录只在这一个地方做。账号密码先落进配置再发登录，理由是后端只认配置里那一份：
+ * 登录只在这一个地方做，三种方式任选其一：账号密码、扫码、粘贴 cookie。
+ * 账号密码先落进配置再发登录，理由是后端只认配置里那一份：
  * 票据过期要重登、语音轮询要换票，都从配置读，只在请求体里带一次等于没存。
  */
 const props = defineProps({
@@ -18,7 +19,7 @@ const props = defineProps({
 
 const emit = defineEmits(['changed'])
 
-const { busy, snackbar, notify, post, raw } = useApi(props, () => emit('changed'))
+const { base, busy, snackbar, notify, post, raw } = useApi(props, () => emit('changed'))
 
 const cfg = computed(() => props.status?.config)
 const devices = computed<Device[]>(() => (props.status?.devices as Device[]) || [])
@@ -26,13 +27,20 @@ const onlineCount = computed(() => devices.value.filter(d => d.presence === 'onl
 const groups = computed<GroupRow[]>(() => (props.status?.extra?.groups as GroupRow[]) || [])
 const defaultGroup = computed<string>(() => String(props.status?.extra?.default_group || ''))
 
-// ---------------- 登录 ----------------
+// ---------------- 登录方式 ----------------
+
+const LOGIN_MODES = [
+  { value: 'password', title: '账号密码', icon: 'mdi-account-key-outline' },
+  { value: 'qrcode', title: '扫码', icon: 'mdi-qrcode-scan' },
+  { value: 'cookie', title: 'Cookie 票据', icon: 'mdi-cookie' }
+]
+
+const loginMode = ref<'password' | 'qrcode' | 'cookie'>('password')
 
 const credential = ref({ username: '', password: '' })
 const loginResult = ref<LoginResult | null>(null)
 const verifyCode = ref('')
 const manualToken = ref('')
-const showManual = ref(false)
 // 登录成功后自动把音箱列表端上来，登完了还得自己找地方点「刷新设备」是原来那套的毛病
 const picker = ref(false)
 
@@ -44,12 +52,21 @@ const loginStates: Record<string, { color: string; text: string }> = {
 }
 
 const loginState = computed(() => loginStates[loginResult.value?.state || ''] || null)
+// 扫码登的账号没有密码可填：过期时让它说「重新扫码」而不是「重新登录」
+const reloginText = computed(() => (props.status?.login_method === 'qrcode'
+  ? '票据已过期，切到「扫码」重新扫一次'
+  : '票据已过期，再点一次「登录」即可'))
 
 // 候选按「当前默认 → 在线 → 其余」排：刚登完时最有用的那台要在最上面
 const pickerDevices = computed<Device[]>(() => devices.value.slice().sort((a, b) => {
   const rank = (d: Device) => (d.is_default ? 0 : d.presence === 'online' ? 1 : 2)
   return rank(a) - rank(b)
 }))
+
+function switchMode(mode: 'password' | 'qrcode' | 'cookie') {
+  if (mode !== 'qrcode') stopQr()
+  loginMode.value = mode
+}
 
 async function startLogin() {
   const body: Record<string, any> = {}
@@ -76,7 +93,7 @@ async function submitVerify() {
 async function submitManual() {
   const rawCookie = manualToken.value.trim()
   if (!rawCookie) {
-    notify('把整串 cookie 粘进来（要包含 userId 与 serviceToken）', 'warning')
+    notify('把整串 cookie 粘进来（要包含 userId 与 passToken/serviceToken）', 'warning')
     return
   }
   const res = await raw('/login', { manual_token: rawCookie }, '校验票据')
@@ -90,8 +107,9 @@ async function afterLogin(res: LoginResult) {
   if (res?.state === 'success') {
     notify(res.message || '登录成功', 'success')
     credential.value.password = ''
-    showManual.value = false
     manualToken.value = ''
+    stopQr()
+    qr.value = null
     // 后端登录成功时已经强制刷过一遍设备，这里只负责把它直接端到人面前
     if (res.device_count) picker.value = true
     else notify('登录成功，但这个账号下没取到音箱设备', 'warning')
@@ -104,7 +122,121 @@ async function afterLogin(res: LoginResult) {
   notify(res?.message || '登录失败', 'error')
 }
 
+// ---------------- 扫码登录 ----------------
+
+const qr = ref<QrResult | null>(null)
+const qrBusy = ref(false)
+const qrLeft = ref(0)
+// 一次 poll 会在后端挂住最长 8 秒（小米的长轮询），所以只能串行问：
+// seq 让「重新获取」「切走」「退出登录」之前的那一轮结果作废，不然旧二维码的
+// 回调会把新会话的状态盖回去
+let qrSeq = 0
+let qrTimer: ReturnType<typeof setTimeout> | null = null
+let qrTick: ReturnType<typeof setInterval> | null = null
+
+const qrText = computed(() => {
+  const state = qr.value?.state || ''
+  if (state === 'qr_waiting') return qrLeft.value > 0 ? `等待扫码确认…（${qrLeft.value} 秒内有效）` : '等待扫码确认…'
+  if (state === 'qr_expired') return '这张二维码已经作废，重新获取一张'
+  if (state === 'failed') return '扫码未成功'
+  return ''
+})
+
+function stopQr() {
+  qrSeq += 1
+  if (qrTimer) {
+    clearTimeout(qrTimer)
+    qrTimer = null
+  }
+  if (qrTick) {
+    clearInterval(qrTick)
+    qrTick = null
+  }
+  qrBusy.value = false
+}
+
+async function askQr(action: 'start' | 'poll'): Promise<QrResult | null> {
+  const seq = qrSeq
+  try {
+    const res = await (props.api as MoviePilotApi)
+      .post(`${base.value}/login/qrcode`, { action }) as QrResult
+    // 这一轮已经被 stopQr 作废（换了二维码、切走或登录成功），结果丢掉
+    if (seq !== qrSeq || !res) return null
+    return res
+  } catch (e: any) {
+    if (seq === qrSeq) notify(`扫码请求失败：${e?.message || e}`, 'error')
+    return null
+  }
+}
+
+async function startQr() {
+  stopQr()
+  const seq = qrSeq
+  qrBusy.value = true
+  const res = await askQr('start')
+  if (seq === qrSeq) qrBusy.value = false
+  if (res) applyQr(res)
+}
+
+function applyQr(res: QrResult) {
+  qr.value = res
+  if (res.state === 'qr_waiting') {
+    qrLeft.value = Math.max(0, res.expires_in || 0)
+    runCountdown()
+    qrTimer = setTimeout(async () => {
+      const again = await askQr('poll')
+      if (again) applyQr(again)
+    }, 400)
+    return
+  }
+  qrLeft.value = 0
+  if (res.state === 'success') {
+    afterQrSuccess(res)
+    return
+  }
+  notify(res.message || (res.state === 'qr_expired' ? '二维码已过期' : '扫码未成功'), 'warning')
+}
+
+function runCountdown() {
+  if (qrTick) clearInterval(qrTick)
+  qrTick = setInterval(() => {
+    qrLeft.value -= 1
+    if (qrLeft.value > 0) return
+    // 本地倒计时归零就当这张码死了：别再挂着轮询，小米那边也一样过期
+    stopQr()
+    qr.value = { ...(qr.value as QrResult), state: 'qr_expired', message: '二维码已过期，重新获取一张再扫' }
+    notify('二维码已过期，重新获取一张再扫', 'warning')
+  }, 1000)
+}
+
+function afterQrSuccess(res: QrResult) {
+  stopQr()
+  qr.value = null
+  loginResult.value = {
+    state: 'success',
+    message: res.message || '扫码登录成功',
+    captcha_image: '',
+    logged_in: true,
+    device_count: res.device_count
+  }
+  credential.value.password = ''
+  manualToken.value = ''
+  notify(res.message || '扫码登录成功', 'success')
+  emit('changed')
+  if (res.device_count) picker.value = true
+  else notify('登录成功，但这个账号下没取到音箱设备', 'warning')
+}
+
+function cancelQr() {
+  stopQr()
+  qr.value = null
+}
+
+onBeforeUnmount(stopQr)
+
 async function doLogout() {
+  stopQr()
+  qr.value = null
   const res = await post('/logout', {}, '退出登录')
   if (res) {
     loginResult.value = null
@@ -208,33 +340,91 @@ function removeGroup(name: string) {
       <div class="text-caption text-grey">
         票据保存于 {{ props.status?.token_saved_at || '-' }}
         <template v-if="props.status?.manual_token">｜手工粘贴的 cookie</template>
-        <template v-if="props.status?.token_expired">｜已过期，重新点一次「登录」即可</template>
+        <template v-if="props.status?.token_expired">｜{{ reloginText }}</template>
       </div>
     </div>
 
-    <div class="d-flex" style="gap: 8px; flex-wrap: wrap">
-      <v-text-field v-model="credential.username" density="compact" hide-details clearable
-                    label="小米账号（手机号 / 邮箱 / 账号ID）" :placeholder="cfg?.username || '留空用已保存的'"
-                    style="min-width: 220px; flex: 1 1 220px" @keyup.enter="startLogin" />
-      <v-text-field v-model="credential.password" density="compact" hide-details
-                    :type="credential.password ? 'text' : 'password'"
-                    :label="cfg?.password_set ? '密码（留空则用已保存的）' : '密码'"
-                    style="min-width: 180px; flex: 1 1 180px" @keyup.enter="startLogin" />
-      <v-btn color="primary" variant="flat" class="text-none" :loading="busy === '登录' || busy === '保存账号'"
-             prepend-icon="mdi-login" @click="startLogin">登录
+    <div v-if="props.status?.logged_in" class="d-flex mb-3" style="gap: 8px">
+      <v-btn size="small" variant="tonal" :loading="busy === '刷新设备'" prepend-icon="mdi-refresh"
+             @click="refreshDevices">刷新设备
       </v-btn>
-      <template v-if="props.status?.logged_in">
-        <v-btn size="small" variant="tonal" :loading="busy === '刷新设备'" prepend-icon="mdi-refresh"
-               @click="refreshDevices">刷新设备
-        </v-btn>
-        <v-btn size="small" variant="text" color="error" :loading="busy === '退出登录'"
-               prepend-icon="mdi-logout" @click="doLogout">退出登录
-        </v-btn>
-      </template>
+      <v-btn size="small" variant="text" color="error" :loading="busy === '退出登录'"
+             prepend-icon="mdi-logout" @click="doLogout">退出登录
+      </v-btn>
     </div>
-    <div class="text-caption text-grey mt-1">
-      账号密码只存进本机配置、接口永不回显明文；点「登录」即先保存再发起，票据存在插件数据里。
-    </div>
+
+    <v-btn-toggle :model-value="loginMode" divided mandatory density="compact" color="primary"
+                  style="align-self: flex-start" @update:model-value="switchMode($event)">
+      <v-btn v-for="mode in LOGIN_MODES" :key="mode.value" :value="mode.value" size="small"
+             variant="text" class="text-none" :prepend-icon="mode.icon">{{ mode.title }}
+      </v-btn>
+    </v-btn-toggle>
+
+    <!-- 一、账号密码 -->
+    <template v-if="loginMode === 'password'">
+      <div class="d-flex mt-3" style="gap: 8px; flex-wrap: wrap">
+        <v-text-field v-model="credential.username" density="compact" hide-details clearable
+                      label="小米账号（手机号 / 邮箱 / 账号ID）" :placeholder="cfg?.username || '留空用已保存的'"
+                      style="min-width: 220px; flex: 1 1 220px" @keyup.enter="startLogin" />
+        <v-text-field v-model="credential.password" density="compact" hide-details
+                      :type="credential.password ? 'text' : 'password'"
+                      :label="cfg?.password_set ? '密码（留空则用已保存的）' : '密码'"
+                      style="min-width: 180px; flex: 1 1 180px" @keyup.enter="startLogin" />
+        <v-btn color="primary" variant="flat" class="text-none" :loading="busy === '登录' || busy === '保存账号'"
+               prepend-icon="mdi-login" @click="startLogin">登录
+        </v-btn>
+      </div>
+      <div class="text-caption text-grey mt-1">
+        账号密码只存进本机配置、接口永不回显明文；点「登录」即先保存再发起，票据存在插件数据里。
+        小米判定「新设备」时会要图形验证码或手机/邮箱验证码，下面那步照提示填进来就行。
+      </div>
+    </template>
+
+    <!-- 二、扫码 -->
+    <template v-else-if="loginMode === 'qrcode'">
+      <div class="d-flex mt-3" style="gap: 14px; flex-wrap: wrap; align-items: flex-start">
+        <v-img v-if="qr?.qr_image" :src="qr.qr_image" width="184" height="184" class="rounded" contain />
+        <div v-else class="xcl-qr d-flex flex-column align-center justify-center rounded">
+          <v-icon :icon="qrBusy ? 'mdi-loading mdi-refresh' : 'mdi-qrcode-scan'"
+                  :color="qrBusy ? 'primary' : 'grey'" size="40" />
+          <span class="text-caption text-grey mt-1">还没有二维码</span>
+        </div>
+        <div style="min-width: 220px; flex: 1 1 220px">
+          <div class="text-body-2">{{ qrText || '取一张二维码，用手机 App 扫一下' }}</div>
+          <div v-if="qr?.message && qrText" class="text-caption text-grey mt-1">{{ qr.message }}</div>
+          <v-progress-linear v-if="qr?.state === 'qr_waiting' && qr.expires_in" height="4" rounded
+                             color="primary" class="mt-2"
+                             :model-value="Math.max(0, Math.min(100, qrLeft / (qr.expires_in || 1) * 100))" />
+          <div class="d-flex mt-2" style="gap: 8px">
+            <v-btn size="small" variant="tonal" color="primary" :loading="qrBusy"
+                   :prepend-icon="qr?.qr_image ? 'mdi-refresh' : 'mdi-qrcode-scan'"
+                   @click="startQr">{{ qr?.qr_image ? '换一张' : '获取二维码' }}
+            </v-btn>
+            <v-btn v-if="qr" size="small" variant="text" @click="cancelQr">取消</v-btn>
+          </div>
+        </div>
+      </div>
+      <div class="text-caption text-grey mt-2">
+        用米家 / 小米音箱 App 扫码后在手机上确认，页面会自动问到结果；中途过期就点「换一张」。
+        这条路不走密码，也就绕开了「新设备登录」那套风控，账密反复登不上时通常它能用。
+      </div>
+    </template>
+
+    <!-- 三、粘贴 cookie -->
+    <template v-else>
+      <v-textarea v-model="manualToken" class="mt-3" :rows="3" density="compact" hide-details
+                  placeholder="userId=…; passToken=…; serviceToken=…（浏览器里登录过小米账号的整串 cookie）" />
+      <div class="d-flex mt-1" style="gap: 8px">
+        <v-btn size="small" variant="tonal" color="primary" :loading="busy === '校验票据'"
+               prepend-icon="mdi-key-variant" @click="submitManual">校验并使用
+        </v-btn>
+        <v-btn size="small" variant="text" @click="manualToken = ''">清空</v-btn>
+      </div>
+      <div class="text-caption text-grey mt-1">
+        前两种都不方便时的兜底：先拿 passToken 现换一张活票（换到了才说明这串 cookie 真的有效），
+        换不到才退回直接用粘进来的 serviceToken。
+      </div>
+    </template>
 
     <div v-if="loginResult" class="mt-3">
       <v-alert :type="loginState?.color || 'info'" variant="tonal" density="compact"
@@ -260,26 +450,6 @@ function removeGroup(name: string) {
         </v-btn>
         <v-btn size="small" variant="text" @click="startLogin">重新发起登录</v-btn>
       </div>
-    </div>
-
-    <v-expand-transition>
-      <div v-if="showManual" class="mt-3">
-        <v-textarea v-model="manualToken" :rows="3" density="compact" hide-details
-                    placeholder="userId=…; serviceToken=…; 把浏览器里 i.api.xiaomi.com 登录后的整串 cookie 粘进来" />
-        <div class="d-flex mt-1" style="gap: 8px">
-          <v-btn size="small" variant="tonal" :loading="busy === '校验票据'"
-                 @click="submitManual">校验并使用
-          </v-btn>
-          <v-btn size="small" variant="text" @click="showManual = false">取消</v-btn>
-        </div>
-      </div>
-    </v-expand-transition>
-    <div class="text-caption text-grey mt-2">
-      账密登不上（小米风控、二次校验过不去）时可以直接粘贴 cookie 票据兜底。
-      <v-btn size="x-small" variant="text" class="text-none ml-1"
-             :prepend-icon="showManual ? 'mdi-chevron-up' : 'mdi-chevron-down'"
-             @click="showManual = !showManual">高级
-      </v-btn>
     </div>
 
     <!-- 音箱 -->
@@ -412,6 +582,10 @@ function removeGroup(name: string) {
 .xcl-device {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   padding: 7px 0; border-bottom: 1px dashed var(--xcl-line);
+}
+.xcl-qr {
+  width: 184px; height: 184px; flex: 0 0 auto;
+  border: 1px dashed var(--xcl-line); background: rgba(var(--v-theme-on-surface), .03);
 }
 .xcl-device:last-of-type { border-bottom: none; }
 .xcl-card { border-radius: var(--xcl-radius); }

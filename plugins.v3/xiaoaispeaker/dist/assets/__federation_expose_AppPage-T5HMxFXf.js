@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import Config from './__federation_expose_Config-DUlZN97a.js';
+import Config from './__federation_expose_Config-CPGkaX7F.js';
 import { a as activeLine, s as statusColor, m as modeText, f as fmtSeconds, M as MODE_ITEMS, b as fmtSize, c as fmtTime, q as query, _ as _export_sfc } from './types-CVxekbje.js';
 
 const {defineComponent:_defineComponent} = await importShared('vue');
@@ -313,6 +313,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       token_saved_at: "",
       token_expired: false,
       manual_token: false,
+      login_method: "",
       needs: [],
       notices: [],
       devices: [],
@@ -2543,6 +2544,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const AppPage = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-a7b2477a"]]);
+const AppPage = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-ff94eeda"]]);
 
 export { AppPage as default };

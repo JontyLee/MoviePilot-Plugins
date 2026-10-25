@@ -59,6 +59,7 @@ const EMPTY_STATUS: Status = {
   token_saved_at: '',
   token_expired: false,
   manual_token: false,
+  login_method: '',
   needs: [],
   notices: [],
   devices: [],
