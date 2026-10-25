@@ -70,7 +70,7 @@ class ANiStrmRelay(_PluginBase):
     plugin_name = "ANi Strm 自用版（CF中转）"
     plugin_desc = "自动获取当季所有番剧生成strm；内置CF中转代理携带cf_clearance直连openani，解决源站人机挑战后strm无法播放的问题（基于 honue 版 ANi-Strm 迭代）"
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/anistrm.png"
-    plugin_version = "0.1.0"
+    plugin_version = "0.1.1"
     plugin_author = "JontyLee（基于 honue ANi-Strm）"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "anistrm_"
@@ -148,6 +148,10 @@ class ANiStrmRelay(_PluginBase):
                 self._relay_enabled = False
         self._client.set_use_proxy(self._use_proxy)
         self._client.set_proxy_base(effective_base)
+        # 目录请求同样经中转入口时必须携带 rt 令牌，否则被中转 403 拦下
+        self._client.set_query_suffix(
+            f"rt={self._relay_token}" if (self._relay_enabled and self._relay_token) else ""
+        )
         logger.info(
             f"ANi-Strm配置加载：enabled={self._enabled}, onlyonce={self._onlyonce}, "
             f"use_proxy={self._use_proxy}, base={effective_base}, "
@@ -358,11 +362,13 @@ class ANiStrmRelay(_PluginBase):
                 status_code=503,
             )
         if self._relay_token and request.query_params.get("rt") != self._relay_token:
+            logger.warning(f"ANi-Strm中转拒绝了无效令牌请求：/{full_path}")
             return JSONResponse(
                 {"success": False, "message": "中转访问令牌无效"},
                 status_code=403,
             )
         if not self._cf_clearance:
+            logger.warning("ANi-Strm中转未配置cf_clearance，请求已拒绝；请过完人机验证后在插件设置填入")
             return JSONResponse(
                 {"success": False, "message": "未配置cf_clearance：请先在浏览器过人机验证后填入"},
                 status_code=503,
@@ -411,7 +417,12 @@ class ANiStrmRelay(_PluginBase):
         try:
             if ctype.startswith(("text/", "application/json")):
                 await resp.aread()
-                if any(mark in resp.content[:4096] for mark in CHALLENGE_MARKS):
+                head = resp.content[:4096]
+                challenged = any(mark in head for mark in CHALLENGE_MARKS) or (
+                    resp.status_code in (403, 429, 503)
+                    and b"cloudflare" in resp.content.lower()
+                )
+                if challenged:
                     logger.warning(
                         "ANi-Strm中转收到CF挑战页：cf_clearance已失效（或出口IP/UA变更），"
                         "请在同出口IP浏览器重新过一次人机验证并更新插件中的cookie"
@@ -490,7 +501,10 @@ class ANiStrmRelay(_PluginBase):
                 probe_url, headers=headers, data='{"password":""}', timeout=20.0
             )
             body_head = resp.content[:4096]
-            challenged = any(mark in body_head for mark in CHALLENGE_MARKS)
+            challenged = any(mark in body_head for mark in CHALLENGE_MARKS) or (
+                resp.status_code in (403, 429, 503)
+                and b"cloudflare" in resp.content.lower()
+            )
             result["probe"] = {
                 "status": resp.status_code,
                 "cf_mitigated": resp.headers.get("cf-mitigated", ""),
@@ -885,6 +899,15 @@ class AniStrmClient:
         self._proxy_base = self.normalize_proxy_base(proxy_base)
         self._season_options_cache: List[str] = []
         self._use_proxy = use_proxy
+        # 目录请求的固定查询后缀（走内置中转时携带 rt 令牌；直连为空）
+        self._query_suffix = ""
+
+    def set_query_suffix(self, suffix: str):
+        """
+        设置目录请求统一追加的查询后缀并清空季度缓存。
+        """
+        self._query_suffix = (suffix or "").strip().lstrip("?")
+        self._season_options_cache = []
 
     def set_proxy_base(self, proxy_base: Optional[str]):
         self._proxy_base = self.normalize_proxy_base(proxy_base)
@@ -951,6 +974,8 @@ class AniStrmClient:
         return seasons
 
     def _fetch_folder_payload(self, url: str) -> Dict[str, Any]:
+        if self._query_suffix and "?" not in url:
+            url = f"{url}?{self._query_suffix}"
         response = self._request_factory().post(
             url=url,
             data='{"password":""}',
