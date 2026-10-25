@@ -2211,6 +2211,42 @@ class LoginMethodTest(unittest.TestCase):
         self.assertEqual(saved["login_method"], "manual")
         self.assertTrue(any("sid=micoapi" in u for u in seen), "要用 passToken 现换一张活票")
 
+    def test_pass_token_retry_switches_client_profile(self) -> None:
+        """小米按请求自称的客户端决定认不认这张票：先按来路问，被拒再换另一种标识。
+
+        浏览器 Cookie 里那张票来自 iOS passport 的网页会话，账密/扫码 mint 的来自
+        Android 米家 —— 认错标识只回 70016，不重试就是「明明有票却换不到」。
+        """
+        original = mina.XiaoaiAuth._service_login
+        calls: List[str] = []
+        attempts = {"n": 0}
+
+        def fake(self):
+            calls.append(self.sdk_version)
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                return (mina.LOGIN_FAILED, None,
+                        "静默续期失败：code=70016, desc=登录验证失败")
+            return mina.LOGIN_SUCCESS, {"services": {mina.MINA_SID: {}}}, "已换到"
+
+        mina.XiaoaiAuth._service_login = fake
+        try:
+            state, _token, message = mina.exchange_pass_token("PT", "77")
+            manual_calls = list(calls)
+            calls.clear()
+            attempts["n"] = 0
+            mina.exchange_pass_token("PT", "77", login_method="qrcode")
+            qr_calls = list(calls)
+        finally:
+            mina.XiaoaiAuth._service_login = original
+        self.assertEqual(state, mina.LOGIN_SUCCESS, message)
+        self.assertEqual(manual_calls,
+                         [mina.PASSPORT_SDK_VERSION, mina.DEFAULT_SDK_VERSION],
+                         "手工填的票先按网页来路问，被拒再补一次 Android 米家")
+        self.assertEqual(qr_calls,
+                         [mina.DEFAULT_SDK_VERSION, mina.PASSPORT_SDK_VERSION],
+                         "扫码来的票来路是 Android 米家，先按它问")
+
     def test_manual_cookie_rejects_a_whole_cookie_blob(self) -> None:
         """只认两项：整串 cookie 粘进来要当场说清，而不是换票换出个莫名其妙的失败。"""
         plugin = _plugin()

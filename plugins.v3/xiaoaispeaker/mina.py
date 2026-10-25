@@ -46,6 +46,16 @@ MINA_SID = "micoapi"
 # 登录 UA 里的 %s 由 deviceId 填充（Android 米家客户端）
 USER_AGENT_TEMPLATE = "Android-7.1.1-1.0.0-ONEPLUS A3010-136-%s APP/xiaomi.smarthome APPV/62830"
 
+# 小米 passport 会看请求自称的是什么客户端：账密那套走 Android 米家，而拿浏览器里
+# 复制的 passToken 换票时，上游 MiService 用的是 iOS 米家 passport 的 UA + sdkVersion 3.9。
+# 拿 Android 那套去问同一张网页票据，小米不认，回的就是 code=70016 登录验证失败
+PASSPORT_USER_AGENT = (
+    "APP/com.xiaomi.mihome APPV/11.3.203 iosPassportSDK/4.2.50 iOS/17.5.1 "
+    "MK/aVBob25lMTQsOA== DEVT/aVBob25l DEVS/aU9T BRA/QXBwbGU= L/zh_CN"
+)
+PASSPORT_SDK_VERSION = "3.9"
+DEFAULT_SDK_VERSION = "3.8.6"
+
 # 小米云接口把 JSON 前面拼了这一段，直接 json.loads 会失败
 JSON_PREFIX = "&&&START&&&"
 
@@ -268,9 +278,10 @@ class XiaoaiAuth:
         self.password = password
         self.login_method = login_method or "password"
         self.device_id = device_id or generate_device_id()
+        self.sdk_version = DEFAULT_SDK_VERSION
         self.user_agent = USER_AGENT_TEMPLATE % self.device_id
         self.cookies: Dict[str, str] = {
-            "sdkVersion": "3.8.6",
+            "sdkVersion": self.sdk_version,
             "deviceId": self.device_id,
         }
         self._step1: Dict[str, Any] = {}
@@ -531,7 +542,7 @@ class XiaoaiAuth:
         self.cookies.update({
             "passToken": pass_token,
             "deviceId": self.device_id,
-            "sdkVersion": "3.8.6",
+            "sdkVersion": self.sdk_version,
         })
         response = self._get(url)
         if response is None:
@@ -1332,21 +1343,40 @@ def exchange_pass_token(pass_token: str, user_id: str, c_user_id: str = "",
     扫码确认与手工填 cookie 都收敛到这一步：passToken 是长期票据，能换到
     serviceToken 就说明这串凭据真的有效 —— 比直接相信浏览器里那张多半已经躺了
     十几个小时的 serviceToken 可靠得多，也顺手把票据续上了。
+
+    小米是按「请求自称的是什么客户端」决定认不认这张票的：账密/扫码 mint 出来的票来自
+    Android 米家，浏览器 Cookie 里那张来自 iOS passport 的网页会话。所以先按票据的来路
+    问一次，被拒再用另一种标识问一次 —— 小米只回一个 70016，猜错来路不该让人白跑一趟。
     """
     if "%" in pass_token:
         # 从原始请求头里复制的值是百分号编码的；passToken 本身是 base64，不含 %，
-        # 所以看见 % 就该解开 —— 小米对坏票据只回 401，不会说「你粘错了」
+        # 所以看见 % 就该解开 —— 小米对坏票据只给一个码，不会说「你粘错了」
         pass_token = unquote(pass_token)
-    auth = XiaoaiAuth(username="", password="", device_id=device_id,
-                      login_method=login_method)
-    for name, value in (extra_cookies or {}).items():
-        # 旧的 serviceToken 不带：那是别的会话/别的服务的，混进去只会拿错票据
-        if value and name != "serviceToken":
-            auth.cookies[name] = value
-    auth.cookies["passToken"] = pass_token
-    if user_id:
-        auth.cookies["userId"] = user_id
-    if c_user_id:
-        auth.cookies["cUserId"] = c_user_id
-    auth._user_id = user_id or ""
-    return auth._service_login()
+    device_id = device_id or generate_device_id()
+    android = (USER_AGENT_TEMPLATE % device_id, DEFAULT_SDK_VERSION, "Android 米家")
+    passport = (PASSPORT_USER_AGENT, PASSPORT_SDK_VERSION, "iOS passport")
+    profiles = [android, passport] if login_method == "qrcode" else [passport, android]
+    message = ""
+    for index, (agent, sdk, label) in enumerate(profiles):
+        auth = XiaoaiAuth(username="", password="", device_id=device_id,
+                          login_method=login_method)
+        auth.user_agent = agent
+        auth.sdk_version = sdk
+        auth.cookies["sdkVersion"] = sdk
+        for name, value in (extra_cookies or {}).items():
+            # 旧票据与设备标识都不带：那是别的会话的，混进去只会拿错票据
+            if value and name not in ("serviceToken", "sdkVersion", "deviceId"):
+                auth.cookies[name] = value
+        auth.cookies["passToken"] = pass_token
+        if user_id:
+            auth.cookies["userId"] = user_id
+        if c_user_id:
+            auth.cookies["cUserId"] = c_user_id
+        auth._user_id = user_id or ""
+        state, token, message = auth._service_login()
+        if state == LOGIN_SUCCESS and token:
+            if index:
+                logger.info(f"{_LOG_TAG} 这张 passToken 要用 {label} 的客户端标识才认")
+            return state, token, message
+        logger.info(f"{_LOG_TAG} 用 {label} 的客户端标识换票被拒: {message}")
+    return LOGIN_FAILED, None, message

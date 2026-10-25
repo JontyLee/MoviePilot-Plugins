@@ -985,9 +985,10 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
       if (res) applyQr(res);
     }
     function applyQr(res) {
-      qr.value = res;
       if (res.state === "qr_waiting") {
-        qrLeft.value = Math.max(0, res.expires_in || 0);
+        if (!res.qr_image && qr.value?.qr_image) res = { ...res, qr_image: qr.value.qr_image };
+        qr.value = res;
+        qrLeft.value = res.expires_in > 0 ? res.expires_in : Math.max(0, qrLeft.value);
         runCountdown();
         qrTimer = setTimeout(async () => {
           const again = await askQr("poll");
@@ -1660,7 +1661,7 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
   }
 });
 
-const ConfigLogin = /* @__PURE__ */ _export_sfc(_sfc_main$3, [["__scopeId", "data-v-8458096a"]]);
+const ConfigLogin = /* @__PURE__ */ _export_sfc(_sfc_main$3, [["__scopeId", "data-v-e2805e1d"]]);
 
 const {defineComponent:_defineComponent$2} = await importShared('vue');
 

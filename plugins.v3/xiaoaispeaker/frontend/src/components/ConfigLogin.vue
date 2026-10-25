@@ -190,9 +190,13 @@ async function startQr() {
 }
 
 function applyQr(res: QrResult) {
-  qr.value = res
   if (res.state === 'qr_waiting') {
-    qrLeft.value = Math.max(0, res.expires_in || 0)
+    // 轮询那次的响应不带图片：图属于这张二维码，不属于这一次请求。直接盖上去，
+    // 页面就会在第一次轮询回来（约 8 秒）后把二维码换成「还没获取」的空框
+    if (!res.qr_image && qr.value?.qr_image) res = { ...res, qr_image: qr.value.qr_image }
+    qr.value = res
+    // 没给新的剩余时限就沿用正在倒的那个数，别把倒计时打到 0 当场判这张码过期
+    qrLeft.value = res.expires_in > 0 ? res.expires_in : Math.max(0, qrLeft.value)
     runCountdown()
     qrTimer = setTimeout(async () => {
       const again = await askQr('poll')
