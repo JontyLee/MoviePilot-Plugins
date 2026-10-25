@@ -31,14 +31,22 @@ sys.path.insert(0, str(_ROOT / "tests" / "v3" / "xiaoaispeaker"))
 
 import _stub_env  # noqa: E402
 
+# 所有替身实例的状态目录都挂在这个目录下：进程退出时整棵树由 TemporaryDirectory 收走
+_STATE_ROOT = tempfile.TemporaryDirectory(prefix="xiaoaispeaker-state-")
+
 
 class _FakePluginBase:
-    """替身基类：plugindata 用实例 dict 模拟，配置写入与消息都记下来供断言。"""
+    """替身基类：配置写入与消息都记下来供断言，状态落到每实例独立的临时目录。
+
+    状态目录必须按实例隔离 —— 插件的 save_data/get_data 是真的写文件，共用一个目录
+    会让上一个用例留下的队列、分组、票据漏进下一个用例，断言就变成在演上一段的状态。
+    """
 
     def __init__(self, *args, **kwargs) -> None:
         self._store: Dict[str, Any] = {}
         self._configs: List[Dict[str, Any]] = []
         self.messages: List[Dict[str, Any]] = []
+        self._data_dir = Path(tempfile.mkdtemp(dir=_STATE_ROOT.name))
 
     def save_data(self, key, value, plugin_id=None) -> None:
         self._store[key] = value
@@ -62,7 +70,7 @@ class _FakePluginBase:
         return {}
 
     def get_data_path(self, plugin_id=None) -> Path:
-        return Path(tempfile.gettempdir())
+        return self._data_dir
 
     def post_message(self, *args, **kwargs) -> None:
         self.messages.append(kwargs)
@@ -936,6 +944,29 @@ class PluginPlayTest(unittest.TestCase):
         self.assertEqual(path, str(self.track))
         self.assertTrue(media.verify_sign(plugin._secret(), path, exp, sig))
 
+    def test_state_files_are_reused_by_the_next_instance(self) -> None:
+        """重载与重启等于换一个实例：签名密钥和登录票据必须还在。
+
+        换密钥会让已经推给音箱的直链在下一次取流时 403；丢票据会让小米把它当成
+        又一台新设备，于是每回登录都要过验证码与二次校验。
+        """
+        first, _ = self._plugin_with_client()
+        secret = first._secret()
+        secret_file = first._data_dir / "state" / "secret.json"
+        self.assertTrue(secret_file.is_file())
+        # 密钥文件里是签名密钥、票据文件里是登录态，都不许让别人读走
+        self.assertEqual(secret_file.stat().st_mode & 0o777, 0o600)
+
+        second = x.XiaoaiSpeaker()
+        second._data_dir = first._data_dir
+        second.init_plugin({**media_defaults, "music_dirs": str(self.root)})
+        self.assertEqual(second._secret(), secret)
+        self.assertEqual(second.get_data("token").get("user_id"),
+                         _token().get("user_id"))
+        # 退出登录要把票据从盘上删干净，不能只当内存里没有
+        second.del_data("token")
+        self.assertIsNone(second.get_data("token"))
+
     def test_play_rejects_outside_library_without_touching_speaker(self) -> None:
         plugin, client = self._plugin_with_client()
         result = plugin.api_play(x.schemas.PlayIn(path=str(self.outside)))
@@ -1099,7 +1130,10 @@ class PluginQueueTest(unittest.TestCase):
         plugin._tick()
         self.assertEqual(len([c for c in client.calls if c[0] == "play"]), before,
                          "推流后宽限期内不该连播")
-        plugin.get_data("last")["started_at"] = time.time() - 60
+        # get_data 每次给的是新对象（宿主 JSON 列也一样），改了要写回去才作数
+        last = plugin.get_data("last")
+        last["started_at"] = time.time() - 60
+        plugin.save_data("last", last)
         plugin._tick()
         self.assertEqual(len([c for c in client.calls if c[0] == "play"]), before,
                          "第一次读到停止不该立刻切歌")
@@ -1707,7 +1741,8 @@ class PluginVoiceTest(unittest.TestCase):
             self.assertIn("多云", reply)
             self.assertTrue(plugin._chat_active())
             self.assertEqual(len(plugin.__dict__["_chat_history"]), 2)
-            self.assertNotIn("chat_history", [key for key in plugin._store])
+            self.assertNotIn("chat_history",
+                             [p.stem for p in (plugin._data_dir / "state").glob("*.json")])
             self.assertFalse([call for call in client.calls if call[0] == "play"])
         finally:
             self._without_assistant()

@@ -35,9 +35,12 @@ LICENSE.upstream-songloft-miot.txt。
 
 from __future__ import annotations
 
+import json
+import os
 import random
 import re
 import secrets
+import tempfile
 import threading
 import time
 from datetime import datetime
@@ -254,7 +257,7 @@ class XiaoaiSpeaker(_PluginBase):
         "库内目录浏览与搜索、远程命令；播放直链由插件签名限时，不依赖媒体服务器。"
     )
     plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/xiaoai.svg"
-    plugin_version = "0.5.8"
+    plugin_version = "0.5.9"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "xiaoaispeaker_"
@@ -513,8 +516,66 @@ class XiaoaiSpeaker(_PluginBase):
     def _save_config(self) -> None:
         self.update_config(self._config_snapshot())
 
+    # ---------------- 状态落盘 ----------------
+    #
+    # 这三个方法覆盖了宿主 PluginBase 的同名接口：宿主把状态写进 plugindata 表，
+    # 而本机实测这个插件在该表里一条记录都没有（签名密钥、小米登录票据、设备缓存、
+    # 队列、收藏在重载或重启后全部蒸发 —— 于是每次重载都换一把签名密钥，先发出去的
+    # 直链莫名 403，小米那边也每次都被当成新设备要求二次校验）。落到插件自己的数据
+    # 目录就不必赌宿主的会话是否提交，文件在不在也一眼能验。
+    # plugin_id 参数保留但不用：数据目录本来就按插件隔离。
+
+    def _state_file(self, key: str) -> Path:
+        # key 全是本模块里的常量，仍旧先洗一遍才敢拿去当文件名
+        safe = re.sub(r"[^0-9A-Za-z_.-]", "_", str(key or "")) or "state"
+        return Path(self.get_data_path()) / "state" / f"{safe}.json"
+
+    def save_data(self, key: str, value: Any, plugin_id: Optional[str] = None) -> None:  # type: ignore[override]
+        """写状态：落到临时文件再原子替换，权限 0600（里面有登录票据）。"""
+        target = self._state_file(key)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            handle = tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=target.parent,
+                prefix=f".{target.name}.", suffix=".tmp", delete=False)
+            try:
+                with handle:
+                    json.dump(value, handle, ensure_ascii=False)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.chmod(handle.name, 0o600)
+                os.replace(handle.name, target)
+            except BaseException:
+                os.unlink(handle.name)
+                raise
+        except Exception as exc:  # pragma: no cover - 只剩磁盘与权限会走到这里
+            logger.warning(f"{_LOG} 状态写入失败 {key}: {exc}")
+
+    def get_data(self, key: Optional[str] = None,  # type: ignore[override]
+                 plugin_id: Optional[str] = None) -> Any:
+        """读状态：文件缺失或读不动都按「没有」处理，坏文件不该把播放台整个拖死。"""
+        if not key:
+            return None
+        try:
+            with open(self._state_file(key), "r", encoding="utf-8") as handle:
+                return json.load(handle)
+        except Exception:
+            return None
+
+    def del_data(self, key: Optional[str] = None,  # type: ignore[override]
+                 plugin_id: Optional[str] = None) -> None:
+        """删状态（退出登录用）：删不干净等于票据还留在盘上。"""
+        if not key:
+            return
+        try:
+            os.unlink(self._state_file(key))
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            logger.warning(f"{_LOG} 状态删除失败 {key}: {exc}")
+
     def _secret(self) -> str:
-        """直链签名密钥：首次随机生成后留在本机，换密钥会让已发出的链接失效（可接受）。"""
+        """直链签名密钥：首次随机生成后留在插件数据目录，换密钥会让已发出的链接失效（可接受）。"""
         data = self.get_data(_KEY_SECRET)
         if isinstance(data, str) and data:
             return data
