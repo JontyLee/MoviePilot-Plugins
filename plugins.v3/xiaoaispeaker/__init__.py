@@ -3189,8 +3189,15 @@ class XiaoaiSpeaker(_PluginBase):
             f" Range={request.headers.get('Range') or '无'}"
         )
         if not _media.verify_sign(self._secret(), path, expires, signature):
-            # 不另开一行：上面那句已经记下来的是谁在取什么，这里只补「为什么拒」
-            logger.warning(f"{_LOG} /stream 拒绝 {Path(path).name or '未给出路径'}: 签名不对或已过期")
+            # 不另开一行：上面那句已经记下来的是谁在取什么，这里只补「为什么拒」。
+            # 三种原因得分开：链接整段读不出来 = 中间层把 URL 弄坏了，不是过期
+            if not signature:
+                why = "链接读不出内容（URL 被中间层改写过？）"
+            elif expires < int(time.time()):
+                why = "已过期"
+            else:
+                why = "签名不对（密钥换过，或链接是别人拼的）"
+            logger.warning(f"{_LOG} /stream 拒绝 {Path(path).name or '未给出路径'}: {why}")
             return JSONResponse(status_code=403, content={"detail": "链接无效或已过期"})
         real, reason = _media.resolve_playable(path, self._roots(), self._exts())
         if not real:
