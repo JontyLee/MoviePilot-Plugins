@@ -3177,7 +3177,17 @@ class XiaoaiSpeaker(_PluginBase):
     def api_stream(self, request: Request):
         """GET /stream?path=&exp=&sig= —— 校验签名后按 Range 回文件（开了转码则回 mp3 流）。"""
         path, expires, signature = _media.parse_query(dict(request.query_params))
+        # 先记「有人来取流」这一行：音箱不出声时，「云端没让它来」和「来了但没解码」
+        # 是两个方向，而这句只有在真机上才分得出来。记文件名与请求端，不记签名
+        client = getattr(request, "client", None)
+        logger.info(
+            f"{_LOG} /stream 请求进来: {Path(path).name or '未给出路径'}"
+            f" 来自={getattr(client, 'host', '') or '未知'}"
+            f" Range={request.headers.get('Range') or '无'}"
+        )
         if not _media.verify_sign(self._secret(), path, expires, signature):
+            # 不另开一行：上面那句已经记下来的是谁在取什么，这里只补「为什么拒」
+            logger.warning(f"{_LOG} /stream 拒绝 {Path(path).name or '未给出路径'}: 签名不对或已过期")
             return JSONResponse(status_code=403, content={"detail": "链接无效或已过期"})
         real, reason = _media.resolve_playable(path, self._roots(), self._exts())
         if not real:
