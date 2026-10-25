@@ -436,8 +436,9 @@ function removeGroup(name: string) {
         <v-btn size="small" variant="text" @click="manual = { user_id: '', pass_token: '' }">清空</v-btn>
       </div>
       <div class="text-caption text-grey mt-1">
-        在浏览器里登录过 <span class="text-no-wrap">i.api.xiaomi.com</span> 后，从 DevTools 的 Cookie 里
-        取 userId 和 passToken 两项的<b>值</b>填进来（别粘整串 cookie）。凭据只发给本插件用于换票，
+        先在浏览器里登录 <span class="text-no-wrap">account.xiaomi.com</span>（passToken 只在这个域的
+        Cookie 里，别处复制的都是死票），再从 DevTools 的 Cookie 里取 userId 和 passToken 两项的
+        <b>值</b>填进来（别粘整串 cookie）。凭据只发给本插件用于换票，
         不写日志、接口不回显。后端拿 passToken 现换一张活票，换到了才算这串凭据真的有效。
       </div>
     </template>

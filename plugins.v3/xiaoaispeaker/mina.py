@@ -539,9 +539,14 @@ class XiaoaiAuth:
         _collect_cookies(response, self.cookies)
         data = _parse_json(response.text or "")
         if not data or int(data.get("code") or 0) != 0:
-            return (LOGIN_FAILED, None,
-                    f"静默续期失败：code={(data or {}).get('code')}, "
-                    f"desc={(data or {}).get('desc') or '未知原因'}")
+            # 小米在这里只给一个数字码（70016 = 登录验证失败），真正把话说清楚的
+            # 是 desc/description，两个都可能有：只报一个等于让人猜是票据过期还是粘错
+            reason = (data or {}).get("desc") or (data or {}).get("description") or "未知原因"
+            logger.warning(
+                f"{_LOG_TAG} passToken 静默续期被拒: code={(data or {}).get('code')}, "
+                f"reason={reason}, fields={sorted(str(k) for k in (data or {}))}"
+            )
+            return LOGIN_FAILED, None, f"静默续期失败：code={(data or {}).get('code')}, desc={reason}"
         location = data.get("location")
         if not location:
             return LOGIN_FAILED, None, "静默续期没有返回跳转地址"

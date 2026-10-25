@@ -1364,9 +1364,9 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
             })
           ]),
           _cache[22] || (_cache[22] = _createElementVNode$3("div", { class: "text-caption text-grey mt-1" }, [
-            _createTextVNode$3(" 在浏览器里登录过 "),
-            _createElementVNode$3("span", { class: "text-no-wrap" }, "i.api.xiaomi.com"),
-            _createTextVNode$3(" 后，从 DevTools 的 Cookie 里 取 userId 和 passToken 两项的"),
+            _createTextVNode$3(" 先在浏览器里登录 "),
+            _createElementVNode$3("span", { class: "text-no-wrap" }, "account.xiaomi.com"),
+            _createTextVNode$3("（passToken 只在这个域的 Cookie 里，别处复制的都是死票），再从 DevTools 的 Cookie 里取 userId 和 passToken 两项的 "),
             _createElementVNode$3("b", null, "值"),
             _createTextVNode$3("填进来（别粘整串 cookie）。凭据只发给本插件用于换票， 不写日志、接口不回显。后端拿 passToken 现换一张活票，换到了才算这串凭据真的有效。 ")
           ], -1))
@@ -1660,7 +1660,7 @@ const _sfc_main$3 = /* @__PURE__ */ _defineComponent$3({
   }
 });
 
-const ConfigLogin = /* @__PURE__ */ _export_sfc(_sfc_main$3, [["__scopeId", "data-v-ebbcc718"]]);
+const ConfigLogin = /* @__PURE__ */ _export_sfc(_sfc_main$3, [["__scopeId", "data-v-8458096a"]]);
 
 const {defineComponent:_defineComponent$2} = await importShared('vue');
 

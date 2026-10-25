@@ -250,7 +250,7 @@ class XiaoaiSpeaker(_PluginBase):
         "库内目录浏览与搜索、远程命令；播放直链由插件签名限时，不依赖媒体服务器。"
     )
     plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/xiaoai.svg"
-    plugin_version = "0.5.1"
+    plugin_version = "0.5.2"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "xiaoaispeaker_"
@@ -2046,17 +2046,20 @@ class XiaoaiSpeaker(_PluginBase):
                             logged_in=bool(self._token()))
         if not user_id or not pass_token:
             return LoginOut(state="failed",
-                            message="userId 与 passToken 都要填：在浏览器里登录过 "
-                                    "i.api.xiaomi.com 后，从 DevTools 的 Cookie 里复制这两项的值",
+                            message="userId 与 passToken 都要填：先在浏览器里登录 "
+                                    "account.xiaomi.com，再从 DevTools 的 Cookie 里复制这两项的值"
+                                    "（passToken 只在这个域的 Cookie 里）",
                             logged_in=bool(self._token()))
         state, token, message = exchange_pass_token(
             pass_token, user_id, device_id=self._device_id(), login_method="manual")
         if state != LOGIN_SUCCESS or not token:
-            # 小米只回一个 70016，说不清是票据过期、复制错了还是没带对 userId
+            # 小米在这里只给一个码（70016 = 登录验证失败），最常见的原因是票据是从
+            # 别的域复制的、或者那次网页登录已经被风控作废
             logger.warning(f"{_LOG} Cookie 登录换票失败: {message or '小米没有给出原因'}")
             return LoginOut(state="failed",
                             message=f"passToken 换票失败：{message}；"
-                                    "重新复制一份 userId 与 passToken，或改用扫码登录",
+                                    "重新登录 account.xiaomi.com 后从该域的 Cookie 里复制这两项，"
+                                    "仍不行就改用扫码登录",
                             logged_in=bool(self._token()))
         count = self._save_token(token)
         return LoginOut(state=LOGIN_SUCCESS,
