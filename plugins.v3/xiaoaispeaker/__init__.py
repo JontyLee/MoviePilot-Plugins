@@ -80,7 +80,10 @@ from .mina import (
 from .schemas import (
     ActionOut,
     BrowseOut,
+    CommandKindOut,
     CommandOut,
+    CommandParamOut,
+    CommandWordOut,
     CommandsIn,
     CommandsOut,
     ConfigIn,
@@ -146,6 +149,7 @@ _KEY_FAVORITES = "favorites"
 _KEY_TIMER = "sleep_timer"
 _KEY_MEMORY = "voice_memory"
 _KEY_COMMANDS = "voice_commands"
+_KEY_WORDS = "voice_words"
 _KEY_GROUPS = "device_groups"
 _KEY_TASKS = "scheduled_tasks"
 _KEY_TASK_LOGS = "schedule_logs"
@@ -257,7 +261,7 @@ class XiaoaiSpeaker(_PluginBase):
         "库内目录浏览与搜索、远程命令；播放直链由插件签名限时，不依赖媒体服务器。"
     )
     plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/xiaoai.svg"
-    plugin_version = "0.6.0"
+    plugin_version = "0.6.1"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "xiaoaispeaker_"
@@ -1288,8 +1292,9 @@ class XiaoaiSpeaker(_PluginBase):
 
     def _match_voice(self, text: str) -> Optional[_voice.Match]:
         """一句话的三级判定：口令表 → 记忆表 → AI 兜底（顺序与上游一致）。"""
-        match = _voice.match_command(text, _voice.enabled_commands(self._voice_commands()))
+        match = _voice.match_command(text, self._voice_table())
         if match is not None:
+            match.argument = match.argument or self._word_fallback(match)
             return match
         if self._voice_memory:
             replay = self._memory().lookup("play_song", text)
@@ -1307,6 +1312,92 @@ class XiaoaiSpeaker(_PluginBase):
             return [row[0] for row in _voice.DEFAULT_COMMANDS]
         return sorted({str(row[0]) for row in _voice.DEFAULT_COMMANDS
                        if raw.get(str(row[0]), True)})
+
+    def _clean_word(self, row: Any) -> Optional[Dict[str, str]]:
+        """把用户填的一条口令收敛成 {keyword, kind, param, argument}；不合规给 None。"""
+        if not isinstance(row, dict):
+            return None
+        keyword = _voice.clean_keyword(row.get("keyword"))
+        kind = str(row.get("kind") or "").strip()
+        params = _voice.kind_params().get(kind)
+        if not keyword or params is None:
+            return None
+        param = str(row.get("param") or "")
+        if param not in params:
+            param = params[0]
+        argument = " ".join(str(row.get("argument") or "").split())[:40]
+        return {"keyword": keyword, "kind": kind, "param": param, "argument": argument}
+
+    # 光把整句说完还不够、必须补「内容」的口令：点歌类要歌名，绝对音量要数值，播报要文本
+    _WORD_NEEDS_ARGUMENT = frozenset(
+        ("play_song", "play_artist", "play_playlist", "play_index", "tts"))
+
+    def _word_gap(self, word: Dict[str, str]) -> str:
+        """这句口令光说完够不够：够 → 空串；不够 → 提示语（调用方拒绝收录）。
+
+        「播放周杰伦」这种整句就是内容的口令，不加兜底内容命中了也只是一次空搜索，
+        所以要么让用户把内容填进来（命中后又只说了这句时拿它当内容），要么不收。
+        """
+        if word["argument"]:
+            return ""
+        needs = word["kind"] in self._WORD_NEEDS_ARGUMENT or (
+            word["kind"] == "set_volume" and word["param"] == "absolute")
+        if not needs:
+            return ""
+        hit = _voice.match_command(word["keyword"],
+                                   [(word["kind"], word["param"], (word["keyword"],))])
+        if hit is not None and hit.argument:
+            return ""
+        return f"「{word['keyword']}」说完还得补上内容，请把「内容」一起填上"
+
+    def _word_fallback(self, match: _voice.Match) -> str:
+        """自定义口令命中后没有尾随内容时，用用户给这条口令配的默认内容。"""
+        if match.argument:
+            return ""
+        for word in self._voice_words():
+            if word["keyword"] == match.keyword and word["kind"] == match.kind:
+                return word["argument"]
+        return ""
+
+    def _voice_words(self) -> List[Dict[str, str]]:
+        """用户自己加的口令；存在插件自己的文件里，跟类型开关分开。"""
+        raw = self.get_data(_KEY_WORDS)
+        rows = raw.get("items") if isinstance(raw, dict) else None
+        if not isinstance(rows, list):
+            return []
+        out: List[Dict[str, str]] = []
+        for row in rows:
+            item = self._clean_word(row)
+            if item and item not in out:
+                out.append(item)
+        return out[:_voice.MAX_CUSTOM_KEYWORDS]
+
+    def _hidden_words(self) -> List[str]:
+        """被用户从内置表里藏起来的口令词。"""
+        raw = self.get_data(_KEY_WORDS)
+        rows = raw.get("hidden") if isinstance(raw, dict) else None
+        if not isinstance(rows, list):
+            return []
+        out: List[str] = []
+        for row in rows:
+            word = _voice.clean_keyword(row)
+            if word and word not in out:
+                out.append(word)
+        return out
+
+    def _save_words(self, items: List[Dict[str, str]], hidden: List[str]) -> None:
+        self.save_data(_KEY_WORDS, {"items": items, "hidden": hidden,
+                                    "at": self._now_text()})
+
+    def _voice_table(self) -> List[Tuple[str, str, Tuple[str, ...]]]:
+        """当前生效的口令表：内置表按类型开关过滤，扣掉被藏起来的词，再叠上用户加的词。
+
+        用户加的词只能挂到内置已有的类型/子参数上，匹配完走的还是同一套执行代码，
+        自定义口令拿不到比内置更大的动作。
+        """
+        return _voice.build_commands(self._voice_commands(),
+                                     self._voice_words(),
+                                     self._hidden_words())
 
     def _assistant(self) -> _intents.Assistant:
         """MoviePilot 配置里的那个智能助手：每次新建都重读一遍宿主配置。
@@ -2671,7 +2762,7 @@ class XiaoaiSpeaker(_PluginBase):
                 "methods": ["GET"],
                 "auth": "bear",
                 "response_model": CommandsOut,
-                "summary": "口令表与开关",
+                "summary": "口令表：类型开关、内置口令、自定义口令",
             },
             {
                 "path": "/commands",
@@ -2679,7 +2770,7 @@ class XiaoaiSpeaker(_PluginBase):
                 "methods": ["POST"],
                 "auth": "bear",
                 "response_model": CommandsOut,
-                "summary": "保存启用的口令类型",
+                "summary": "改口令表：开关类型、加删自定义口令、藏起或还原内置口令",
             },
             {
                 "path": "/groups",
@@ -2982,29 +3073,122 @@ class XiaoaiSpeaker(_PluginBase):
         return out
 
     def api_commands(self) -> CommandsOut:
-        """GET /commands —— 口令表与每类的开关。"""
+        """GET /commands —— 口令表：类型开关、内置口令（标出被藏起来的）、用户自定义口令。"""
         enabled = set(self._voice_commands())
+        hidden = set(self._hidden_words())
         rows: List[CommandOut] = []
-        seen: set = set()
+        by_kind: Dict[str, CommandOut] = {}
         for row in _voice.default_commands():
             kind = str(row.get("kind"))
-            if kind in seen:
-                continue
-            seen.add(kind)
-            rows.append(CommandOut(kind=kind, label=_voice.COMMAND_LABELS.get(kind, kind),
-                                   enabled=kind in enabled,
-                                   keywords=[str(word) for word in (row.get("keywords") or [])][:6]))
-        return CommandsOut(items=rows)
+            words = [str(word) for word in (row.get("keywords") or [])]
+            item = by_kind.get(kind)
+            if item is None:
+                item = CommandOut(kind=kind, label=_voice.COMMAND_LABELS.get(kind, kind),
+                                  enabled=kind in enabled)
+                by_kind[kind] = item
+                rows.append(item)
+            # 一个类型可能有几行子参数（播放方式、音量、收藏）：词并到一起显示
+            item.keywords = item.keywords + [word for word in words
+                                             if word not in item.keywords]
+            item.hidden = sorted(set(item.hidden) | ({word for word in words if word in hidden}))
+        customs = [CommandWordOut(
+            keyword=word["keyword"], kind=word["kind"], param=word["param"],
+            argument=word["argument"],
+            label=_voice.COMMAND_LABELS.get(word["kind"], word["kind"]),
+            param_label=_voice.PARAM_LABELS.get(word["param"], word["param"]))
+            for word in self._voice_words()]
+        kinds = [CommandKindOut(
+            kind=row["kind"], label=row["label"],
+            params=[CommandParamOut(value=param["value"], label=param["label"])
+                    for param in row["params"]])
+            for row in _voice.kind_options()]
+        return CommandsOut(items=rows, customs=customs, kinds=kinds)
 
     def api_commands_save(self, payload: CommandsIn) -> CommandsOut:
-        """POST /commands —— {enabled:[类型…]}；enabled 省略或为 null 表示全部恢复。"""
-        known = {str(row[0]) for row in _voice.DEFAULT_COMMANDS}
-        if payload.enabled is None:
+        """POST /commands —— 改哪块给哪块：类型开关、加口令、删口令、藏内置、还原内置。
+
+        每个字段都是"没给就不动"，所以前端一次只改一件事也不会把别的改没；
+        `reset` 才是把类型开关和自定义口令一起恢复默认。
+        """
+        if payload.reset:
             self.save_data(_KEY_COMMANDS, {})
-        else:
+            self.save_data(_KEY_WORDS, {})
+            out = self.api_commands()
+            out.message = "口令表已全部恢复默认"
+            return out
+
+        known = {str(row[0]) for row in _voice.DEFAULT_COMMANDS}
+        if payload.enabled is not None:
             wanted = {str(item).strip() for item in payload.enabled} & known
             self.save_data(_KEY_COMMANDS, {kind: (kind in wanted) for kind in known})
-        return self.api_commands()
+
+        items = self._voice_words()
+        hidden = self._hidden_words()
+        builtins = {str(word) for row in _voice.DEFAULT_COMMANDS for word in row[2]}
+        done: List[str] = []
+        skipped: List[str] = []
+
+        index = {word["keyword"]: pos for pos, word in enumerate(items)}
+        for row in payload.add or []:
+            word = self._clean_word(row if isinstance(row, dict)
+                                    else row.model_dump())
+            if not word:
+                skipped.append("有一条口令太空、太长或者类型不对，没收")
+                continue
+            text = word["keyword"]
+            if text in builtins:
+                skipped.append(f"「{text}」内置本来就认，不用加")
+                continue
+            gap = self._word_gap(word)
+            if gap:
+                skipped.append(gap)
+                continue
+            if text in hidden:
+                hidden.remove(text)
+            current = items[index[text]] if text in index else None
+            if current == word:
+                skipped.append(f"「{text}」已经加过了")
+            elif current is not None:
+                items[index[text]] = word
+                done.append(f"「{text}」改成了{_voice.COMMAND_LABELS.get(word['kind'], word['kind'])}")
+            elif len(items) >= _voice.MAX_CUSTOM_KEYWORDS:
+                skipped.append(f"自定义口令最多 {_voice.MAX_CUSTOM_KEYWORDS} 条，「{text}」没加进去")
+            else:
+                items.append(word)
+                index[text] = len(items) - 1
+                done.append(f"已加「{text}」")
+
+        for text in (payload.remove or []) + (payload.hide or []):
+            word = _voice.clean_keyword(text)
+            if not word:
+                continue
+            if word in index:
+                items.pop(index.pop(word))
+                index = {row["keyword"]: pos for pos, row in enumerate(items)}
+                done.append(f"已删「{word}」")
+            elif word in builtins and word not in hidden:
+                hidden.append(word)
+                done.append(f"已藏起「{word}」")
+            else:
+                skipped.append(f"「{word}」不在口令表里")
+
+        for text in payload.unhide or []:
+            word = _voice.clean_keyword(text)
+            if word in hidden:
+                hidden.remove(word)
+                done.append(f"已还原「{word}」")
+
+        if payload.add or payload.remove or payload.hide or payload.unhide:
+            self._save_words(items, hidden)
+
+        out = self.api_commands()
+        tips = list(dict.fromkeys(skipped))
+        out.message = "、".join(done[:6]) if done else (
+            "类型开关已保存" if payload.enabled is not None
+            else "、".join(tips[:3]) or "没有要改的")
+        if done and tips:
+            out.message += "；" + "、".join(tips[:2])
+        return out
 
     def _file_out(self, song: Any) -> FileOut:
         return FileOut(name=str(getattr(song, "name", "") or ""),

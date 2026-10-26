@@ -1,6 +1,6 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import Config from './__federation_expose_Config-D5QK-6zC.js';
-import { a as activeLine, s as statusColor, m as modeText, f as fmtSeconds, M as MODE_ITEMS, b as fmtSize, c as fmtTime, q as query, _ as _export_sfc } from './types-CVxekbje.js';
+import Config from './__federation_expose_Config-ca-ajX8B.js';
+import { a as activeLine, s as statusColor, m as modeText, b as baseSourceText, c as sourceText, f as fmtSeconds, M as MODE_ITEMS, d as fmtSize, e as fmtTime, w as why, q as query, _ as _export_sfc } from './_plugin-vue_export-helper-n7BX2Zw6.js';
 
 const {defineComponent:_defineComponent} = await importShared('vue');
 
@@ -497,7 +497,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
           volume.value = playing.value.volume ?? cfg.value.default_volume ?? 50;
         }
       } catch (e) {
-        if (showError) notify(`状态加载失败：${e?.message || e}`, "error");
+        if (showError) notify(`状态加载失败：${why(e)}`, "error");
       }
     }
     let timer = null;
@@ -549,7 +549,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
         emit("action");
         return res;
       } catch (e) {
-        notify(`${label}失败：${e?.message || e}`, "error");
+        notify(`${label}失败：${why(e)}`, "error");
         return null;
       } finally {
         busy.value = "";
@@ -617,7 +617,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       try {
         lyric.value = await props.api.get(`${base.value}/lyric${query({ path })}`);
       } catch (e) {
-        notify(`歌词读取失败：${e?.message || e}`, "error");
+        notify(`歌词读取失败：${why(e)}`, "error");
       } finally {
         lyricBusy.value = false;
       }
@@ -687,7 +687,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
         favorites.value = res?.items || [];
         favoriteReason.value = res?.message || "";
       } catch (e) {
-        notify(`收藏读取失败：${e?.message || e}`, "error");
+        notify(`收藏读取失败：${why(e)}`, "error");
       }
     }
     const favoritePaths = computed(() => new Set(favorites.value.map((item) => item.path)));
@@ -718,7 +718,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
         playlists.value = res?.items || [];
         playlistReason.value = res?.message || "";
       } catch (e) {
-        notify(`歌单读取失败：${e?.message || e}`, "error");
+        notify(`歌单读取失败：${why(e)}`, "error");
       }
     }
     async function openPlaylistRows(row) {
@@ -728,7 +728,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       try {
         playlistSongs.value = await props.api.get(`${base.value}/playlist${query({ playlist_id: row.id })}`);
       } catch (e) {
-        notify(`歌单展开失败：${e?.message || e}`, "error");
+        notify(`歌单展开失败：${why(e)}`, "error");
       } finally {
         busy.value = "";
       }
@@ -777,7 +777,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       try {
         browse.value = await props.api.get(`${base.value}/browse${query({ path })}`);
       } catch (e) {
-        notify(`目录加载失败：${e?.message || e}`, "error");
+        notify(`目录加载失败：${why(e)}`, "error");
       }
     }
     async function runSearch() {
@@ -789,7 +789,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       try {
         search.value = await props.api.get(`${base.value}/search${query({ keyword: text })}`);
       } catch (e) {
-        notify(`搜索失败：${e?.message || e}`, "error");
+        notify(`搜索失败：${why(e)}`, "error");
       }
     }
     function onKeyword() {
@@ -814,34 +814,19 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
     const testText = ref("");
     const testExecute = ref(false);
     const testResult = ref(null);
-    const KIND_TEXT = {
-      play_song: "点歌",
-      play_artist: "歌手",
-      play_album: "专辑",
-      play_playlist: "歌单",
-      play_favorites: "收藏",
-      play_random: "随机",
-      play_history: "刚才那首",
-      search: "搜索",
-      pause: "暂停",
-      resume: "继续",
-      stop: "停止",
-      next: "下一首",
-      prev: "上一首",
-      play_index: "按序号切曲",
-      volume: "音量",
-      volume_up: "音量加",
-      volume_down: "音量减",
-      mute: "静音",
-      set_mode: "播放方式",
-      sleep_timer: "定时停止",
-      cancel_sleep_timer: "取消定时",
-      query_sleep_timer: "查定时",
-      speak: "播报",
-      unknown: "未识别"
-    };
+    const kindLabels = ref({});
+    async function loadKindLabels() {
+      if (Object.keys(kindLabels.value).length) return;
+      try {
+        const res = await props.api.get(`${base.value}/commands`);
+        kindLabels.value = Object.fromEntries(
+          (res?.kinds || []).map((item) => [item.kind, item.label])
+        );
+      } catch (e) {
+      }
+    }
     function kindText(kind) {
-      return KIND_TEXT[kind] || kind;
+      return kindLabels.value[kind] || (Object.keys(kindLabels.value).length ? "未识别的动作" : kind || "未识别");
     }
     function matchSource(matched) {
       const hit = (matched || "").trim();
@@ -851,12 +836,13 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
     }
     async function loadVoiceDetail() {
       voiceReloading.value = true;
+      void loadKindLabels();
       try {
         const res = await props.api.get(`${base.value}/voice`);
         voiceRecords.value = res?.records || [];
         voiceCommandsOn.value = res?.commands || [];
       } catch (e) {
-        notify(`语音状态读取失败：${e?.message || e}`, "error");
+        notify(`语音状态读取失败：${why(e)}`, "error");
       } finally {
         voiceReloading.value = false;
       }
@@ -886,7 +872,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
         if (!res.ok) notify(res.message || "这句话插件没有接手", "warning");
         else if (testExecute.value) await loadStatus(false);
       } catch (e) {
-        notify(`测试失败：${e?.message || e}`, "error");
+        notify(`测试失败：${why(e)}`, "error");
       } finally {
         busy.value = "";
       }
@@ -1156,7 +1142,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                       !cfg.value.default_device_id ? (_openBlock(), _createElementBlock("span", _hoisted_32, "（未指定，落第一台在线）")) : _createCommentVNode("", true)
                     ]),
                     groups.value.length ? (_openBlock(), _createElementBlock("div", _hoisted_33, " 分组 " + _toDisplayString(groups.value.length) + " 组：" + _toDisplayString(groups.value.map((g) => `${g.name}(${g.devices.length || g.device_ids.length})`).join("、")), 1)) : _createCommentVNode("", true),
-                    needsMusicApiCount.value ? (_openBlock(), _createElementBlock("div", _hoisted_34, _toDisplayString(needsMusicApiCount.value) + " 台只支持 play_music，直链可能被当成电台播放 ", 1)) : _createCommentVNode("", true)
+                    needsMusicApiCount.value ? (_openBlock(), _createElementBlock("div", _hoisted_34, _toDisplayString(needsMusicApiCount.value) + " 台只支持 play_music 接口，直链可能被当成电台播放 ", 1)) : _createCommentVNode("", true)
                   ]),
                   _createElementVNode("div", _hoisted_35, [
                     _createElementVNode("div", _hoisted_36, [
@@ -1260,7 +1246,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                     }, _toDisplayString(cfg.value.base_url_effective || "没有可用地址，音箱必然拉不到流"), 9, _hoisted_52),
                     _createElementVNode("div", _hoisted_53, [
                       cfg.value.base_url_source ? (_openBlock(), _createElementBlock(_Fragment, { key: 0 }, [
-                        _createTextVNode("来自 " + _toDisplayString(cfg.value.base_url_source), 1)
+                        _createTextVNode("来自 " + _toDisplayString(_unref(baseSourceText)(cfg.value.base_url_source)), 1)
                       ], 64)) : _createCommentVNode("", true),
                       _createTextVNode(" ｜库内 " + _toDisplayString(cfg.value.dir_count) + " 个目录 ", 1),
                       cfg.value.missing_dirs?.length ? (_openBlock(), _createElementBlock(_Fragment, { key: 1 }, [
@@ -1344,7 +1330,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                         _createElementVNode("div", _hoisted_64, [
                           _createTextVNode(_toDisplayString(playing.value.device_name || "未选择设备") + " ", 1),
                           playing.value.source ? (_openBlock(), _createElementBlock(_Fragment, { key: 0 }, [
-                            _createTextVNode("｜来源 " + _toDisplayString(playing.value.source), 1)
+                            _createTextVNode("｜来源 " + _toDisplayString(_unref(sourceText)(playing.value.source)), 1)
                           ], 64)) : _createCommentVNode("", true),
                           playing.value.updated_at ? (_openBlock(), _createElementBlock(_Fragment, { key: 1 }, [
                             _createTextVNode("｜" + _toDisplayString(playing.value.updated_at), 1)
@@ -2634,6 +2620,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const AppPage = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-e5db056c"]]);
+const AppPage = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-c66f2ebd"]]);
 
 export { AppPage as default };

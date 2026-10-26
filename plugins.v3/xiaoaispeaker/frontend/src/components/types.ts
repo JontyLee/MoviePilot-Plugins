@@ -179,6 +179,24 @@ export interface CommandRow {
   label: string
   enabled: boolean
   keywords: string[]
+  hidden: string[]
+}
+
+/** 用户自己加的一条口令（/commands 的 customs）。 */
+export interface CommandWord {
+  keyword: string
+  kind: string
+  param: string
+  argument: string
+  label: string
+  param_label: string
+}
+
+/** 自定义口令能挂到的类型（/commands 的 kinds）。 */
+export interface CommandKindOption {
+  kind: string
+  label: string
+  params: { value: string; label: string }[]
 }
 
 export interface FavoriteRow {
@@ -424,4 +442,47 @@ export function query(params: Record<string, any>): string {
     pairs.push(`${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`)
   }
   return pairs.length ? `?${pairs.join('&')}` : ''
+}
+
+/**
+ * 把一次抛出来的错翻成中文。
+ *
+ * 前端拿到的原始串全是浏览器/axios 的英文（Network Error、Failed to fetch、
+ * status code 500…），直接拼进提示等于在中文页面上贴一句英文日志；用户看得懂的
+ * 是「连不上」还是「后端 500」，不是库里的措辞。翻不出来的原样留着，好排查。
+ */
+export function why(e: any): string {
+  const text = String(e?.message ?? e?.response?.statusText ?? e ?? '').trim()
+  const lower = text.toLowerCase()
+  if (!text || /network error|failed to fetch|load failed|err_connection|econnrefused/.test(lower)) {
+    return '连不上插件后端（主程序没起来，或者页面和插件不在同一台机器）'
+  }
+  if (/canceled|abort/.test(lower)) return '请求取消了'
+  if (/timeout|exceeded/.test(lower)) return '请求超时，接口没按时回话'
+  const code = lower.match(/status code (\d{3})/)?.[1] || String(e?.response?.status || '')
+  if (code === '401' || code === '403') return '没有权限（登录状态失效，重新登录主程序）'
+  if (code === '404') return '接口找不到（插件可能刚改过，重载后再试）'
+  if (code) return `后端返回 ${code}`
+  return text
+}
+
+/** 播放来源的内部值 → 中文。 */
+export function sourceText(source?: string): string {
+  const map: Record<string, string> = {
+    library: '曲库文件',
+    url: '外部直链',
+    playlist: '歌单',
+    sidecar: '同目录歌词文件',
+    tag: '音频内嵌标签'
+  }
+  return map[source || ''] || source || ''
+}
+
+/** 拉流地址是谁给的：config=插件自己配的，app_domain=主程序的外部访问地址。 */
+export function baseSourceText(source?: string): string {
+  const map: Record<string, string> = {
+    config: '插件配置',
+    app_domain: '主程序外部地址'
+  }
+  return map[source || ''] || source || ''
 }

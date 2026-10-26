@@ -1,11 +1,3 @@
-const _export_sfc = (sfc, props) => {
-  const target = sfc.__vccOpts || sfc;
-  for (const [key, val] of props) {
-    target[key] = val;
-  }
-  return target;
-};
-
 const TASK_ACTIONS = [
   { title: "播放歌单", value: "play_playlist" },
   { title: "歌单从某首播", value: "play_playlist_from" },
@@ -74,5 +66,44 @@ function query(params) {
   }
   return pairs.length ? `?${pairs.join("&")}` : "";
 }
+function why(e) {
+  const text = String(e?.message ?? e?.response?.statusText ?? e ?? "").trim();
+  const lower = text.toLowerCase();
+  if (!text || /network error|failed to fetch|load failed|err_connection|econnrefused/.test(lower)) {
+    return "连不上插件后端（主程序没起来，或者页面和插件不在同一台机器）";
+  }
+  if (/canceled|abort/.test(lower)) return "请求取消了";
+  if (/timeout|exceeded/.test(lower)) return "请求超时，接口没按时回话";
+  const code = lower.match(/status code (\d{3})/)?.[1] || String(e?.response?.status || "");
+  if (code === "401" || code === "403") return "没有权限（登录状态失效，重新登录主程序）";
+  if (code === "404") return "接口找不到（插件可能刚改过，重载后再试）";
+  if (code) return `后端返回 ${code}`;
+  return text;
+}
+function sourceText(source) {
+  const map = {
+    library: "曲库文件",
+    url: "外部直链",
+    playlist: "歌单",
+    sidecar: "同目录歌词文件",
+    tag: "音频内嵌标签"
+  };
+  return map[source || ""] || source || "";
+}
+function baseSourceText(source) {
+  const map = {
+    config: "插件配置",
+    app_domain: "主程序外部地址"
+  };
+  return map[source || ""] || source || "";
+}
 
-export { MODE_ITEMS as M, TASK_ACTIONS as T, WEEK_DAYS as W, _export_sfc as _, activeLine as a, fmtSize as b, fmtTime as c, fmtSeconds as f, modeText as m, query as q, statusColor as s, taskNeedsPlaylist as t };
+const _export_sfc = (sfc, props) => {
+  const target = sfc.__vccOpts || sfc;
+  for (const [key, val] of props) {
+    target[key] = val;
+  }
+  return target;
+};
+
+export { MODE_ITEMS as M, TASK_ACTIONS as T, WEEK_DAYS as W, _export_sfc as _, activeLine as a, baseSourceText as b, sourceText as c, fmtSize as d, fmtTime as e, fmtSeconds as f, modeText as m, query as q, statusColor as s, taskNeedsPlaylist as t, why as w };

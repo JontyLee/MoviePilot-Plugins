@@ -5,7 +5,8 @@ import {
   type Device,
   fmtSeconds,
   fmtSize,
-  query
+  query,
+  why
 } from './types'
 
 interface HostToast {
@@ -65,7 +66,7 @@ async function loadStatus(showError = true) {
       volume.value = playing.value.volume
     }
   } catch (e: any) {
-    if (showError) notify(`状态加载失败：${e?.message || e}`, 'error')
+    if (showError) notify(`状态加载失败：${why(e)}`, 'error')
   }
 }
 
@@ -78,7 +79,7 @@ async function post(path: string, body: Record<string, any>, label: string) {
     await loadStatus(false)
     emit('action')
   } catch (e: any) {
-    notify(`${label}失败：${e?.message || e}`, 'error')
+    notify(`${label}失败：${why(e)}`, 'error')
   } finally {
     busy.value = ''
   }

@@ -8,7 +8,8 @@ import {
   MODE_ITEMS,
   TASK_ACTIONS,
   WEEK_DAYS,
-  taskNeedsPlaylist
+  taskNeedsPlaylist,
+  why
 } from './types'
 
 /**
@@ -92,7 +93,7 @@ async function load() {
     tasks.value = taskRes?.items || []
     playlists.value = playlistRes?.items || []
   } catch (e: any) {
-    notify(`定时任务读取失败：${e?.message || e}`, 'error')
+    notify(`定时任务读取失败：${why(e)}`, 'error')
   }
 }
 

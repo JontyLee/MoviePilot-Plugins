@@ -114,7 +114,9 @@ class SpeechListener:
             try:
                 records = client.get_latest_ask(device_id, str(device.get("hardware") or ""))
             except Exception as err:  # 鉴权失效之类，整轮退避但不打断其它设备
-                self._last_error = f"{device_id}: {err}"
+                # 异常原文多半是英文的 HTTP 串，页面上直接挂出来就是一句英文提示
+                name = str(device.get("name") or device.get("alias") or "").strip() or device_id[:8]
+                self._last_error = f"{name}：读不到对话记录（{err}）"
                 continue
             if records is None:
                 # 取不到 ≠ 没有记录：基线不推进，下一轮还会看到这些话

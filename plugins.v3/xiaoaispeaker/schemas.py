@@ -440,10 +440,50 @@ class VoiceOut(BaseModel):
     reply: str = ""
 
 
+class CommandWordIn(BaseModel):
+    """一条要新增的自定义口令：一句话 → 已有类型（+ 说完就用的默认内容）。"""
+
+    keyword: str
+    kind: str
+    param: str = ""
+    argument: str = ""
+
+
 class CommandsIn(BaseModel):
-    """口令开关：enabled 为要启用的口令类型列表，缺省（null）表示全开。"""
+    """口令表编辑。每个字段都是"给才动，不给不动"，一次提交可以只做一件事。"""
 
     enabled: Optional[List[str]] = None
+    add: List[CommandWordIn] = Field(default_factory=list)
+    remove: List[str] = Field(default_factory=list)
+    hide: List[str] = Field(default_factory=list)
+    unhide: List[str] = Field(default_factory=list)
+    reset: bool = False
+
+
+class CommandParamOut(BaseModel):
+    """一个子参数选项。"""
+
+    value: str
+    label: str = ""
+
+
+class CommandKindOut(BaseModel):
+    """可选的口令类型（下拉框用）。"""
+
+    kind: str
+    label: str = ""
+    params: List[CommandParamOut] = Field(default_factory=list)
+
+
+class CommandWordOut(BaseModel):
+    """一条自定义口令。"""
+
+    keyword: str
+    kind: str
+    param: str = ""
+    argument: str = ""
+    label: str = ""
+    param_label: str = ""
 
 
 class CommandOut(BaseModel):
@@ -453,6 +493,7 @@ class CommandOut(BaseModel):
     label: str = ""
     enabled: bool = True
     keywords: List[str] = Field(default_factory=list)
+    hidden: List[str] = Field(default_factory=list)
 
 
 class CommandsOut(BaseModel):
@@ -461,6 +502,8 @@ class CommandsOut(BaseModel):
     ok: bool = True
     message: str = ""
     items: List[CommandOut] = Field(default_factory=list)
+    customs: List[CommandWordOut] = Field(default_factory=list)
+    kinds: List[CommandKindOut] = Field(default_factory=list)
 
 
 class LyricLineOut(BaseModel):

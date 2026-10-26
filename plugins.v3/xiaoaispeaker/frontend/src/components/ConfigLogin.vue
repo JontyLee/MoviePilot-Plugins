@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from 'vue'
 import { useApi } from './useApi'
-import { type Device, type GroupRow, type LoginResult, type QrResult } from './types'
+import { type Device, type GroupRow, type LoginResult, type QrResult, why } from './types'
 
 /**
  * 配置页的第一项：小米账号 → 登录 → 取音箱 → 选默认音箱（顺带设备分组）。
@@ -175,7 +175,7 @@ async function askQr(action: 'start' | 'poll'): Promise<QrResult | null> {
     if (seq !== qrSeq || !res) return null
     return res
   } catch (e: any) {
-    if (seq === qrSeq) notify(`扫码请求失败：${e?.message || e}`, 'error')
+    if (seq === qrSeq) notify(`扫码请求失败：${why(e)}`, 'error')
     return null
   }
 }
@@ -269,7 +269,7 @@ async function refreshDevices() {
     else notify(`设备列表已刷新，共 ${(res?.devices || []).length} 台`)
     emit('changed')
   } catch (e: any) {
-    notify(`设备刷新失败：${e?.message || e}`, 'error')
+    notify(`设备刷新失败：${why(e)}`, 'error')
   } finally {
     busy.value = ''
   }
@@ -429,10 +429,10 @@ function removeGroup(name: string) {
     <template v-else>
       <div class="d-flex mt-3" style="gap: 8px; flex-wrap: wrap">
         <v-text-field v-model="manual.user_id" density="compact" hide-details clearable
-                      label="User ID" placeholder="浏览器 Cookie 里的 userId"
+                      label="用户 ID" placeholder="浏览器 Cookie 里的 userId"
                       style="min-width: 160px; flex: 1 1 160px" @keyup.enter="submitManual" />
         <v-text-field v-model="manual.pass_token" density="compact" hide-details clearable
-                      label="Pass Token" placeholder="浏览器 Cookie 里的 passToken"
+                      label="通行令牌" placeholder="浏览器 Cookie 里的 passToken"
                       style="min-width: 220px; flex: 2 1 260px" @keyup.enter="submitManual" />
         <v-btn size="small" variant="tonal" color="primary" :loading="busy === '校验票据'"
                prepend-icon="mdi-key-variant" @click="submitManual">校验并使用
@@ -502,7 +502,7 @@ function removeGroup(name: string) {
               </div>
               <div class="text-caption text-grey">
                 {{ device.model || device.hardware || '未知型号' }}｜{{ device.presence === 'online' ? '在线' : '离线' }}
-                <template v-if="device.needs_music_api">｜该型号需走 play_music，直链可能被当成电台播放</template>
+                <template v-if="device.needs_music_api">｜该型号需走 play_music 接口，直链可能被当成电台播放</template>
               </div>
             </div>
             <v-btn size="small" variant="text" color="primary" :disabled="device.is_default"

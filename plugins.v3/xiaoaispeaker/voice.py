@@ -67,8 +67,9 @@ BUILTIN_STOP_KEYWORDS = (
     "别播了", "别放了", "停一下", "关机", "暂停", "停止", "pause", "stop",
 )
 
-# 口令表：(类型, 子参数, 关键词…)。侧栏页可按类型开关，关键词本身不开放编辑，
-# 因为一旦允许自定义就得处理与内置词的抢占冲突，收益不抵复杂度。
+# 口令表：(类型, 子参数, 关键词…)。内置关键词由这里维护，用户可以另加自己的口令
+# （见 build_commands）：匹配按"最长关键词优先"，自定义词和内置词撞车时长的赢，
+# 不需要额外的冲突处理。
 DEFAULT_COMMANDS: Tuple[Tuple[str, str, Tuple[str, ...]], ...] = (
     ("play_playlist", "", ("播放歌单", "放歌单", "播放列表", "来一个歌单",
                            "来一首歌单", "放一首歌单", "播放这个歌单")),
@@ -130,6 +131,25 @@ COMMAND_LABELS: Dict[str, str] = {
     "tts": "播报",
 }
 
+# 子参数的中文名：口令编辑器按类型列参数用，不参与匹配
+PARAM_LABELS: Dict[str, str] = {
+    "": "整句即命令",
+    "absolute": "后面跟数值",
+    "up": "调大",
+    "down": "调小",
+    "random": "随机",
+    "order": "顺序",
+    "loop": "列表循环",
+    "single": "单曲循环",
+    "single_play": "单曲播放",
+    "add": "做",
+    "remove": "反向",
+}
+
+# 用户自定义口令的上限与单条长度：口令表是每次判定都过一遍的，堆多了白白变慢
+MAX_CUSTOM_KEYWORDS = 60
+MAX_KEYWORD_LEN = 20
+
 
 class Match:
     """一次口令匹配的结果。"""
@@ -166,6 +186,72 @@ def enabled_commands(enabled: Optional[Iterable[str]] = None,
         return list(DEFAULT_COMMANDS)
     allowed = set(enabled)
     return [row for row in DEFAULT_COMMANDS if row[0] in allowed]
+
+
+def kind_params() -> Dict[str, List[str]]:
+    """每个口令类型在内置表里用过的子参数，顺序照内置表。"""
+    out: Dict[str, List[str]] = {}
+    for kind, param, _keywords in DEFAULT_COMMANDS:
+        params = out.setdefault(kind, [])
+        if param not in params:
+            params.append(param)
+    return out
+
+
+def kind_options() -> List[Dict[str, Any]]:
+    """口令类型清单（中文名 + 可选子参数），口令编辑器的下拉框用。"""
+    return [
+        {"kind": kind,
+         "label": COMMAND_LABELS.get(kind, kind),
+         "params": [{"value": param,
+                     "label": PARAM_LABELS.get(param, param)}
+                    for param in params]}
+        for kind, params in kind_params().items()
+    ]
+
+
+def clean_keyword(text: Any) -> str:
+    """收敛一条用户填的口令：压空白、剥尾标点、限长度；不合规回空串（调用方丢弃）。"""
+    word = _TRAILING_PUNCT_RE.sub("", " ".join(str(text or "").split()))
+    if not word or len(word) > MAX_KEYWORD_LEN:
+        return ""
+    if not re.search(r"[\u4e00-\u9fffA-Za-z0-9]", word):
+        # 整串都是标点的口令永远匹配不上，还能把内置词全遮掉，直接不收
+        return ""
+    return word
+
+
+def build_commands(enabled: Optional[Iterable[str]] = None,
+                   customs: Optional[Sequence[Dict[str, Any]]] = None,
+                   hidden: Optional[Iterable[str]] = None,
+                   ) -> List[Tuple[str, str, Tuple[str, ...]]]:
+    """真正生效的口令表 = 内置表（按类型开关过滤、扣掉被藏起来的词）+ 用户自己加的口令。
+
+    用户加的词只挂到内置已有的类型/子参数上：匹配之后走的还是同一套执行代码，
+    自定义口令拿不到比内置更大的权限，也不会造出新的动作。
+    """
+    blocked = {clean_keyword(item) for item in (hidden or [])}
+    rows: List[Tuple[str, str, Tuple[str, ...]]] = []
+    for kind, param, keywords in enabled_commands(enabled):
+        left = tuple(word for word in keywords if word not in blocked)
+        if left:
+            rows.append((kind, param, left))
+    allowed_params = kind_params()
+    taken = {word for _k, _p, words in rows for word in words}
+    for item in customs or []:
+        if not isinstance(item, dict):
+            continue
+        word = clean_keyword(item.get("keyword"))
+        kind = str(item.get("kind") or "")
+        if not word or kind not in allowed_params or word in taken:
+            continue
+        params = allowed_params[kind]
+        param = str(item.get("param") or "")
+        if param not in params:
+            param = params[0]
+        taken.add(word)
+        rows.append((kind, param, (word,)))
+    return rows
 
 
 def normalize_utterance(text: str) -> str:

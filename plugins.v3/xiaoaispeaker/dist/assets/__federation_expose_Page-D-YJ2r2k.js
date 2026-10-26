@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { f as fmtSeconds, b as fmtSize, q as query, _ as _export_sfc } from './types-CVxekbje.js';
+import { f as fmtSeconds, d as fmtSize, w as why, q as query, _ as _export_sfc } from './_plugin-vue_export-helper-n7BX2Zw6.js';
 
 const {defineComponent:_defineComponent} = await importShared('vue');
 
@@ -111,7 +111,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
           volume.value = playing.value.volume;
         }
       } catch (e) {
-        if (showError) notify(`状态加载失败：${e?.message || e}`, "error");
+        if (showError) notify(`状态加载失败：${why(e)}`, "error");
       }
     }
     async function post(path, body, label) {
@@ -123,7 +123,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
         await loadStatus(false);
         emit("action");
       } catch (e) {
-        notify(`${label}失败：${e?.message || e}`, "error");
+        notify(`${label}失败：${why(e)}`, "error");
       } finally {
         busy.value = "";
       }
@@ -480,6 +480,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const Page = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-403e21a5"]]);
+const Page = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-df0676f1"]]);
 
 export { Page as default };

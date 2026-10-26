@@ -5,7 +5,7 @@
  * api.post 的返回形状各端点不一样，这里只按 {ok, message} 这一套通用约定播报。
  */
 import { computed, inject, ref } from 'vue'
-import { query } from './types'
+import { query, why } from './types'
 
 interface HostToast {
   error(msg: string): unknown
@@ -49,7 +49,7 @@ export function useApi(props: ApiProps, after?: () => void) {
       if (res) after?.()
       return res
     } catch (e: any) {
-      notify(`${label}失败：${e?.message || e}`, 'error')
+      notify(`${label}失败：${why(e)}`, 'error')
       return null
     } finally {
       busy.value = ''
@@ -62,7 +62,7 @@ export function useApi(props: ApiProps, after?: () => void) {
     try {
       return await (props.api as MoviePilotApi).post(`${base.value}${path}`, body)
     } catch (e: any) {
-      notify(`${label}失败：${e?.message || e}`, 'error')
+      notify(`${label}失败：${why(e)}`, 'error')
       return null
     } finally {
       busy.value = ''

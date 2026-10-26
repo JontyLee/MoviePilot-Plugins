@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { type Device } from './types'
+import { type Device, baseSourceText, why } from './types'
 
 const props = defineProps({
   api: { type: Object as () => MoviePilotApi, default: () => ({}) as any },
@@ -130,7 +130,7 @@ async function loadConfig() {
     fillFromStatus(await (props.api as MoviePilotApi).get(`${base.value}/status`))
     emit('loaded')
   } catch (e: any) {
-    emit('toast', `配置读取失败：${e?.message || e}`, 'error')
+    emit('toast', `配置读取失败：${why(e)}`, 'error')
   }
 }
 
@@ -141,7 +141,7 @@ async function save() {
     emit('toast', '配置已保存', 'success')
     emit('saved')
   } catch (e: any) {
-    emit('toast', `保存失败：${e?.message || e}`, 'error')
+    emit('toast', `保存失败：${why(e)}`, 'error')
   } finally {
     saving.value = false
   }
@@ -185,7 +185,7 @@ defineExpose({ form, dirty, saving, loaded, cfg, navText, loadConfig, save })
                       placeholder="http://192.168.1.10:3000，留空用主程序设置" />
         <div class="xcf-hint">
           实际使用：<b>{{ cfg?.base_url_effective || '拿不到可用地址（音箱必然拉不到流）' }}</b>
-          <template v-if="cfg?.base_url_source">｜来自 {{ cfg.base_url_source }}</template>
+          <template v-if="cfg?.base_url_source">｜来自 {{ baseSourceText(cfg?.base_url_source) }}</template>
         </div>
         <div class="xcf-grid mt-3">
           <v-text-field v-model.number="form.stream_ttl" type="number" min="300" max="259200"

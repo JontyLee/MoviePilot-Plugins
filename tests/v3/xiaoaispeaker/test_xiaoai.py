@@ -1700,7 +1700,75 @@ class PluginVoiceTest(unittest.TestCase):
         stopped = plugin.api_voice_test(x.schemas.VoiceIn(text="暂停播放", execute=True))
         self.assertEqual(stopped.kind, "stop")
         plugin.api_commands_save(x.schemas.CommandsIn(enabled=None))
-        self.assertIn("favorite", plugin._voice_commands(), "enabled=null 要恢复全开")
+        self.assertEqual(sorted(plugin._voice_commands()), ["next", "set_volume"],
+                         "enabled=null 只表示不动开关，别把用户改过的表清掉")
+        plugin.api_commands_save(x.schemas.CommandsIn(reset=True))
+        self.assertIn("favorite", plugin._voice_commands(), "reset 才恢复全开")
+
+    def test_custom_commands_match_and_persist(self) -> None:
+        """用户自己加的口令进表、参与判定，整句说完就能播。"""
+        plugin, _ = self._plugin()
+        out = plugin.api_voice_test(x.schemas.VoiceIn(text="播放周杰伦", execute=False))
+        self.assertFalse(out.ok, "没加自定义词前，这句话口令表判不出来")
+        saved = plugin.api_commands_save(x.schemas.CommandsIn(
+            add=[x.schemas.CommandWordIn(keyword="播放周杰伦", kind="play_artist",
+                                         argument="周杰伦")]))
+        self.assertTrue(saved.ok)
+        self.assertEqual([item.keyword for item in saved.customs], ["播放周杰伦"])
+        out = plugin.api_voice_test(x.schemas.VoiceIn(text="播放周杰伦", execute=True))
+        self.assertTrue(out.ok)
+        self.assertEqual(out.kind, "play_artist")
+        self.assertEqual(out.matched, "播放周杰伦", "该报自定义词本身，而不是内置词")
+        self.assertEqual(out.argument, "周杰伦")
+        # 口令后面还带内容时，用说的话而不是用户配的默认内容
+        self.assertEqual(plugin._match_voice("播放周杰伦 稻香").argument, "稻香")
+        # 最长关键词优先：加了更长的口令后，那句话走新的语义
+        plugin.api_commands_save(x.schemas.CommandsIn(
+            add=[x.schemas.CommandWordIn(keyword="播放周杰伦的歌", kind="play_playlist",
+                                         argument="范特西")]))
+        self.assertEqual(plugin._match_voice("播放周杰伦的歌").kind, "play_playlist")
+        stored = plugin._voice_words()
+        self.assertEqual({item["keyword"] for item in stored},
+                         {"播放周杰伦", "播放周杰伦的歌"}, "自定义口令要落盘并能读回")
+        self.assertEqual([item["argument"] for item in stored], ["周杰伦", "范特西"])
+
+    def test_custom_commands_are_validated(self) -> None:
+        """自定义口令只认已有类型、限长度，内置本来就认的词与空话不重复收。"""
+        plugin, _ = self._plugin()
+        saved = plugin.api_commands_save(x.schemas.CommandsIn(add=[
+            x.schemas.CommandWordIn(keyword="   ", kind="play_song"),
+            x.schemas.CommandWordIn(keyword="我要听林俊杰", kind="no_such_kind"),
+            x.schemas.CommandWordIn(keyword="？？", kind="play_song"),
+            x.schemas.CommandWordIn(keyword="太一" * 40, kind="play_song"),
+            # 整句本身就是内容，不填内容收进来也只会空跑一次搜索
+            x.schemas.CommandWordIn(keyword="播放郭富城", kind="play_song"),
+        ]))
+        self.assertEqual(saved.customs, [], "五款不合规的都不该进表")
+        self.assertIn("还得补上内容", saved.message)
+        plugin.api_commands_save(x.schemas.CommandsIn(
+            add=[x.schemas.CommandWordIn(keyword="来杯音乐", kind="set_volume",
+                                         param="absolute", argument="20")]))
+        again = plugin.api_commands_save(x.schemas.CommandsIn(
+            add=[x.schemas.CommandWordIn(keyword="来杯音乐", kind="set_volume",
+                                         param="absolute", argument="20")]))
+        self.assertEqual(len(again.customs), 1, "重复添加不该堆两条")
+        self.assertIn("已经加过了", again.message)
+        removed = plugin.api_commands_save(x.schemas.CommandsIn(remove=["来杯音乐"]))
+        self.assertEqual(removed.customs, [])
+
+    def test_hidden_commands_gate_matching(self) -> None:
+        """藏掉某个内置口令词后那句话不再被接手，还原后恢复。"""
+        plugin, _ = self._plugin()
+        self.assertEqual(plugin._match_voice("不喜欢的").kind, "favorite")
+        saved = plugin.api_commands_save(x.schemas.CommandsIn(hide=["不喜欢的"]))
+        row = [item for item in saved.items if item.kind == "favorite"][0]
+        self.assertIn("不喜欢的", row.hidden)
+        self.assertIn("不喜欢的", row.keywords, "藏起来的词仍要回给前端，不然没法还原")
+        self.assertIsNone(plugin._match_voice("不喜欢的"),
+                          "藏掉的词不该再命中，别的收藏口令仍要能命中")
+        self.assertEqual(plugin._match_voice("取消收藏").kind, "favorite")
+        plugin.api_commands_save(x.schemas.CommandsIn(unhide=["不喜欢的"]))
+        self.assertEqual(plugin._match_voice("不喜欢的").kind, "favorite")
 
     def _host_assistant(self, reply: str = "", **settings) -> "_stub_env._LLMHelper":
         """把宿主「设定 → AI 大模型」桩成可用，并排好下一次要回的话。"""

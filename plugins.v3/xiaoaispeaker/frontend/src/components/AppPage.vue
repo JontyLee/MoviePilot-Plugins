@@ -27,7 +27,10 @@ import {
   modeText,
   MODE_ITEMS,
   activeLine,
-  query
+  sourceText,
+  baseSourceText,
+  query,
+  why
 } from './types'
 
 interface HostToast {
@@ -170,7 +173,7 @@ async function loadStatus(showError = true) {
       volume.value = playing.value.volume ?? cfg.value.default_volume ?? 50
     }
   } catch (e: any) {
-    if (showError) notify(`状态加载失败：${e?.message || e}`, 'error')
+    if (showError) notify(`状态加载失败：${why(e)}`, 'error')
   }
 }
 
@@ -241,7 +244,7 @@ async function post(path: string, body: Record<string, any>, label: string) {
     emit('action')
     return res
   } catch (e: any) {
-    notify(`${label}失败：${e?.message || e}`, 'error')
+    notify(`${label}失败：${why(e)}`, 'error')
     return null
   } finally {
     busy.value = ''
@@ -324,7 +327,7 @@ async function loadLyric(path: string) {
   try {
     lyric.value = await (props.api as MoviePilotApi).get(`${base.value}/lyric${query({ path })}`)
   } catch (e: any) {
-    notify(`歌词读取失败：${e?.message || e}`, 'error')
+    notify(`歌词读取失败：${why(e)}`, 'error')
   } finally {
     lyricBusy.value = false
   }
@@ -424,7 +427,7 @@ async function loadFavorites() {
     favorites.value = res?.items || []
     favoriteReason.value = res?.message || ''
   } catch (e: any) {
-    notify(`收藏读取失败：${e?.message || e}`, 'error')
+    notify(`收藏读取失败：${why(e)}`, 'error')
   }
 }
 
@@ -463,7 +466,7 @@ async function loadPlaylists() {
     playlists.value = res?.items || []
     playlistReason.value = res?.message || ''
   } catch (e: any) {
-    notify(`歌单读取失败：${e?.message || e}`, 'error')
+    notify(`歌单读取失败：${why(e)}`, 'error')
   }
 }
 
@@ -476,7 +479,7 @@ async function openPlaylistRows(row: PlaylistRow) {
     playlistSongs.value = await (props.api as MoviePilotApi)
       .get(`${base.value}/playlist${query({ playlist_id: row.id })}`)
   } catch (e: any) {
-    notify(`歌单展开失败：${e?.message || e}`, 'error')
+    notify(`歌单展开失败：${why(e)}`, 'error')
   } finally {
     busy.value = ''
   }
@@ -537,7 +540,7 @@ async function loadBrowse(path: string) {
   try {
     browse.value = await (props.api as MoviePilotApi).get(`${base.value}/browse${query({ path })}`)
   } catch (e: any) {
-    notify(`目录加载失败：${e?.message || e}`, 'error')
+    notify(`目录加载失败：${why(e)}`, 'error')
   }
 }
 
@@ -550,7 +553,7 @@ async function runSearch() {
   try {
     search.value = await (props.api as MoviePilotApi).get(`${base.value}/search${query({ keyword: text })}`)
   } catch (e: any) {
-    notify(`搜索失败：${e?.message || e}`, 'error')
+    notify(`搜索失败：${why(e)}`, 'error')
   }
 }
 
@@ -582,18 +585,23 @@ const testText = ref('')
 const testExecute = ref(false)
 const testResult = ref<VoiceState | null>(null)
 
-const KIND_TEXT: Record<string, string> = {
-  play_song: '点歌', play_artist: '歌手', play_album: '专辑', play_playlist: '歌单',
-  play_favorites: '收藏', play_random: '随机', play_history: '刚才那首',
-  search: '搜索', pause: '暂停', resume: '继续', stop: '停止', next: '下一首',
-  prev: '上一首', play_index: '按序号切曲', volume: '音量', volume_up: '音量加',
-  volume_down: '音量减', mute: '静音', set_mode: '播放方式', sleep_timer: '定时停止',
-  cancel_sleep_timer: '取消定时', query_sleep_timer: '查定时', speak: '播报',
-  unknown: '未识别'
+// 类型中文名只认后端那一份表。本地再抄一份，后端加一类这里就漏一个英文值。
+const kindLabels = ref<Record<string, string>>({})
+
+async function loadKindLabels() {
+  if (Object.keys(kindLabels.value).length) return
+  try {
+    const res: any = await (props.api as MoviePilotApi).get(`${base.value}/commands`)
+    kindLabels.value = Object.fromEntries(
+      (res?.kinds || []).map((item: any) => [item.kind, item.label]))
+  } catch (e) {
+    // 拉不到就照旧显示，不值得为个标签弹错误
+  }
 }
 
 function kindText(kind: string) {
-  return KIND_TEXT[kind] || kind
+  return kindLabels.value[kind]
+    || (Object.keys(kindLabels.value).length ? '未识别的动作' : kind || '未识别')
 }
 
 // 判定来源：口令表是确定的，记忆表和 AI 兜底都可能变。把这三者分清，
@@ -607,12 +615,13 @@ function matchSource(matched: string) {
 
 async function loadVoiceDetail() {
   voiceReloading.value = true
+  void loadKindLabels()
   try {
     const res: VoiceState = await (props.api as MoviePilotApi).get(`${base.value}/voice`)
     voiceRecords.value = res?.records || []
     voiceCommandsOn.value = res?.commands || []
   } catch (e: any) {
-    notify(`语音状态读取失败：${e?.message || e}`, 'error')
+    notify(`语音状态读取失败：${why(e)}`, 'error')
   } finally {
     voiceReloading.value = false
   }
@@ -644,7 +653,7 @@ async function runVoiceTest() {
     if (!res.ok) notify(res.message || '这句话插件没有接手', 'warning')
     else if (testExecute.value) await loadStatus(false)
   } catch (e: any) {
-    notify(`测试失败：${e?.message || e}`, 'error')
+    notify(`测试失败：${why(e)}`, 'error')
   } finally {
     busy.value = ''
   }
@@ -827,7 +836,7 @@ function paneBadge(key: Pane): number {
                 分组 {{ groups.length }} 组：{{ groups.map(g => `${g.name}(${g.devices.length || g.device_ids.length})`).join('、') }}
               </div>
               <div v-if="needsMusicApiCount" class="xai-ov-sub text-warning">
-                {{ needsMusicApiCount }} 台只支持 play_music，直链可能被当成电台播放
+                {{ needsMusicApiCount }} 台只支持 play_music 接口，直链可能被当成电台播放
               </div>
             </div>
 
@@ -912,7 +921,7 @@ function paneBadge(key: Pane): number {
                 {{ cfg.base_url_effective || '没有可用地址，音箱必然拉不到流' }}
               </div>
               <div class="xai-ov-sub">
-                <template v-if="cfg.base_url_source">来自 {{ cfg.base_url_source }}</template>
+                <template v-if="cfg.base_url_source">来自 {{ baseSourceText(cfg.base_url_source) }}</template>
                 ｜库内 {{ cfg.dir_count }} 个目录
                 <template v-if="cfg.missing_dirs?.length">｜读不到：{{ cfg.missing_dirs.join('、') }}</template>
               </div>
@@ -970,7 +979,7 @@ function paneBadge(key: Pane): number {
                 </div>
                 <div class="xai-hero-sub">
                   {{ playing.device_name || '未选择设备' }}
-                  <template v-if="playing.source">｜来源 {{ playing.source }}</template>
+                  <template v-if="playing.source">｜来源 {{ sourceText(playing.source) }}</template>
                   <template v-if="playing.updated_at">｜{{ playing.updated_at }}</template>
                 </div>
                 <div v-if="playing.error" class="text-caption text-error">{{ playing.error }}</div>

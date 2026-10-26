@@ -5,7 +5,7 @@ import ConfigLogin from './ConfigLogin.vue'
 import ConfigCommands from './ConfigCommands.vue'
 import ConfigTasks from './ConfigTasks.vue'
 import { useApi } from './useApi'
-import { type Device, type Status } from './types'
+import { type Device, type Status, why } from './types'
 
 const props = defineProps({
   api: { type: Object as () => MoviePilotApi, default: () => ({}) as any },
@@ -39,7 +39,7 @@ const panes = [
   { key: 'voice', title: '语音与 AI', icon: 'mdi-microphone-message',
     desc: '监听哪几台音箱的对话、命中后怎么打断与播报、AI 兜底' },
   { key: 'commands', title: '语音口令表', icon: 'mdi-key-variant',
-    desc: '每一类口令开不开放，以及它认哪些说法' },
+    desc: '每一类口令开不开放、内置说法藏不藏，还能加自己的说法' },
   { key: 'tasks', title: '定时任务', icon: 'mdi-clock-outline',
     desc: '到点播什么、哪几天、哪台音箱、什么播放方式' }
 ] as const
@@ -86,7 +86,7 @@ async function loadStatus() {
     status.value = await get('/status') as Status
     emit('updated')
   } catch (e: any) {
-    notify(`状态读取失败：${e?.message || e}`, 'error')
+    notify(`状态读取失败：${why(e)}`, 'error')
   } finally {
     loaded.value = true
   }
