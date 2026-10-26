@@ -1540,6 +1540,9 @@ class PluginVoiceTest(unittest.TestCase):
         self.assertTrue(out.ok)
         self.assertEqual(out.kind, "play_song")
         self.assertIn("稻香", out.argument)
+        # 判定的说法要说清「没执行」，页面上那行小字直接用它
+        self.assertIn("未执行", out.message)
+        self.assertEqual(out.matched, "我想听")
         self.assertFalse([call for call in client.calls if call[0] == "play"])
 
     def test_voice_test_execute_plays_and_queues_album(self) -> None:
@@ -1547,6 +1550,7 @@ class PluginVoiceTest(unittest.TestCase):
         out = plugin.api_voice_test(x.schemas.VoiceIn(text="我想听稻香", execute=True))
         self.assertTrue(out.ok)
         self.assertIn("播放", out.reply)
+        self.assertIn("已执行", out.message)
         self.assertTrue([call for call in client.calls if call[0] == "play"])
         state = plugin._queue_state()
         self.assertEqual(len(state["items"]), 3, "同专辑连播：点一首要把这碟排进队列")
@@ -1556,6 +1560,8 @@ class PluginVoiceTest(unittest.TestCase):
         plugin, client = self._plugin()
         out = plugin.api_voice_test(x.schemas.VoiceIn(text="今天天气怎么样", execute=True))
         self.assertFalse(out.ok)
+        # 没命中时必须讲清是哪一级没接手：这个夹具没开 AI 兜底
+        self.assertIn("AI 兜底没开", out.message)
         self.assertFalse([call for call in client.calls if call[0] == "play"])
 
     def test_voice_interrupt_and_hint_before_search(self) -> None:

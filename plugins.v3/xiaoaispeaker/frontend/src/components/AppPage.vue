@@ -183,6 +183,9 @@ function startPolling() {
   timer = setInterval(() => {
     if (document.hidden) return
     loadStatus(false)
+    // 语音这一栏的「听到了什么」不在 /status 里，开着这栏时跟着轮询一起刷，
+    // 不然刚对音箱说的话要手动切一次栏才看得见
+    if (pane.value === 'voice') void loadVoiceDetail()
   }, 5000)
 }
 
@@ -574,6 +577,7 @@ async function refreshLibrary() {
 
 const voiceRecords = ref<VoiceRecord[]>([])
 const voiceCommandsOn = ref<string[]>([])
+const voiceReloading = ref(false)
 const testText = ref('')
 const testExecute = ref(false)
 const testResult = ref<VoiceState | null>(null)
@@ -592,15 +596,32 @@ function kindText(kind: string) {
   return KIND_TEXT[kind] || kind
 }
 
+// 判定来源：口令表是确定的，记忆表和 AI 兜底都可能变。把这三者分清，
+// 「同一句话两次结果不一样」才看得出是哪一级在起作用。口令表那种情况由小标签说明，不重复一句。
+function matchSource(matched: string) {
+  const hit = (matched || '').trim()
+  if (hit === 'ai') return '口令表没命中，是大模型判的：它每次给的答案可能有出入'
+  if (hit === 'memory') return '口令表没命中，是记忆里上次这么说播过同一首'
+  return ''
+}
+
 async function loadVoiceDetail() {
+  voiceReloading.value = true
   try {
     const res: VoiceState = await (props.api as MoviePilotApi).get(`${base.value}/voice`)
     voiceRecords.value = res?.records || []
     voiceCommandsOn.value = res?.commands || []
-    testResult.value = res ? { ...res, records: [] } : null
   } catch (e: any) {
     notify(`语音状态读取失败：${e?.message || e}`, 'error')
+  } finally {
+    voiceReloading.value = false
   }
+}
+
+// 监听列表里给的是设备 ID，人认的是名字
+function shortId(id: string) {
+  const hit = devices.value.find(item => item.device_id === id)
+  return hit ? (hit.name || hit.alias || id) : `${String(id).slice(0, 8)}…`
 }
 
 async function runVoiceTest() {
@@ -614,8 +635,13 @@ async function runVoiceTest() {
     const res: VoiceState = await (props.api as MoviePilotApi).post(`${base.value}/voice/test`, {
       text, execute: testExecute.value
     })
-    testResult.value = res || null
-    if (res && !res.ok) notify(res.message || '没有命中口令', 'warning')
+    if (!res) {
+      notify('判定接口没有返回内容', 'error')
+      return
+    }
+    testResult.value = res
+    voiceCommandsOn.value = res.commands || voiceCommandsOn.value
+    if (!res.ok) notify(res.message || '这句话插件没有接手', 'warning')
     else if (testExecute.value) await loadStatus(false)
   } catch (e: any) {
     notify(`测试失败：${e?.message || e}`, 'error')
@@ -674,13 +700,16 @@ function paneBadge(key: Pane): number {
   <v-card flat class="xai-page">
     <div class="xai-head">
       <div class="xai-brand">
-        <span class="xai-brand-mark">
+        <span class="xai-brand-mark" :class="{ 'xai-brand-live': playing.status === 1 }">
           <v-icon :icon="playing.status === 1 ? 'mdi-speaker-wireless' : 'mdi-speaker'" size="20" />
         </span>
         <div class="xai-brand-text">
-          <div class="xai-brand-title">小爱音箱</div>
+          <div class="xai-brand-title">小爱音箱
+            <span class="xai-brand-ver">v{{ status.version || '-' }}</span>
+          </div>
           <div class="xai-brand-sub">
-            库内音频直链推送 · v{{ status.version || '-' }} · {{ syncText }}
+            <span class="xai-sync-dot" :class="{ 'xai-sync-fresh': syncedAt && Date.now() - syncedAt < 12000 }" />
+            库内音频直链推送 · {{ syncText }}
           </div>
         </div>
       </div>
@@ -691,6 +720,14 @@ function paneBadge(key: Pane): number {
                   :icon="status.logged_in ? 'mdi-check-circle-outline' : 'mdi-alert-circle-outline'" />
           {{ status.token_expired ? '票据过期' : status.logged_in ? '已登录' : '未登录' }}
         </span>
+        <span class="xai-pill" :class="`xai-pill-${devices.length ? 'ok' : 'idle'}`">
+          <v-icon size="13" icon="mdi-speaker-multiple" />
+          {{ devices.length ? `${onlineCount}/${devices.length} 台在线` : '没有设备' }}
+        </span>
+        <span class="xai-pill" :class="`xai-pill-${voice.enabled ? 'ok' : 'idle'}`">
+          <v-icon size="13" icon="mdi-microphone-outline" />
+          {{ voice.enabled ? `监听中 · ${voice.handled} 句` : '监听未开' }}
+        </span>
         <span class="xai-pill" :class="`xai-pill-${playing.status === 1 ? 'ok' : 'idle'}`">
           <v-icon size="13"
                   :icon="playing.status === 1 ? 'mdi-play' : 'mdi-pause'" />
@@ -699,8 +736,8 @@ function paneBadge(key: Pane): number {
       </div>
       <v-btn icon="mdi-refresh" size="small" variant="text" :loading="loading || !!busy"
              @click="loadStatus()" />
-      <v-btn size="small" variant="tonal" class="text-none ml-1" prepend-icon="mdi-cog-outline"
-             @click="configDialog = true">插件配置
+      <v-btn size="small" variant="flat" class="text-none ml-1" prepend-icon="mdi-cog-outline"
+             color="primary" @click="configDialog = true">插件配置
       </v-btn>
     </div>
 
@@ -721,23 +758,26 @@ function paneBadge(key: Pane): number {
 
     <div class="xai-body">
       <nav class="xai-nav">
-        <v-list density="compact" nav class="py-2">
-          <v-list-item
-            v-for="item in paneItems"
-            :key="item.key"
-            :active="pane === item.key"
-            color="primary"
-            rounded="lg"
-            class="xai-nav-item"
-            @click="switchPane(item.key)"
-          >
-            <template #prepend><v-icon :icon="item.icon" class="mr-2" size="18" /></template>
-            <v-list-item-title>{{ item.title }}</v-list-item-title>
-            <template #append>
-              <span v-if="paneBadge(item.key)" class="xai-nav-badge">{{ paneBadge(item.key) }}</span>
-            </template>
-          </v-list-item>
-        </v-list>
+        <div class="xai-nav-cap">运行面板</div>
+        <button v-for="item in paneItems" :key="item.key" type="button"
+                class="xai-nav-item" :class="{ 'xai-nav-item-on': pane === item.key }"
+                :title="item.desc" @click="switchPane(item.key)">
+          <v-icon :icon="item.icon" size="17" class="xai-nav-icon" />
+          <span class="xai-nav-label">{{ item.title }}</span>
+          <span v-if="paneBadge(item.key)" class="xai-nav-badge">{{ paneBadge(item.key) }}</span>
+        </button>
+        <div class="xai-nav-foot">
+          <div class="xai-nav-cap">此刻</div>
+          <div class="xai-nav-meter">
+            <span>队列</span><b>{{ queue.total }}</b>
+          </div>
+          <div class="xai-nav-meter">
+            <span>曲库</span><b>{{ library.songs }}</b>
+          </div>
+          <div class="xai-nav-meter">
+            <span>接手</span><b>{{ voice.handled }}</b>
+          </div>
+        </div>
       </nav>
 
       <section class="xai-content">
@@ -1357,27 +1397,46 @@ function paneBadge(key: Pane): number {
 
         <!-- 语音控制 -->
         <div v-show="pane === 'voice'" class="xai-pane">
-          <v-card variant="outlined" class="xai-card pa-4">
-            <div class="d-flex align-center" style="gap: 8px; flex-wrap: wrap">
-              <v-icon icon="mdi-microphone-message" size="26"
-                      :color="voice.enabled ? 'success' : 'grey'" />
+          <v-card variant="outlined" class="xai-card xai-voice-head pa-4">
+            <div class="d-flex align-center" style="gap: 12px; flex-wrap: wrap">
+              <span class="xai-voice-mark" :class="{ 'xai-hero-live': voice.enabled }">
+                <v-icon icon="mdi-microphone-message" size="22" />
+              </span>
               <div style="min-width: 0; flex: 1 1 220px">
                 <div class="text-subtitle-1">对话监听</div>
                 <div class="text-caption text-grey">
                   {{ voice.enabled
-                     ? `每 ${voice.interval} 秒读一轮 · 已处理 ${voice.handled} 句 · 上次轮询 ${voice.last_poll_at || '-'}`
+                     ? `每 ${voice.interval} 秒读一轮 · 已接手 ${voice.handled} 句 · 上次轮询 ${voice.last_poll_at || '-'}`
                      : '未开启：插件不读小米的对话记录接口' }}
                 </div>
               </div>
-              <v-chip v-if="voice.chat" size="x-small" variant="tonal"
-                      :color="voice.chat_active ? 'info' : 'grey'">
-                {{ voice.chat_active ? '对话窗口开着' : 'AI 对话已配（窗口未开）' }}
-              </v-chip>
+              <div class="xai-chips">
+                <span class="xai-pill"
+                      :class="`xai-pill-${status.token_expired ? 'error' : status.logged_in ? 'ok' : 'warn'}`">
+                  {{ status.token_expired ? '票据过期，读不到对话'
+                     : status.logged_in ? `已登录 · ${devices.length} 台音箱` : '未登录，读不到对话' }}
+                </span>
+                <span class="xai-pill" :class="`xai-pill-${voice.enabled ? 'ok' : 'idle'}`">
+                  {{ voice.enabled ? '监听中' : '监听未开' }}
+                </span>
+                <v-chip v-if="voice.chat" size="x-small" variant="tonal"
+                        :color="voice.chat_active ? 'info' : 'grey'">
+                  {{ voice.chat_active ? 'AI 对话中（追问按满速读）' : 'AI 对话兜底已开（当前不在对话里）' }}
+                </v-chip>
+              </div>
               <v-btn size="small" variant="tonal" :color="voice.enabled ? 'grey' : 'success'"
                      :loading="busy === '开启语音监听' || busy === '关闭语音监听'"
                      @click="setVoiceEnabled(!voice.enabled)">
                 {{ voice.enabled ? '关闭监听' : '开启监听' }}
               </v-btn>
+              <v-btn size="small" variant="text" icon="mdi-refresh" :loading="voiceReloading"
+                     @click="loadVoiceDetail" />
+            </div>
+            <div v-if="voice.enabled && !status.logged_in" class="text-caption text-error mt-2">
+              监听开着但登录票据不在：读对话记录要有效的小米票据，去「插件配置 → 账号与音箱」重新登录。
+            </div>
+            <div v-else-if="voice.enabled && voice.devices.length" class="text-caption text-grey mt-2">
+              正在读这些音箱的对话记录：{{ voice.devices.map(shortId).join('、') }}
             </div>
             <div v-if="voice.error" class="text-caption text-error mt-2">{{ voice.error }}</div>
             <div class="text-caption text-grey mt-2">
@@ -1398,18 +1457,25 @@ function paneBadge(key: Pane): number {
               <v-btn size="small" variant="tonal" color="info" :loading="busy === '试口令'"
                      @click="runVoiceTest">判定</v-btn>
             </div>
-            <v-alert v-if="testResult && (testResult.kind || testResult.message)" class="mt-2"
-                     :type="testResult.ok ? 'success' : 'warning'" variant="tonal" density="compact">
-              <div class="text-body-2">
-                {{ testResult.ok
-                   ? `命中「${kindText(testResult.kind)}」${testResult.argument ? `，参数：${testResult.argument}` : ''}`
-                   : (testResult.message || '没有命中口令') }}
+            <div v-if="testResult && (testResult.kind || testResult.message)" class="xai-verdict mt-2"
+                 :class="testResult.ok ? 'xai-verdict-ok' : 'xai-verdict-no'">
+              <div class="d-flex align-center" style="gap: 8px; flex-wrap: wrap">
+                <v-icon size="16" :icon="testResult.ok ? 'mdi-check-decagram' : 'mdi-help-circle-outline'" />
+                <span class="text-body-2">
+                  {{ testResult.ok
+                     ? `接手为「${kindText(testResult.kind)}」${testResult.argument ? `，参数：${testResult.argument}` : ''}`
+                     : (testResult.message || '插件没有接手这句话') }}
+                </span>
+                <v-chip v-if="testResult.ok" size="x-small" variant="tonal"
+                        :color="testResult.matched === 'ai' ? 'warning' : 'primary'">
+                  {{ testResult.matched === 'ai' ? 'AI 兜底判的'
+                     : testResult.matched === 'memory' ? '记忆表判的' : '口令表判的' }}
+                </v-chip>
               </div>
-              <div v-if="testResult.reply" class="text-caption">音箱回复：{{ testResult.reply }}</div>
-              <div v-if="testResult.ok && !testExecute" class="text-caption text-grey">
-                只判定、没执行；勾上「直接执行」才会真的推到音箱。
-              </div>
-            </v-alert>
+              <div v-if="testResult.ok && matchSource(testResult.matched)"
+                   class="text-caption text-grey mt-1">{{ matchSource(testResult.matched) }}</div>
+              <div v-if="testResult.reply" class="text-caption mt-1">音箱回复：{{ testResult.reply }}</div>
+            </div>
           </div>
 
           <div class="xai-block">
@@ -1495,22 +1561,44 @@ function paneBadge(key: Pane): number {
 
 /* ---------- 顶栏 ---------- */
 .xai-head {
-  display: flex; align-items: center; gap: 12px;
+  display: flex; align-items: center; gap: 12px; position: relative;
   padding: 14px 18px;
   border-bottom: 1px solid var(--xai-line);
   background: linear-gradient(180deg, var(--xai-veil), transparent);
+}
+/* 一条渐隐的高光线压在标题栏下沿，比整条实线更像面板的分界 */
+.xai-head::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px;
+  background: linear-gradient(90deg, rgba(var(--v-theme-primary), .55), rgba(var(--v-theme-primary), 0) 55%);
 }
 .xai-brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
 .xai-brand-mark {
   display: inline-flex; align-items: center; justify-content: center;
   width: 38px; height: 38px; border-radius: 12px; flex: 0 0 auto;
   color: rgb(var(--v-theme-primary));
-  background: rgba(var(--v-theme-primary), .14);
-  box-shadow: inset 0 0 0 1px rgba(var(--v-theme-primary), .18);
+  background: linear-gradient(145deg, rgba(var(--v-theme-primary), .28), rgba(var(--v-theme-primary), .07));
+  box-shadow: inset 0 0 0 1px rgba(var(--v-theme-primary), .2);
+  transition: box-shadow .2s ease;
 }
+.xai-brand-live { animation: xai-pulse 2.4s ease-in-out infinite; }
 .xai-brand-text { min-width: 0; line-height: 1.25; }
-.xai-brand-title { font-size: 15px; font-weight: 650; letter-spacing: .2px; color: var(--xai-ink); }
-.xai-brand-sub { font-size: 11.5px; color: var(--xai-ink-faint); white-space: nowrap; }
+.xai-brand-title {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 15px; font-weight: 650; letter-spacing: .2px; color: var(--xai-ink);
+}
+.xai-brand-ver {
+  padding: 1px 6px; border-radius: 999px; font-size: 10.5px; font-weight: 600;
+  color: var(--xai-ink-faint); background: rgba(var(--v-theme-on-surface), .07);
+}
+.xai-brand-sub {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 11.5px; color: var(--xai-ink-faint); white-space: nowrap;
+}
+.xai-sync-dot {
+  width: 5px; height: 5px; border-radius: 50%; flex: 0 0 auto;
+  background: rgba(var(--v-theme-on-surface), .28);
+}
+.xai-sync-fresh { background: rgb(var(--v-theme-success)); box-shadow: 0 0 6px rgba(var(--v-theme-success), .8); }
 .xai-stats { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 
 /* 状态药丸：顶栏、播放台、详情页共用一套形状 */
@@ -1537,24 +1625,69 @@ function paneBadge(key: Pane): number {
 /* ---------- 骨架 ---------- */
 .xai-body { display: flex; min-height: 460px; }
 .xai-nav {
-  flex: 0 0 186px;
-  padding: 10px 0;
+  flex: 0 0 194px;
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 12px 10px;
   border-right: 1px solid var(--xai-line);
-  background: var(--xai-veil);
+  background: linear-gradient(180deg, var(--xai-veil), transparent 70%);
 }
-.xai-nav-item { margin: 1px 8px; }
+.xai-nav-cap {
+  padding: 2px 10px 6px; font-size: 10.5px; font-weight: 650;
+  letter-spacing: 1.1px; text-transform: uppercase; color: var(--xai-ink-faint);
+}
+.xai-nav-item {
+  display: flex; align-items: center; gap: 9px; width: 100%;
+  padding: 8px 11px; border: 1px solid transparent; border-radius: 11px;
+  background: transparent; color: var(--xai-ink-soft); cursor: pointer;
+  font: inherit; font-size: 12.8px; text-align: left;
+  transition: background .14s ease, color .14s ease, border-color .14s ease;
+}
+.xai-nav-item:hover { background: rgba(var(--v-theme-on-surface), .06); color: var(--xai-ink); }
+.xai-nav-item-on {
+  color: rgb(var(--v-theme-primary)); font-weight: 650;
+  background: rgba(var(--v-theme-primary), .1);
+  border-color: rgba(var(--v-theme-primary), .22);
+  box-shadow: inset 2px 0 0 rgb(var(--v-theme-primary));
+}
+.xai-nav-icon { flex: 0 0 auto; opacity: .9; }
+.xai-nav-label {
+  flex: 1 1 auto; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
 .xai-nav-badge {
-  min-width: 20px; padding: 0 6px; height: 18px; line-height: 18px; text-align: center;
+  flex: 0 0 auto; min-width: 20px; padding: 0 6px; height: 18px; line-height: 18px; text-align: center;
   border-radius: 999px; font-size: 11px; font-weight: 600;
   color: var(--xai-ink-soft); background: rgba(var(--v-theme-on-surface), .08);
 }
+.xai-nav-foot { margin-top: auto; padding-top: 14px; }
+.xai-nav-meter {
+  display: flex; align-items: baseline; justify-content: space-between;
+  padding: 2px 11px; font-size: 11.5px; color: var(--xai-ink-faint);
+}
+.xai-nav-meter b {
+  font-size: 13px; font-weight: 650; color: var(--xai-ink);
+  font-variant-numeric: tabular-nums;
+}
 .xai-content { flex: 1 1 auto; min-width: 0; overflow-y: auto; }
-.xai-pane { padding: 14px 18px 22px; }
+.xai-pane { padding: 14px 18px 22px; animation: xai-rise .24s ease; }
+@keyframes xai-rise {
+  from { opacity: 0; transform: translateY(7px); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) { .xai-pane { animation: none; } }
 .xai-pane-title {
   display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
   padding: 14px 18px 0;
 }
-.xai-pane-name { font-size: 13px; font-weight: 650; color: var(--xai-ink); }
+.xai-pane-name {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: 13px; font-weight: 650; color: var(--xai-ink);
+}
+/* 栏目标题前一根竖着的渐变条，替掉原来的横线分隔 */
+.xai-pane-name::before {
+  content: ""; width: 3px; height: 13px; border-radius: 2px;
+  background: linear-gradient(180deg, rgb(var(--v-theme-primary)), rgba(var(--v-theme-primary), .25));
+}
 .xai-pane-desc { font-size: 11.5px; color: var(--xai-ink-faint); }
 
 /* 每个内容块之间靠留白分段，不再靠一条条横线 */
@@ -1564,13 +1697,24 @@ function paneBadge(key: Pane): number {
   font-size: 12px; font-weight: 600; letter-spacing: .3px;
   color: var(--xai-ink-soft); margin-bottom: 8px;
 }
+.xai-block-title::before {
+  content: ""; width: 3px; height: 12px; border-radius: 2px; flex: 0 0 auto;
+  background: linear-gradient(180deg, rgb(var(--v-theme-primary)), rgba(var(--v-theme-primary), .2));
+}
 
 /* ---------- 运行总览 ---------- */
 /* 每张卡只讲一件事：标题行带状态药丸，正文一行结论、一行细节 */
 .xai-ov { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
 .xai-ov-card {
-  padding: 13px 15px; border-radius: var(--xai-radius);
-  border: 1px solid var(--xai-line); background: var(--xai-veil);
+  position: relative; padding: 13px 15px; border-radius: var(--xai-radius);
+  border: 1px solid var(--xai-line);
+  background: linear-gradient(180deg, var(--xai-veil), transparent 120%);
+  transition: border-color .16s ease, transform .16s ease, box-shadow .16s ease;
+}
+.xai-ov-card:hover {
+  transform: translateY(-1px);
+  border-color: rgba(var(--v-theme-primary), .3);
+  box-shadow: 0 8px 22px rgba(var(--v-theme-on-surface), .08);
 }
 .xai-ov-head {
   display: flex; align-items: center; gap: 7px;
@@ -1583,6 +1727,27 @@ function paneBadge(key: Pane): number {
 .xai-config-dialog {
   background: rgb(var(--v-theme-surface));
   border-radius: var(--xai-radius);
+}
+
+/* ---------- 语音控制 ---------- */
+/* 监听开着的时侯麦克风一圈呼吸光环，一眼看得出插件在读对话记录 */
+.xai-voice-mark {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 44px; height: 44px; border-radius: 14px; flex: 0 0 auto;
+  color: rgb(var(--v-theme-primary)); background: rgba(var(--v-theme-primary), .13);
+  box-shadow: inset 0 0 0 1px rgba(var(--v-theme-primary), .18);
+}
+.xai-verdict {
+  padding: 10px 13px; border-radius: 12px;
+  border: 1px solid var(--xai-line); background: var(--xai-veil);
+}
+.xai-verdict-ok {
+  border-color: rgba(var(--v-theme-success), .3);
+  background: rgba(var(--v-theme-success), .08);
+}
+.xai-verdict-no {
+  border-color: rgba(var(--v-theme-warning), .3);
+  background: rgba(var(--v-theme-warning), .08);
 }
 
 /* ---------- 播放台 ---------- */
@@ -1682,17 +1847,15 @@ function paneBadge(key: Pane): number {
 }
 @media (max-width: 760px) {
   .xai-body { flex-direction: column; }
+  /* 窄屏下七行竖排导航会把内容推到屏幕外，换成一行胶囊横排 */
   .xai-nav {
-    flex: 0 0 auto;
-    padding: 8px 10px;
+    flex: 0 0 auto; flex-direction: row; align-items: center; gap: 6px;
+    padding: 9px 12px; overflow-x: auto;
     border-right: none;
     border-bottom: 1px solid var(--xai-line);
   }
-  /* 窄屏下七行竖排导航会把内容推到屏幕外，换成一行胶囊横排 */
-  .xai-nav .xai-nav-item {
-    display: inline-flex; width: auto; margin: 2px 5px 2px 0;
-    border-radius: 999px; border: 1px solid var(--xai-line);
-  }
+  .xai-nav-cap, .xai-nav-foot { display: none; }
+  .xai-nav-item { flex: 0 0 auto; width: auto; padding: 6px 12px; border-radius: 999px; }
   .xai-head { padding: 12px 14px; flex-wrap: wrap; }
   .xai-pane, .xai-pane-title { padding-left: 14px; padding-right: 14px; }
   .xai-volume { max-width: none; }

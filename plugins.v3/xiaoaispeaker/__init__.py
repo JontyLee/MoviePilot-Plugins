@@ -257,7 +257,7 @@ class XiaoaiSpeaker(_PluginBase):
         "库内目录浏览与搜索、远程命令；播放直链由插件签名限时，不依赖媒体服务器。"
     )
     plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/xiaoai.svg"
-    plugin_version = "0.5.9"
+    plugin_version = "0.6.0"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "xiaoaispeaker_"
@@ -2959,9 +2959,16 @@ class XiaoaiSpeaker(_PluginBase):
         if not text:
             return out.model_copy(update={"ok": False, "message": "请输入一句话"})
         match = self._match_voice(text)
+        # 判定过程记一行：口令表命不命中是确定的，AI 兜底每次可能给不同结果，
+        # 用户说「同一个词两次结果不一样」时只能靠这行日志分辨是哪一级给的答案。
+        logger.info(f"{_LOG} 口令判定「{text}」执行={bool(payload.execute)} → "
+                    f"{match.kind if match else '未接手'}"
+                    f"（{'口令表' if match and match.keyword not in ('ai', 'memory') else '记忆表/AI' if match else '三级都没命中'}）")
         if match is None:
             out.ok = False
-            out.message = "没有命中任何口令（口令表已关的先去「语音口令」打开，或配 AI 兜底）"
+            out.message = ("这句话没有接手：口令表和记忆表都没命中，"
+                           + ("AI 兜底这次也没判出来（结果本身有随机性，可以再试一次）"
+                              if self._ai_available() else "AI 兜底没开"))
             return out
         out.ok = True
         out.kind = match.kind
@@ -2969,8 +2976,9 @@ class XiaoaiSpeaker(_PluginBase):
         out.matched = match.keyword or match.kind
         if payload.execute:
             out.reply = self._run_intent(match, (payload.device_id or "").strip())
+            out.message = "已执行" + (f"：{out.reply}" if out.reply else "（音箱没有回话）")
         else:
-            out.message = "仅判定，未执行；带 execute=true 才会真的播"
+            out.message = "仅判定，未执行；勾上「直接执行」才会真的推到音箱"
         return out
 
     def api_commands(self) -> CommandsOut:

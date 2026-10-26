@@ -1,36 +1,26 @@
 <script setup lang="ts">
-import { ref, computed, inject, onMounted } from 'vue'
-import { type Status, type Device } from './types'
-
-interface HostToast {
-  error(msg: string): unknown
-  info(msg: string): unknown
-  success(msg: string): unknown
-  warning(msg: string): unknown
-}
+import { ref, computed, onMounted } from 'vue'
+import { type Device } from './types'
 
 const props = defineProps({
   api: { type: Object as () => MoviePilotApi, default: () => ({}) as any },
   pluginId: { type: String, default: '' },
   sourcePluginId: { type: String, default: '' },
-  // 宿主在配置对话框里接「切换到播放台」；侧栏全页自己开的那个对话框不需要
-  canSwitch: { type: Boolean, default: false },
-  // 配置页按「先登录、取到音箱，再改后面的」排序：这一项决定除启用开关外的表体开不开
-  sectionsOpen: { type: Boolean, default: true },
+  // 配置页把这张长表单拆成了三栏（曲库与直链 / 播放行为 / 语音与 AI），
+  // 草稿与保存仍由本组件一处持有：切栏不丢未保存的改动。
+  pane: { type: String as () => 'library' | 'play' | 'voice', default: 'library' },
   devices: { type: Array as () => Device[], default: () => [] }
 })
 
-const emit = defineEmits(['switch', 'saved'])
+const emit = defineEmits(['toast', 'loaded', 'saved'])
 
 const base = computed(() => `plugin/${props.pluginId || props.sourcePluginId}`)
-const toast = inject<HostToast | null>('moviepilot:toast', null)
-const snackbar = ref({ show: false, text: '', color: 'info' })
 const saving = ref(false)
-const status = ref<Status | null>(null)
 const loaded = ref(false)
+const cfg = ref<any>(null)
 
 // /config 只改传上来的字段，所以草稿要按「服务端当前值」起头。
-// 账号、密码与默认音箱不在这里：它们跟着「登录」那一步走（见 ConfigLogin），
+// 账号、密码与默认音箱不在这里：它们跟着「账号与音箱」那一栏走（见 ConfigLogin），
 // 表单里不带这三个键，保存时也就不会把它们一起写没。
 const form = ref<Record<string, any>>({
   enabled: false,
@@ -61,14 +51,19 @@ const form = ref<Record<string, any>>({
   library_refresh: 60
 })
 
+// 与服务端那一份逐键比较得出「有没有未保存的改动」：只看表单里这些键，
+// 登录态与设备缓存跟着 /status 变，不该算成用户的改动。
+const pristine = ref<Record<string, any>>({ ...form.value })
+const dirty = computed(() => Object.keys(form.value).some(
+  key => JSON.stringify(form.value[key]) !== JSON.stringify(pristine.value[key])
+))
+
 const playModeItems = [
   { title: '自动（按型号白名单选接口）', value: 'auto' },
   { title: 'player_play_url（直链电台式）', value: 'url' },
   { title: 'player_play_music（走小米曲库）', value: 'music' }
 ]
 
-const cfg = computed(() => status.value?.config)
-// 音箱候选由配置页统一取（登录那一步刚刷新过设备），表单自己那份 /status 只用来起草稿
 const devices = computed<Device[]>(() => props.devices)
 
 const navText = computed(() => {
@@ -92,23 +87,14 @@ const voiceDeviceItems = computed(() => devices.value.map(d => ({
   value: d.device_id
 })))
 
-function notify(msg: string, color = 'info') {
-  if (toast) {
-    const fn = (toast as any)[color] || toast.info
-    fn.call(toast, msg)
-    return
-  }
-  snackbar.value = { show: true, text: msg, color }
-}
-
-function fillFromStatus(data: Status) {
-  status.value = data
-  const c = (data?.config || {}) as any
+function fillFromStatus(data: any) {
+  cfg.value = (data?.config || {}) as any
+  const c = cfg.value
   form.value = {
     ...form.value,
     enabled: !!c.enabled,
     show_sidebar_nav: c.show_sidebar_nav !== false,
-    // 账号、密码、默认音箱由「登录与音箱」那张卡管，这里不占位：/config 是「缺省即保留」，
+    // 账号、密码、默认音箱由「账号与音箱」那一栏管，这里不占位：/config 是「缺省即保留」，
     // 不带这三个键就等于不动它们
     music_dirs: c.music_dirs || '',
     base_url: c.base_url || '',
@@ -135,26 +121,27 @@ function fillFromStatus(data: Status) {
     library_limit: c.library_limit ?? 10000,
     library_refresh: c.library_refresh ?? 60
   }
+  pristine.value = { ...form.value }
+  loaded.value = true
 }
 
 async function loadConfig() {
   try {
     fillFromStatus(await (props.api as MoviePilotApi).get(`${base.value}/status`))
-    loaded.value = true
+    emit('loaded')
   } catch (e: any) {
-    notify(`配置读取失败：${e?.message || e}`, 'error')
+    emit('toast', `配置读取失败：${e?.message || e}`, 'error')
   }
 }
 
 async function save() {
   saving.value = true
   try {
-    const body: Record<string, any> = { ...form.value }
-    fillFromStatus(await (props.api as MoviePilotApi).post(`${base.value}/config`, body))
-    notify('配置已保存', 'success')
+    fillFromStatus(await (props.api as MoviePilotApi).post(`${base.value}/config`, { ...form.value }))
+    emit('toast', '配置已保存', 'success')
     emit('saved')
   } catch (e: any) {
-    notify(`保存失败：${e?.message || e}`, 'error')
+    emit('toast', `保存失败：${e?.message || e}`, 'error')
   } finally {
     saving.value = false
   }
@@ -162,139 +149,223 @@ async function save() {
 
 onMounted(loadConfig)
 
-defineExpose({ loadConfig, save })
+// 配置页顶栏要用这两枚开关、要显示「有未保存的改动」、也要能直接保存：
+// 草稿只有一份，所以把出入口交给父组件，而不是让顶栏自己另存一份状态。
+defineExpose({ form, dirty, saving, loaded, cfg, navText, loadConfig, save })
 </script>
 
 <template>
   <div class="xcf">
-    <div class="xcf-top">
-      <div class="d-flex" style="gap: 16px; flex-wrap: wrap">
-        <v-switch v-model="form.enabled" color="success" hide-details inset label="启用插件" />
-        <v-switch v-model="form.show_sidebar_nav" :disabled="!form.enabled" color="success"
-                  hide-details inset label="在「发现」显示侧栏入口" />
-      </div>
-      <v-spacer />
-      <v-chip size="small" variant="tonal"
-              :color="form.enabled ? (form.show_sidebar_nav ? 'success' : 'info') : 'grey'">
-        {{ navText }}
-      </v-chip>
-      <v-btn size="small" variant="text" class="text-none" prepend-icon="mdi-refresh"
-             @click="loadConfig">重新读取</v-btn>
-    </div>
-    <div class="xcf-note">
-      这两个开关就是宿主眼里的「插件已启用」：发现侧栏的入口、播放台巡检、语音轮询都按
-      <b>启用插件</b>这一项准入 —— <b>插件管理页那个开关改的是宿主自己的实例记录，碰不到这里</b>，
-      所以只装好插件不在这里打开的话，侧栏永远不会出现。保存后立刻生效，不用重启主程序。
-      <template v-if="!sectionsOpen">
-        <br><b>小米账号、默认音箱与设备分组在上面第 1 步做</b>：登录成功并选到音箱，下面的配置才谈得上生效。
-      </template>
-    </div>
-
-    <div v-if="sectionsOpen" class="xcf-body">
+    <!-- 「曲库与直链」：库范围、音箱访问得到的地址、能播的格式与索引 -->
+    <template v-if="props.pane === 'library'">
       <div class="xcf-group">
-        <div class="xcf-group-title">播放行为</div>
-        <div class="d-flex" style="gap: 16px; flex-wrap: wrap">
-          <v-switch v-model="form.auto_next" color="success" hide-details inset label="队列自动连播" />
-          <v-switch v-model="form.keep_light" color="success" hide-details inset label="播放时常亮" />
-          <v-switch v-model="form.tts_announce" color="success" hide-details inset label="连播时先播报下一曲" />
+        <div class="xcf-group-title">
+          <v-icon icon="mdi-folder-music-outline" size="16" />
+          音乐库
         </div>
-        <div class="text-caption text-grey mt-1">
-          这几项是全局偏好，推给哪台音箱由上面的登录那一步决定；
-          「自动连播」关掉后侧栏队列播完当前这首不会自己接下一首（手动「下一首」仍然有效）。
-        </div>
-      </div>
-
-      <div class="xcf-group">
-        <div class="xcf-group-title">音乐库与直链</div>
-        <v-textarea v-model="form.music_dirs" :rows="3" hide-details
-                    label="音乐库路径（一行一个目录，只有这些目录里的文件可被列出与播放）"
+        <v-textarea v-model="form.music_dirs" :rows="3" hide-details variant="outlined"
+                    label="库路径（一行一个目录，只有这些目录里的文件可被列出与播放）"
                     placeholder="/media/music&#10;/nas/music" />
-        <div v-if="cfg && cfg.dir_count" class="text-caption text-grey mt-1">
-          当前生效 {{ cfg.dir_count }} 个目录
-          <template v-if="cfg.missing_dirs.length">｜读不到：{{ cfg.missing_dirs.join('、') }}</template>
+        <div class="xcf-hint">
+          <span v-if="cfg && cfg.dir_count">
+            当前生效 {{ cfg.dir_count }} 个目录
+            <template v-if="cfg.missing_dirs.length">｜读不到：{{ cfg.missing_dirs.join('、') }}</template>
+          </span>
+          <span v-else>留空就用主程序的音乐目录设置</span>
         </div>
-        <v-row dense class="mt-2">
-          <v-col cols="12" md="7">
-            <v-text-field v-model="form.base_url" hide-details
-                          label="外部访问地址（音箱能访问到的 MP 地址）"
-                          placeholder="http://192.168.1.10:3000，留空用主程序设置" />
-          </v-col>
-          <v-col cols="12" md="5">
-            <v-select v-model="form.play_mode" :items="playModeItems" label="播放接口" hide-details />
-          </v-col>
-        </v-row>
-        <div class="text-caption text-grey mt-1">
-          实际使用：{{ cfg?.base_url_effective || '拿不到可用地址（音箱必然拉不到流）' }}
+      </div>
+
+      <div class="xcf-group">
+        <div class="xcf-group-title">
+          <v-icon icon="mdi-link-variant" size="16" />
+          直链地址
+        </div>
+        <v-text-field v-model="form.base_url" hide-details variant="outlined"
+                      label="外部访问地址（音箱能访问到的 MP 地址）"
+                      placeholder="http://192.168.1.10:3000，留空用主程序设置" />
+        <div class="xcf-hint">
+          实际使用：<b>{{ cfg?.base_url_effective || '拿不到可用地址（音箱必然拉不到流）' }}</b>
           <template v-if="cfg?.base_url_source">｜来自 {{ cfg.base_url_source }}</template>
         </div>
-        <v-row dense class="mt-2">
-          <v-col cols="12" md="4">
-            <v-text-field v-model.number="form.default_volume" type="number" min="0" max="100" hide-details
-                          label="播放前设置音量（0=不改）" />
-          </v-col>
-          <v-col cols="12" md="4">
-            <v-text-field v-model.number="form.stream_ttl" type="number" min="300" max="259200" hide-details
-                          label="直链有效期（秒）" />
-          </v-col>
-          <v-col cols="12" md="4">
-            <v-text-field v-model="form.audio_exts" hide-details label="可播放扩展名（留空用默认）"
-                          placeholder="mp3 m4a aac flac wav ogg opus wma" />
-          </v-col>
-        </v-row>
-        <v-row dense class="mt-2">
-          <v-col cols="12" md="6">
-            <v-text-field v-model="form.audio_id" hide-details label="play_music audioID（留空用默认）" />
-          </v-col>
-          <v-col cols="12" md="6">
-            <v-switch v-model="form.force_mp3" color="success" hide-details inset
-                      label="非 mp3 现场转成 mp3（需要本机有 ffmpeg）" />
-            <div class="text-caption text-grey mt-n3">
-              小爱只稳当解码 mp3；m4a/flac 推过去常是「云端受理、音箱不出声」。开着这
-              项时插件边放边用 ffmpeg 转，转出来的长度未知，所以这一条不支持拖动进度。
-            </div>
-          </v-col>
-        </v-row>
+        <div class="xcf-grid mt-3">
+          <v-text-field v-model.number="form.stream_ttl" type="number" min="300" max="259200"
+                        hide-details variant="outlined" label="直链有效期（秒）" />
+          <v-text-field v-model="form.audio_id" hide-details variant="outlined"
+                        label="play_music audioID（留空用默认）" />
+        </div>
+        <div class="xcf-hint">
+          地址必须是<b>音箱所在网段连得到</b>的 IP 或域名，不能是 127.0.0.1，也不能是 MP 容器自己看的地址 ——
+          这一项填错是「点了没声音」最常见的原因。直链由插件用签名密钥（落在插件数据目录
+          <code>state/secret.json</code>）签发并带有效期，换密钥会让已经发出去的链接一起失效，这是有意的。
+        </div>
       </div>
 
       <div class="xcf-group">
-        <div class="xcf-group-title">语音控制</div>
-        <v-alert type="info" variant="tonal" density="compact" class="mb-3">
+        <div class="xcf-group-title">
+          <v-icon icon="mdi-file-document-multiple-outline" size="16" />
+          格式与解码
+        </div>
+        <v-text-field v-model="form.audio_exts" hide-details variant="outlined"
+                      label="可播放扩展名（留空用默认）"
+                      placeholder="mp3 m4a aac flac wav ogg opus wma" />
+        <label class="xcf-toggle mt-3">
+          <v-switch v-model="form.force_mp3" color="primary" hide-details inset density="compact" />
+          <span>
+            <b>非 mp3 现场转成 mp3</b>
+            <em>需要本机有 ffmpeg。开着时 /stream 边放边转，转出来的长度未知，所以这一条不支持拖动进度。</em>
+          </span>
+        </label>
+        <div class="xcf-hint">
+          小爱只稳当解码 mp3；m4a/flac 推过去常是「云端受理、音箱不出声」。
+          这一栏不响就先把「播放行为」里的播放接口切成 <b>player_play_music</b>，那条免费的路不通再开转码。
+        </div>
+      </div>
+
+      <div class="xcf-group">
+        <div class="xcf-group-title">
+          <v-icon icon="mdi-database-refresh-outline" size="16" />
+          曲库索引
+        </div>
+        <div class="xcf-grid">
+          <v-text-field v-model.number="form.library_limit" type="number" min="500" max="200000"
+                        hide-details variant="outlined" label="最多入库多少首" />
+          <v-text-field v-model.number="form.library_refresh" type="number" min="0" max="1440"
+                        hide-details variant="outlined" label="自动保鲜周期（分钟，0=只手动）" />
+        </div>
+        <div class="xcf-hint">
+          索引只为语音点歌服务（读标签与目录名，元数据缓存落在插件数据目录）。
+          索引状态与手动重建在侧栏的「音乐库」那一栏。
+        </div>
+      </div>
+    </template>
+
+    <!-- 「播放行为」：推到音箱时怎么播 -->
+    <template v-else-if="props.pane === 'play'">
+      <div class="xcf-group">
+        <div class="xcf-group-title">
+          <v-icon icon="mdi-sine-wave" size="16" />
+          播放接口
+        </div>
+        <v-select v-model="form.play_mode" :items="playModeItems" label="走哪条接口"
+                  hide-details variant="outlined" />
+        <div class="xcf-hint">
+          <template v-if="devices.length">
+            标记为需要 play_music 的型号：
+            {{ devices.filter(d => d.needs_music_api).map(d => d.name || d.device_id).join('、') || '无' }}
+          </template>
+          <template v-else>型号白名单在登录后取到设备才判得出来；拿不准就用「自动」。</template>
+        </div>
+        <v-text-field v-model.number="form.default_volume" class="mt-3" type="number" min="0" max="100"
+                      hide-details variant="outlined" style="max-width: 220px"
+                      label="播放前设置音量（0=不改）" />
+      </div>
+
+      <div class="xcf-group">
+        <div class="xcf-group-title">
+          <v-icon icon="mdi-play-circle-outline" size="16" />
+          连播与灯效
+        </div>
+        <label class="xcf-toggle">
+          <v-switch v-model="form.auto_next" color="primary" hide-details inset density="compact" />
+          <span>
+            <b>队列自动连播</b>
+            <em>关掉后侧栏队列播完当前这首不会自己接下一首（手动「下一首」仍然有效）。</em>
+          </span>
+        </label>
+        <label class="xcf-toggle">
+          <v-switch v-model="form.keep_light" color="primary" hide-details inset density="compact" />
+          <span>
+            <b>播放时常亮</b>
+            <em>给音频类型带上 MUSIC，音箱播放时不熄灯；关掉更省电，但有些型号会当电台放。</em>
+          </span>
+        </label>
+        <label class="xcf-toggle">
+          <v-switch v-model="form.tts_announce" color="primary" hide-details inset density="compact" />
+          <span>
+            <b>连播时先播报下一曲</b>
+            <em>切歌前用 TTS 说一句曲名，音箱多一次请求，家里人多时更清楚在放谁的歌。</em>
+          </span>
+        </label>
+      </div>
+
+      <div class="xcf-note">
+        这几项是全局偏好，推给哪台音箱由「账号与音箱」那一栏的默认音箱决定；
+        分组推送也在那一栏配。
+      </div>
+    </template>
+
+    <!-- 「语音与 AI」：听音箱的对话记录，命中口令才动手 -->
+    <template v-else>
+      <div class="xcf-group">
+        <div class="xcf-group-title">
+          <v-icon icon="mdi-microphone-message" size="16" />
+          语音监听
+        </div>
+        <div class="xcf-note xcf-note-warn">
           打开后插件周期性读这几台音箱在小米云端的<b>对话记录</b>，命中口令表的话才接手播放。
           每读一次就是一个请求，只对真的要听的那几台开。
-        </v-alert>
-        <div class="d-flex" style="gap: 16px; flex-wrap: wrap">
-          <v-switch v-model="form.voice_enabled" color="success" hide-details inset label="开启语音监听" />
-          <v-switch v-model="form.voice_interrupt" color="success" hide-details inset label="命中前先打断音箱" />
-          <v-switch v-model="form.voice_reply" color="success" hide-details inset label="播报执行结果" />
-          <v-switch v-model="form.voice_hint_tts" color="success" hide-details inset label="搜索期间播提示语" />
-          <v-switch v-model="form.voice_memory" color="success" hide-details inset label="记住刚才那首（用于「再播一遍」）" />
         </div>
-        <v-row dense class="mt-3">
-          <v-col cols="12" md="7">
-            <v-select v-model="voiceDeviceList" :items="voiceDeviceItems" label="监听哪些音箱" multiple
-                      chips dense closable hide-details placeholder="留空 = 只监听默认音箱" />
-          </v-col>
-          <v-col cols="12" md="5">
-            <v-text-field v-model.number="form.voice_poll" type="number" min="2" max="30" hide-details
-                          label="轮询间隔（秒，2-30）" />
-          </v-col>
-        </v-row>
-        <v-text-field v-model="form.voice_hint_text" class="mt-3" hide-details density="compact"
-                      label="搜索期间的提示语（留空用默认）" placeholder="正在搜索，请稍候" />
-        <div class="text-caption text-grey mt-1">
+        <label class="xcf-toggle">
+          <v-switch v-model="form.voice_enabled" color="primary" hide-details inset density="compact" />
+          <span><b>开启语音监听</b><em>关掉就是纯手动播放台，口令表与 AI 都不再被触发。</em></span>
+        </label>
+        <div class="xcf-grid mt-3">
+          <v-select v-model="voiceDeviceList" :items="voiceDeviceItems" label="监听哪些音箱" multiple
+                    chips dense closable hide-details variant="outlined"
+                    placeholder="留空 = 只监听默认音箱" />
+          <v-text-field v-model.number="form.voice_poll" type="number" min="2" max="30" hide-details
+                        variant="outlined" label="轮询间隔（秒，2-30）" />
+        </div>
+        <v-text-field v-model="form.voice_hint_text" class="mt-3" hide-details variant="outlined"
+                      density="compact" label="搜索期间的提示语（留空用默认）"
+                      placeholder="正在搜索，请稍候" />
+        <div class="xcf-hint">
           {{ devices.length
              ? `已取到 ${devices.length} 台设备，可直接勾选；留空时只跟着默认音箱走`
              : '设备候选要登录后才有；也可以先手填 device_id（逗号分隔）' }}
-          ｜逐类口令的开关在本页下面的「语音口令表」里改，监听开没开在侧栏运行视图看。
+          ｜逐类口令的开关在本页「语音口令表」那一栏改。
         </div>
       </div>
 
       <div class="xcf-group">
-        <div class="xcf-group-title">AI 兜底与对话</div>
-        <div class="d-flex" style="gap: 16px; flex-wrap: wrap">
-          <v-switch v-model="form.ai_enabled" color="success" hide-details inset label="口令表没命中时交给 AI 判定" />
-          <v-switch v-model="form.ai_chat" color="success" hide-details inset label="没命中的话当成聊天（说完 2 分钟内可追问）" />
+        <div class="xcf-group-title">
+          <v-icon icon="mdi-flash-off-outline" size="16" />
+          打断与播报
         </div>
+        <label class="xcf-toggle">
+          <v-switch v-model="form.voice_interrupt" color="primary" hide-details inset density="compact" />
+          <span><b>命中前先打断音箱</b><em>正在放歌时点歌，先停下再推新的。</em></span>
+        </label>
+        <label class="xcf-toggle">
+          <v-switch v-model="form.voice_reply" color="primary" hide-details inset density="compact" />
+          <span><b>播报执行结果</b><em>「已播放 XXX」，没播成也说一句为什么。</em></span>
+        </label>
+        <label class="xcf-toggle">
+          <v-switch v-model="form.voice_hint_tts" color="primary" hide-details inset density="compact" />
+          <span><b>搜索期间播提示语</b><em>找歌要一两秒，先把上面那句提示播出去。</em></span>
+        </label>
+        <label class="xcf-toggle">
+          <v-switch v-model="form.voice_memory" color="primary" hide-details inset density="compact" />
+          <span>
+            <b>记住刚才那首</b>
+            <em>用于「再播一遍」「换一首」这类指代；只留在本机内存里，不落盘。</em>
+          </span>
+        </label>
+      </div>
+
+      <div class="xcf-group">
+        <div class="xcf-group-title">
+          <v-icon icon="mdi-robot-outline" size="16" />
+          AI 兜底与对话
+        </div>
+        <label class="xcf-toggle">
+          <v-switch v-model="form.ai_enabled" color="primary" hide-details inset density="compact" />
+          <span><b>口令表没命中时交给 AI 判定</b><em>借主程序「设定 → AI 大模型」配好的那个助手，插件不存第二份 Key。</em></span>
+        </label>
+        <label class="xcf-toggle">
+          <v-switch v-model="form.ai_chat" color="primary" hide-details inset density="compact" />
+          <span><b>没命中的话当成聊天</b><em>说完 2 分钟内可追问；回答只走音箱 TTS，不进曲库播放。</em></span>
+        </label>
         <v-alert class="mt-3" variant="tonal" density="compact" :type="cfg?.ai_ready ? 'success' : 'warning'">
           <div class="text-body-2">
             {{ cfg?.ai_ready ? '主程序的智能助手可用，这里不再另配一份' : '主程序的智能助手还没配好' }}
@@ -308,107 +379,67 @@ defineExpose({ loadConfig, save })
           </div>
         </v-alert>
         <v-text-field v-model.number="form.ai_timeout" class="mt-2" type="number" min="2" max="30"
-                      hide-details style="max-width: 220px" label="超时（秒，2-30）" />
-        <div class="text-caption text-grey mt-1">
-          AI 借用的是 MoviePilot 已经配好的那个大模型：插件不存第二份 Key、不认第二个端点，
-          宿主没配就自动退回到只用口令表。它只能给出口令表里已有的那几种动作，置信度低或动作未知
-          都当没判出来 —— 只是多一个入口，权限不比口令表大。
+                      hide-details variant="outlined" style="max-width: 220px"
+                      label="超时（秒，2-30）" />
+        <div class="xcf-hint">
+          AI 只能给出口令表里已有的那几种动作，置信度低或动作未知都当没判出来 ——
+          只是多一个入口，权限不比口令表大。
         </div>
       </div>
-
-      <div class="xcf-group">
-        <div class="xcf-group-title">曲库索引</div>
-        <v-row dense>
-          <v-col cols="12" md="5">
-            <v-text-field v-model.number="form.library_limit" type="number" min="500" max="200000" hide-details
-                          label="最多入库多少首" />
-          </v-col>
-          <v-col cols="12" md="5">
-            <v-text-field v-model.number="form.library_refresh" type="number" min="0" max="1440" hide-details
-                          label="自动保鲜周期（分钟，0=只手动）" />
-          </v-col>
-        </v-row>
-        <div class="text-caption text-grey mt-1">
-          索引只为语音点歌服务（读标签与目录名，元数据缓存落在插件数据目录）。
-          当前 {{ cfg?.library_limit ?? 10000 }} 首上限、每 {{ cfg?.library_refresh ?? 60 }} 分钟保鲜一次；
-          索引状态与手动重建在侧栏的「音乐库」那一栏。
-        </div>
-      </div>
-
-      <div class="xcf-group">
-        <div class="xcf-group-title">两条最容易踩的坑</div>
-        <div class="text-caption text-grey">
-          「外部访问地址」必须是音箱所在网段连得到的 IP 或域名，不能是 127.0.0.1，也不能是
-          MP 容器自己看的地址 —— 这一项填错是「点了没声音」最常见的原因。
-        </div>
-        <div class="text-caption text-grey mt-1">
-          直链由插件用本机随机密钥签名并带有效期，只有落在上面这些库目录内的音频能被取到；
-          换密钥会让已经发出去的链接一起失效，这是有意的，不做兼容层。
-        </div>
-      </div>
-    </div>
-
-    <div class="xcf-actions">
-      <v-btn v-if="props.canSwitch" variant="text" class="text-none" prepend-icon="mdi-speaker"
-             @click="emit('switch')">查看播放台
-      </v-btn>
-      <v-spacer />
-      <v-btn color="primary" variant="flat" prepend-icon="mdi-content-save" class="text-none"
-             :loading="saving" @click="save">保存配置
-      </v-btn>
-    </div>
-
-    <v-snackbar v-model="snackbar.show" :color="snackbar.color" timeout="3500" location="bottom">
-      {{ snackbar.text }}
-    </v-snackbar>
+    </template>
   </div>
 </template>
 
 <style scoped>
-/* 仅插件内局部样式；含 .v- 的选择器会被构建的 postcss 门禁整条删掉，所以只碰自己的类。
+/* 仅插件内局部样式；含 .v- 的类名选择器会被构建的 postcss 门禁整条删掉，所以只碰自己的类。
    配色全部取宿主 --v-theme-*，深浅色跟着主程序走。 */
 .xcf {
-  width: 100%; display: flex; flex-direction: column;
+  display: flex; flex-direction: column; gap: 12px;
   --xcf-radius: 14px;
   --xcf-ink: rgba(var(--v-theme-on-surface), .92);
   --xcf-ink-faint: rgba(var(--v-theme-on-surface), .5);
   --xcf-line: rgba(var(--v-border-color), var(--v-border-opacity));
 }
-.xcf-top {
-  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-  padding: 14px 18px 0;
-}
-.xcf-note {
-  margin: 10px 18px 14px; padding: 10px 13px;
-  border-radius: 12px; font-size: 12px; line-height: 1.65;
-  color: var(--xcf-ink);
-  background: rgba(var(--v-theme-info), .08);
-  border: 1px solid rgba(var(--v-theme-info), .18);
-}
-.xcf-body { padding: 0 18px 16px; display: flex; flex-direction: column; gap: 14px; }
 .xcf-group {
-  padding: 16px;
+  padding: 15px 16px 16px;
   border-radius: var(--xcf-radius);
   border: 1px solid var(--xcf-line);
   background: rgba(var(--v-theme-on-surface), .028);
+  transition: border-color .18s ease, background .18s ease, transform .18s ease;
+}
+.xcf-group:hover {
+  border-color: rgba(var(--v-theme-primary), .32);
+  background: rgba(var(--v-theme-on-surface), .042);
 }
 .xcf-group-title {
-  display: flex; align-items: center; gap: 7px; margin-bottom: 12px;
+  display: flex; align-items: center; gap: 7px; margin-bottom: 11px;
   font-size: 12px; font-weight: 650; letter-spacing: .3px; color: var(--xcf-ink);
 }
-.xcf-group-title::before {
-  content: ''; width: 3px; height: 13px; border-radius: 2px;
-  background: rgb(var(--v-theme-primary)); opacity: .8;
+.xcf-group-title .v-icon { color: rgb(var(--v-theme-primary)); opacity: .85; }
+.xcf-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.xcf-toggle {
+  display: flex; align-items: flex-start; gap: 4px; padding: 7px 0;
+  border-radius: 10px; cursor: pointer;
 }
-.xcf-actions {
-  position: sticky; bottom: 0; z-index: 2;
-  display: flex; align-items: center; gap: 8px; padding: 12px 18px;
-  border-top: 1px solid var(--xcf-line);
-  background: rgba(var(--v-theme-surface), .86);
-  backdrop-filter: blur(8px);
+.xcf-toggle > span { min-width: 0; padding-top: 2px; }
+.xcf-toggle b { display: block; font-size: 13px; font-weight: 600; color: var(--xcf-ink); }
+.xcf-toggle em {
+  display: block; margin-top: 1px; font-style: normal;
+  font-size: 11.5px; line-height: 1.6; color: var(--xcf-ink-faint);
+}
+.xcf-hint { margin-top: 8px; font-size: 11.5px; line-height: 1.65; color: var(--xcf-ink-faint); }
+.xcf-hint b { color: var(--xcf-ink); font-weight: 600; }
+.xcf-note {
+  padding: 10px 13px; border-radius: 12px;
+  font-size: 12px; line-height: 1.65; color: var(--xcf-ink);
+  background: rgba(var(--v-theme-info), .08);
+  border: 1px solid rgba(var(--v-theme-info), .18);
+}
+.xcf-note-warn {
+  background: rgba(var(--v-theme-warning), .08);
+  border-color: rgba(var(--v-theme-warning), .2);
 }
 @media (max-width: 760px) {
-  .xcf-top, .xcf-note, .xcf-body { padding-left: 14px; padding-right: 14px; }
   .xcf-group { padding: 13px; }
 }
 </style>

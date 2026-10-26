@@ -330,7 +330,7 @@ function removeGroup(name: string) {
 <template>
   <div class="xcl">
     <div class="xcl-title">
-      <span class="xcl-step">1</span>
+      <v-icon icon="mdi-account-sync-outline" size="18" class="xcl-mark" />
       小米账号与音箱
       <v-chip size="x-small" variant="tonal" class="ml-2"
               :color="props.status?.token_expired ? 'error' : props.status?.logged_in ? 'success' : 'grey'">
@@ -591,12 +591,7 @@ function removeGroup(name: string) {
   display: flex; align-items: center; gap: 8px; margin-bottom: 12px;
   font-size: 13px; font-weight: 650; letter-spacing: .3px; color: var(--xcl-ink);
 }
-.xcl-step {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 20px; height: 20px; border-radius: 7px; flex: 0 0 auto;
-  font-size: 11.5px; font-weight: 700;
-  color: rgb(var(--v-theme-primary)); background: rgba(var(--v-theme-primary), .14);
-}
+.xcl-mark { color: rgb(var(--v-theme-primary)); opacity: .88; flex: 0 0 auto; }
 .xcl-sub {
   display: flex; align-items: center; gap: 6px; margin-bottom: 8px;
   font-size: 12px; font-weight: 650; color: var(--xcl-ink-faint);
