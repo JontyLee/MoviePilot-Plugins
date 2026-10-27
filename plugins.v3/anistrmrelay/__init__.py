@@ -416,12 +416,21 @@ class ANiStrmRelay(_PluginBase):
             except Exception as remove_err:
                 logger.warning(f"ANi-Strm摘除保活任务失败：{remove_err}")
             self.post_message(
-                title="ANi-Strm中转保活失败",
+                title="【ANi Strm 中转】保活失败，内置CF中转已停用",
                 text=(
-                    f"cf_clearance 心跳探活失败，内置CF中转已自动停用，strm播放将返回503。\n"
-                    f"失败原因：{err}\n"
-                    "请在与服务器相同出口IP的浏览器重新完成人机验证，"
-                    "到插件设置更新 cf_clearance 与浏览器UA后重新开启内置CF中转。"
+                    f"**插件**：{self.plugin_name} v{self.plugin_version}\n"
+                    f"**时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    f"**源站**：{self._relay_upstream}\n"
+                    f"**原因**：{str(err)[:120]}\n"
+                    "\n"
+                    "**影响**\n"
+                    "- 内置CF中转已自动停用，strm 播放请求将返回 503\n"
+                    "- 保活心跳已摘除，不会自动重试\n"
+                    "\n"
+                    "**恢复步骤**\n"
+                    "1. 用与服务器相同出口IP的浏览器访问源站，重新完成人机验证\n"
+                    "2. 在插件设置填入新的 cf_clearance 与该浏览器UA\n"
+                    "3. 重新打开「内置CF中转」开关并保存，保活自动恢复"
                 ),
             )
 
