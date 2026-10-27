@@ -16,6 +16,7 @@ from urllib.parse import quote, urlparse, urlunparse
 import httpx
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -34,6 +35,8 @@ DEFAULT_CF_UA = (
 )
 # cf_clearance 保活心跳间隔（分钟），需明显小于 CF 凭证约30分钟的有效期
 RELAY_HEARTBEAT_MINUTES = 12
+# 定时更新（strm补齐）默认周期：每天 04:00，避开观看高峰；置空则禁用
+DEFAULT_CRON = "0 4 * * *"
 # CF 挑战页特征标记
 CHALLENGE_MARKS = (b"Just a moment", b"challenge-platform")
 # 中转转发时透传的客户端请求头（UA/Cookie 一律由插件注入，其余精简避免指纹干扰）
@@ -75,7 +78,7 @@ class ANiStrmRelay(_PluginBase):
     plugin_name = "ANi Strm 自用版（CF中转）"
     plugin_desc = "自动获取当季所有番剧生成strm；内置CF中转代理携带cf_clearance直连openani，解决源站人机挑战后strm无法播放的问题（基于 honue 版 ANi-Strm 迭代）"
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/anistrm.png"
-    plugin_version = "0.1.7"
+    plugin_version = "0.1.8"
     plugin_author = "JontyLee（基于 honue ANi-Strm）"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "anistrm_"
@@ -84,6 +87,7 @@ class ANiStrmRelay(_PluginBase):
 
     _enabled = False
     _use_proxy = True
+    _cron = DEFAULT_CRON
     _onlyonce = False
     _storageplace = None
     _selected_seasons: List[str] = []
@@ -116,6 +120,8 @@ class ANiStrmRelay(_PluginBase):
         self._enabled = config.get("enabled", False)
         use_proxy = config.get("use_proxy")
         self._use_proxy = True if use_proxy is None else use_proxy
+        cron = config.get("cron")
+        self._cron = DEFAULT_CRON if cron is None else (cron or "").strip()
         self._onlyonce = config.get("onlyonce", False)
         self._storageplace = config.get("storageplace") or "/downloads/strm"
         if "selected_seasons" in config:
@@ -172,6 +178,18 @@ class ANiStrmRelay(_PluginBase):
             return
 
         self._scheduler = BackgroundScheduler(timezone=settings.TZ)
+
+        if self._enabled and self._cron:
+            try:
+                self._scheduler.add_job(
+                    func=self.__task,
+                    trigger=CronTrigger.from_crontab(self._cron),
+                    name="ANiStrmRelay定时更新",
+                    id="anistrm_relay_update",
+                )
+                logger.info(f"ANi-Strm定时更新任务已注册：{self._cron}")
+            except Exception as err:
+                logger.error(f"ANi-Strm定时任务配置错误：{err}")
 
         if self._onlyonce:
             logger.info("ANi-Strm服务启动，立即运行一次")
@@ -260,6 +278,12 @@ class ANiStrmRelay(_PluginBase):
             f"ANi-Strm任务完成：季度数={len(seasons)}，文件总数={total_files}，"
             f"新增={total_created}，跳过={total_exists}，改写={total_updated}，失败={total_failed}"
         )
+
+        # 全季度回填只应是一次性动作：完成后自动切回最新季，避免定时任务反复全量拉取冲击配额
+        if "all" in self._selected_seasons:
+            self._selected_seasons = ["latest"]
+            self.__update_config()
+            logger.info("ANi-Strm全季度回填完成，拉取季度已自动切回最新季")
 
     def __get_target_seasons(self) -> List[str]:
         """
@@ -380,7 +404,8 @@ class ANiStrmRelay(_PluginBase):
 
         运行于 APScheduler 工作线程，不能复用绑定 FastAPI 事件循环的全局异步客户端，
         使用独立的短生命周期同步 HTTP/2 客户端。探活失败（命中挑战页或网络异常）时
-        停用内置中转、摘除本任务并发送通知，避免媒体服务器持续打到已失效的中转。
+        停用内置中转、同时摘除保活与定时拉取任务并发送通知，避免失效凭证下持续
+        批量请求源站加重配额惩罚，也避免媒体服务器持续打到已失效的中转。
         """
         if not self._cf_clearance:
             return
@@ -402,11 +427,12 @@ class ANiStrmRelay(_PluginBase):
             logger.warning(f"ANi-Strm中转保活失败，自动停用内置中转：{err}")
             self._relay_enabled = False
             self.__update_config()
-            try:
-                if self._scheduler:
-                    self._scheduler.remove_job("anistrm_relay_heartbeat")
-            except Exception as remove_err:
-                logger.warning(f"ANi-Strm摘除保活任务失败：{remove_err}")
+            for job_id in ("anistrm_relay_heartbeat", "anistrm_relay_update"):
+                try:
+                    if self._scheduler and self._scheduler.get_job(job_id):
+                        self._scheduler.remove_job(job_id)
+                except Exception as remove_err:
+                    logger.warning(f"ANi-Strm摘除任务 {job_id} 失败：{remove_err}")
             self.post_message(
                 title="【ANi Strm 中转】保活失败，内置CF中转已停用",
                 text=(
@@ -417,12 +443,12 @@ class ANiStrmRelay(_PluginBase):
                     "\n"
                     "**影响**\n"
                     "- 内置CF中转已自动停用，strm 播放请求将返回 503\n"
-                    "- 保活心跳已摘除，不会自动重试\n"
+                    "- 保活心跳与定时拉取任务均已摘除，不会自动重试\n"
                     "\n"
                     "**恢复步骤**\n"
                     "1. 用与服务器相同出口IP的浏览器访问源站，重新完成人机验证\n"
                     "2. 在插件设置填入新的 cf_clearance 与该浏览器UA\n"
-                    "3. 重新打开「内置CF中转」开关并保存，保活自动恢复"
+                    "3. 重新打开「内置CF中转」开关并保存，保活与定时拉取自动恢复"
                 ),
             )
 
@@ -726,6 +752,25 @@ class ANiStrmRelay(_PluginBase):
                                     }
                                 ],
                             },
+                            {
+                                "component": "VCol",
+                                "props": {
+                                    "cols": 12,
+                                    "md": 6,
+                                },
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "cron",
+                                            "label": "定时拉取周期",
+                                            "placeholder": DEFAULT_CRON,
+                                            "hint": "cron表达式，启用插件时按期补齐strm；留空停用定时拉取（保活失败会自动暂停）",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
                         ],
                     },
                     {
@@ -923,6 +968,7 @@ class ANiStrmRelay(_PluginBase):
         ], {
             "enabled": False,
             "use_proxy": True,
+            "cron": DEFAULT_CRON,
             "onlyonce": False,
             "storageplace": "/downloads/strm",
             "selected_seasons": ["latest"],
@@ -956,6 +1002,7 @@ class ANiStrmRelay(_PluginBase):
         self.update_config(
             {
                 "onlyonce": self._onlyonce,
+                "cron": self._cron,
                 "enabled": self._enabled,
                 "use_proxy": self._use_proxy,
                 "storageplace": self._storageplace,
