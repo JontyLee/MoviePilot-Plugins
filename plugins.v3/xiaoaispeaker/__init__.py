@@ -261,7 +261,7 @@ class XiaoaiSpeaker(_PluginBase):
         "库内目录浏览与搜索、远程命令；播放直链由插件签名限时，不依赖媒体服务器。"
     )
     plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/xiaoai.svg"
-    plugin_version = "0.6.2"
+    plugin_version = "0.6.3"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "xiaoaispeaker_"
@@ -1281,7 +1281,7 @@ class XiaoaiSpeaker(_PluginBase):
         match = self._match_voice(text)
         if match is None:
             return self._chat_reply(text, device_id)
-        if self._voice_interrupt:
+        if self._voice_interrupt and match.kind in _voice.AUDIO_TAKEOVER_KINDS:
             self._interrupt(device_id)
         if self._voice_hint_tts and match.kind in _voice.SEARCH_TYPES:
             self._tts(self._voice_hint_text, device_id=device_id or None)
@@ -1783,7 +1783,13 @@ class XiaoaiSpeaker(_PluginBase):
         if self.__dict__["_idle_ticks"] < 2:
             return
         self.__dict__["_idle_ticks"] = 0
-        logger.info(f"{_LOG} 队列 {index + 1}/{len(items)} 已播完，推进下一首")
+        # 「停止」在音箱端既可能是播完也可能是用户按了暂停，接口分不清。
+        # 把设备报告的进度一起落一行：真播完时它接近全曲长，暂停时停在半路，
+        # 明天看一眼日志就知道连播有没有把暂停当成播完。
+        played = int(status.get("position") or 0) // 1000
+        whole = int(status.get("duration") or 0) // 1000
+        logger.info(f"{_LOG} 队列 {index + 1}/{len(items)} 已播完，推进下一首"
+                    f" 设备进度 {played} 秒 / 全曲 {whole or '未知'} 秒")
         if self._stop_event().is_set():
             return
         try:

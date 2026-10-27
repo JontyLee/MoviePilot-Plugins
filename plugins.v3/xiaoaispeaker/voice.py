@@ -57,6 +57,12 @@ COMMAND_PRIORITY: Dict[str, int] = {
 # 搜索类口令：命中后其后的文字是名称，不再参与二次匹配
 SEARCH_TYPES = ("play_song", "play_artist", "play_playlist", "play_index")
 
+# 会占住声道的口令：只有命中这些，才需要在小爱自己的回答之前把当前播放切掉。
+# 其余口令（改播放方式、改音量、收藏、定时、查当前歌曲）既不推流也不该停东西，
+# 而 pause+stop 是不可逆的：那条签名直链在音箱端已经结束了，音箱不会自己回来。
+AUDIO_TAKEOVER_KINDS = ("play_song", "play_artist", "play_playlist", "play_recommend",
+                        "play_index", "next", "previous", "tts", "stop")
+
 # 跳字兜底：允许插入的字符数与参与兜底的最短关键词（与上游 FUZZY_* 一致）
 FUZZY_MAX_GAP = 4
 FUZZY_MIN_KEYWORD_LEN = 3

@@ -1638,6 +1638,25 @@ class PluginVoiceTest(unittest.TestCase):
         self.assertIn("interrupt", kinds)
         self.assertIn("tts", kinds)
 
+    def test_state_only_command_keeps_the_track_alive(self) -> None:
+        """只改状态的口令不能把正在放的那首停掉：pause+stop 是不可逆的。
+
+        音箱端那条签名直链一旦被 stop 就结束了，它不会自己回来；接着连播巡检还会
+        把这声"停止"当成"这首播完了"，几十秒后推下一首 —— 说句"随机播放"的代价。
+        """
+        plugin, client = self._plugin(config={"voice_interrupt": True})
+        plugin._set_queue_state(self.tracks[:3], 0, "D1")
+        plugin._on_voice_text("随机播放", "D1", "")
+        plugin._on_voice_text("音量调到50", "D1", "")
+        plugin._on_voice_text("收藏", "D1", "")
+        self.assertEqual(plugin._queue_state()["mode"], "random")
+        self.assertNotIn("interrupt", [call[0] for call in client.calls])
+        self.assertNotIn("stop", [call[2] for call in client.calls
+                                 if call[0] == "play_operation"])
+        # 点歌、切歌这类要占声道的，切掉小爱自己那句回答仍然是对的
+        plugin._on_voice_text("播放歌曲稻香", "D1", "")
+        self.assertIn("interrupt", [call[0] for call in client.calls])
+
     def test_homophone_is_not_played(self) -> None:
         plugin, _ = self._plugin()
         # 关键词本身被听错了就当没听见：不猜，免得把客厅变成随机点歌机
