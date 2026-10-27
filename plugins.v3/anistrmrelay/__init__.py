@@ -72,7 +72,7 @@ class ANiStrmRelay(_PluginBase):
     plugin_name = "ANi Strm 自用版（CF中转）"
     plugin_desc = "自动获取当季所有番剧生成strm；内置CF中转代理携带cf_clearance直连openani，解决源站人机挑战后strm无法播放的问题（基于 honue 版 ANi-Strm 迭代）"
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/anistrm.png"
-    plugin_version = "0.1.3"
+    plugin_version = "0.1.4"
     plugin_author = "JontyLee（基于 honue ANi-Strm）"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "anistrm_"
@@ -262,7 +262,7 @@ class ANiStrmRelay(_PluginBase):
 
     def __get_target_seasons(self) -> List[str]:
         """
-        展开选择项为实际季度列表（latest 解析为远端最新季）。
+        展开选择项为实际季度列表（latest 解析为远端最新季，all 展开为全部可用季度）。
 
         :return: 去重后的季度名列表
         """
@@ -273,6 +273,8 @@ class ANiStrmRelay(_PluginBase):
                     latest = self._client.get_current_season()
                     if latest:
                         seasons.append(latest)
+                elif season == "all":
+                    seasons.extend(self._client.get_available_seasons())
                 else:
                     seasons.append(season)
             return list(dict.fromkeys(seasons))
@@ -912,12 +914,15 @@ class ANiStrmRelay(_PluginBase):
 
     def __build_season_options(self) -> List[Dict[str, str]]:
         """
-        构造「拉取季度」下拉项（最新季 + 上游可用季度）。
+        构造「拉取季度」下拉项（最新季 + 全部季度 + 上游可用季度）。
 
         :return: 下拉选项列表
         """
         seasons = self._client.get_available_seasons() or [self._client._get_local_season()]
-        return [{"title": "最新季", "value": "latest"}] + [
+        return [
+            {"title": "最新季", "value": "latest"},
+            {"title": "全部季度", "value": "all"},
+        ] + [
             {"title": season, "value": season} for season in seasons
         ]
 
