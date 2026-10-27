@@ -72,7 +72,7 @@ class ANiStrmRelay(_PluginBase):
     plugin_name = "ANi Strm 自用版（CF中转）"
     plugin_desc = "自动获取当季所有番剧生成strm；内置CF中转代理携带cf_clearance直连openani，解决源站人机挑战后strm无法播放的问题（基于 honue 版 ANi-Strm 迭代）"
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/anistrm.png"
-    plugin_version = "0.1.4"
+    plugin_version = "0.1.5"
     plugin_author = "JontyLee（基于 honue ANi-Strm）"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "anistrm_"
@@ -407,7 +407,10 @@ class ANiStrmRelay(_PluginBase):
             if challenged:
                 raise RuntimeError("上游返回CF人机挑战页，cf_clearance已失效（或出口IP/UA变更）")
             self._rotate_clearance(resp)
-            logger.debug("ANi-Strm中转cf_clearance保活心跳正常")
+            logger.info(
+                f"ANi-Strm中转保活心跳正常（上游HTTP {resp.status_code}，"
+                f"cf_clearance有效期至下次心跳）"
+            )
         except Exception as err:
             logger.warning(f"ANi-Strm中转保活失败，自动停用内置中转：{err}")
             self._relay_enabled = False
