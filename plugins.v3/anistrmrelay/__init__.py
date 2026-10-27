@@ -75,7 +75,7 @@ class ANiStrmRelay(_PluginBase):
     plugin_name = "ANi Strm 自用版（CF中转）"
     plugin_desc = "自动获取当季所有番剧生成strm；内置CF中转代理携带cf_clearance直连openani，解决源站人机挑战后strm无法播放的问题（基于 honue 版 ANi-Strm 迭代）"
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/anistrm.png"
-    plugin_version = "0.1.6"
+    plugin_version = "0.1.7"
     plugin_author = "JontyLee（基于 honue ANi-Strm）"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "anistrm_"
@@ -98,8 +98,6 @@ class ANiStrmRelay(_PluginBase):
     _rewrite_existing = False
     # 内置中转实际转发的上游源站（即原始 proxy_base 配置值）
     _relay_upstream = ""
-    # 滚动续期凭证上次持久化的时间戳（节流）
-    _relay_persist_ts = 0.0
 
     def __init__(self):
         super().__init__()
@@ -360,7 +358,8 @@ class ANiStrmRelay(_PluginBase):
         CF 在会话保持活跃期间会随正常响应重新 Set-Cookie 新的 cf_clearance，
         中转跟住这个滚动即可把"一次手贴"的有效窗口延续为整段连续观看期；
         撤销类空值（DELETED/空串）忽略，保留旧值等待人工重新验证。
-        持久化按 5 分钟节流，避免每个播放请求都写库。
+        捕获即持久化：滚动仅在凭证真正变化时发生，写入并不频繁，而插件重载会
+        丢失内存值——若不立即落库，重载后将继续携带已被滚动作废的旧凭证导致挑战。
 
         :param resp: 已收到响应头的上游请求（可为未读取的流式响应）
         """
@@ -372,11 +371,8 @@ class ANiStrmRelay(_PluginBase):
         if not new_value or new_value.upper() == "DELETED" or new_value == self._cf_clearance:
             return
         self._cf_clearance = new_value
-        logger.info("ANi-Strm中转已捕获滚动刷新的cf_clearance（热生效）")
-        now = time.time()
-        if now - self._relay_persist_ts >= 300:
-            self._relay_persist_ts = now
-            self.__update_config()
+        logger.info("ANi-Strm中转已捕获滚动刷新的cf_clearance（热生效并已持久化）")
+        self.__update_config()
 
     def __relay_heartbeat(self):
         """
