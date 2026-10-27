@@ -46,6 +46,9 @@ RELAY_PASSTHROUGH_RESP_HEADERS = frozenset(
 )
 # 中转流式读取块大小
 RELAY_CHUNK_SIZE = 64 * 1024
+# 目录列举请求的最小间隔（秒）。openani 源站曾因高频目录请求超配额被整域强制人机
+# 挑战（honue/MoviePilot-Plugins#147），批量回填多季度时按此间隔温和限速
+FOLDER_REQUEST_INTERVAL_SECONDS = 1.0
 
 # 全进程共享的 httpx 异步客户端（HTTP/2 出站，与已验证可通过 cf_clearance 重放的
 # curl HTTP/2 指纹同级；连接池常驻复用，插件重载不关闭以避免跨事件循环竞态）
@@ -72,7 +75,7 @@ class ANiStrmRelay(_PluginBase):
     plugin_name = "ANi Strm 自用版（CF中转）"
     plugin_desc = "自动获取当季所有番剧生成strm；内置CF中转代理携带cf_clearance直连openani，解决源站人机挑战后strm无法播放的问题（基于 honue 版 ANi-Strm 迭代）"
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/anistrm.png"
-    plugin_version = "0.1.5"
+    plugin_version = "0.1.6"
     plugin_author = "JontyLee（基于 honue ANi-Strm）"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "anistrm_"
@@ -386,19 +389,7 @@ class ANiStrmRelay(_PluginBase):
         if not self._cf_clearance:
             return
         try:
-            with httpx.Client(
-                http2=True,
-                follow_redirects=True,
-                timeout=httpx.Timeout(15.0, read=30.0, write=10.0, pool=10.0),
-            ) as client:
-                resp = client.post(
-                    f"{self._relay_upstream.rstrip('/')}/",
-                    headers={
-                        "User-Agent": self._cf_user_agent,
-                        "Cookie": f"cf_clearance={self._cf_clearance}",
-                    },
-                    content=b'{"password":""}',
-                )
+            resp = self.__relay_probe()
             body_head = resp.content[:4096]
             challenged = any(mark in body_head for mark in CHALLENGE_MARKS) or (
                 resp.status_code in (403, 429, 503)
@@ -438,6 +429,39 @@ class ANiStrmRelay(_PluginBase):
                     "3. 重新打开「内置CF中转」开关并保存，保活自动恢复"
                 ),
             )
+
+    def __relay_probe(self) -> httpx.Response:
+        """
+        保活单次探活：以解题UA+凭证对上游根路径POST目录请求。
+
+        Cloudflare 在配额紧张时会将携带有效凭证的正常请求长时间排队，单次读超时
+        并不代表凭证失效；网络类异常间隔30秒重试一次，仍失败才交由调用方判定，
+        避免偶发排队把中转误停用。
+
+        :return: 上游探活响应（内容已读取）
+        """
+        last_err: Optional[Exception] = None
+        for attempt in (1, 2):
+            try:
+                with httpx.Client(
+                    http2=True,
+                    follow_redirects=True,
+                    timeout=httpx.Timeout(15.0, read=60.0, write=15.0, pool=15.0),
+                ) as client:
+                    return client.post(
+                        f"{self._relay_upstream.rstrip('/')}/",
+                        headers={
+                            "User-Agent": self._cf_user_agent,
+                            "Cookie": f"cf_clearance={self._cf_clearance}",
+                        },
+                        content=b'{"password":""}',
+                    )
+            except Exception as err:
+                last_err = err
+                if attempt == 1:
+                    logger.warning(f"ANi-Strm保活探活首次异常（{err}），30秒后重试一次")
+                    time.sleep(30)
+        raise last_err
 
     async def api_relay(self, full_path: str, request: Request):
         """
@@ -979,6 +1003,8 @@ class AniStrmClient:
         self._use_proxy = use_proxy
         # 目录请求的固定查询后缀（走内置中转时携带 rt 令牌；直连为空）
         self._query_suffix = ""
+        # 上一次目录列举请求时间戳（配合最小间隔限速）
+        self._last_folder_request_ts = 0.0
 
     def set_query_suffix(self, suffix: str):
         """
@@ -1052,6 +1078,10 @@ class AniStrmClient:
         return seasons
 
     def _fetch_folder_payload(self, url: str) -> Dict[str, Any]:
+        wait = FOLDER_REQUEST_INTERVAL_SECONDS - (time.time() - self._last_folder_request_ts)
+        if wait > 0:
+            time.sleep(wait)
+        self._last_folder_request_ts = time.time()
         if self._query_suffix and "?" not in url:
             url = f"{url}?{self._query_suffix}"
         response = self._request_factory().post(
