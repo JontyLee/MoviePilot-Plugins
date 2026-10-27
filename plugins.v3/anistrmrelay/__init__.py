@@ -16,7 +16,7 @@ from urllib.parse import quote, urlparse, urlunparse
 import httpx
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
@@ -32,6 +32,8 @@ DEFAULT_CF_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36 Edg/155.0.0.0"
 )
+# cf_clearance 保活心跳间隔（分钟），需明显小于 CF 凭证约30分钟的有效期
+RELAY_HEARTBEAT_MINUTES = 12
 # CF 挑战页特征标记
 CHALLENGE_MARKS = (b"Just a moment", b"challenge-platform")
 # 中转转发时透传的客户端请求头（UA/Cookie 一律由插件注入，其余精简避免指纹干扰）
@@ -70,7 +72,7 @@ class ANiStrmRelay(_PluginBase):
     plugin_name = "ANi Strm 自用版（CF中转）"
     plugin_desc = "自动获取当季所有番剧生成strm；内置CF中转代理携带cf_clearance直连openani，解决源站人机挑战后strm无法播放的问题（基于 honue 版 ANi-Strm 迭代）"
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/anistrm.png"
-    plugin_version = "0.1.2"
+    plugin_version = "0.1.3"
     plugin_author = "JontyLee（基于 honue ANi-Strm）"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "anistrm_"
@@ -79,7 +81,6 @@ class ANiStrmRelay(_PluginBase):
 
     _enabled = False
     _use_proxy = True
-    _cron = None
     _onlyonce = False
     _storageplace = None
     _selected_seasons: List[str] = []
@@ -114,7 +115,6 @@ class ANiStrmRelay(_PluginBase):
         self._enabled = config.get("enabled", False)
         use_proxy = config.get("use_proxy")
         self._use_proxy = True if use_proxy is None else use_proxy
-        self._cron = config.get("cron") or "20 22,23,0,1 * * *"
         self._onlyonce = config.get("onlyonce", False)
         self._storageplace = config.get("storageplace") or "/downloads/strm"
         if "selected_seasons" in config:
@@ -166,22 +166,11 @@ class ANiStrmRelay(_PluginBase):
             f"seasons={self._selected_seasons or []}, storage={self._storageplace}"
         )
 
-        if not (self._enabled or self._onlyonce):
-            logger.info("ANi-Strm未启用且未触发立即运行，跳过任务注册")
+        if not (self._enabled or self._onlyonce or self._relay_enabled):
+            logger.info("ANi-Strm未启用、未触发立即运行且未开启中转，跳过任务注册")
             return
 
         self._scheduler = BackgroundScheduler(timezone=settings.TZ)
-
-        if self._enabled and self._cron:
-            try:
-                self._scheduler.add_job(
-                    func=self.__task,
-                    trigger=CronTrigger.from_crontab(self._cron),
-                    name="ANiStrmRelay文件创建",
-                )
-                logger.info(f"ANi-Strm定时任务创建成功：{self._cron}")
-            except Exception as err:
-                logger.error(f"定时任务配置错误：{err}")
 
         if self._onlyonce:
             logger.info("ANi-Strm服务启动，立即运行一次")
@@ -192,6 +181,15 @@ class ANiStrmRelay(_PluginBase):
                 name="ANiStrmRelay文件创建",
             )
             self._onlyonce = False
+
+        if self._relay_enabled:
+            self._scheduler.add_job(
+                func=self.__relay_heartbeat,
+                trigger=IntervalTrigger(minutes=RELAY_HEARTBEAT_MINUTES),
+                name="ANiStrmRelay中转保活",
+                id="anistrm_relay_heartbeat",
+            )
+            logger.info(f"ANi-Strm中转cf_clearance保活任务已注册（每{RELAY_HEARTBEAT_MINUTES}分钟）")
 
         self.__update_config()
 
@@ -374,6 +372,58 @@ class ANiStrmRelay(_PluginBase):
         if now - self._relay_persist_ts >= 300:
             self._relay_persist_ts = now
             self.__update_config()
+
+    def __relay_heartbeat(self):
+        """
+        cf_clearance 保活心跳：定期以解题浏览器UA+凭证直连上游探活，顺带捕获滚动刷新的新凭证。
+
+        运行于 APScheduler 工作线程，不能复用绑定 FastAPI 事件循环的全局异步客户端，
+        使用独立的短生命周期同步 HTTP/2 客户端。探活失败（命中挑战页或网络异常）时
+        停用内置中转、摘除本任务并发送通知，避免媒体服务器持续打到已失效的中转。
+        """
+        if not self._cf_clearance:
+            return
+        try:
+            with httpx.Client(
+                http2=True,
+                follow_redirects=True,
+                timeout=httpx.Timeout(15.0, read=30.0, write=10.0, pool=10.0),
+            ) as client:
+                resp = client.post(
+                    f"{self._relay_upstream.rstrip('/')}/",
+                    headers={
+                        "User-Agent": self._cf_user_agent,
+                        "Cookie": f"cf_clearance={self._cf_clearance}",
+                    },
+                    content=b'{"password":""}',
+                )
+            body_head = resp.content[:4096]
+            challenged = any(mark in body_head for mark in CHALLENGE_MARKS) or (
+                resp.status_code in (403, 429, 503)
+                and b"cloudflare" in resp.content.lower()
+            ) or resp.headers.get("cf-mitigated") == "challenge"
+            if challenged:
+                raise RuntimeError("上游返回CF人机挑战页，cf_clearance已失效（或出口IP/UA变更）")
+            self._rotate_clearance(resp)
+            logger.debug("ANi-Strm中转cf_clearance保活心跳正常")
+        except Exception as err:
+            logger.warning(f"ANi-Strm中转保活失败，自动停用内置中转：{err}")
+            self._relay_enabled = False
+            self.__update_config()
+            try:
+                if self._scheduler:
+                    self._scheduler.remove_job("anistrm_relay_heartbeat")
+            except Exception as remove_err:
+                logger.warning(f"ANi-Strm摘除保活任务失败：{remove_err}")
+            self.post_message(
+                title="ANi-Strm中转保活失败",
+                text=(
+                    f"cf_clearance 心跳探活失败，内置CF中转已自动停用，strm播放将返回503。\n"
+                    f"失败原因：{err}\n"
+                    "请在与服务器相同出口IP的浏览器重新完成人机验证，"
+                    "到插件设置更新 cf_clearance 与浏览器UA后重新开启内置CF中转。"
+                ),
+            )
 
     async def api_relay(self, full_path: str, request: Request):
         """
@@ -633,23 +683,6 @@ class ANiStrmRelay(_PluginBase):
                                     {
                                         "component": "VTextField",
                                         "props": {
-                                            "model": "cron",
-                                            "label": "执行周期",
-                                            "placeholder": "0 0 ? ? ?",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {
-                                    "cols": 12,
-                                    "md": 6,
-                                },
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
                                             "model": "proxy_base",
                                             "label": "反代/源站地址",
                                             "placeholder": DEFAULT_UPSTREAM,
@@ -860,7 +893,6 @@ class ANiStrmRelay(_PluginBase):
             "storageplace": "/downloads/strm",
             "selected_seasons": ["latest"],
             "proxy_base": DEFAULT_UPSTREAM,
-            "cron": "20 22,23,0,1 * * *",
             "relay_enabled": False,
             "cf_clearance": "",
             "cf_user_agent": "",
@@ -887,7 +919,6 @@ class ANiStrmRelay(_PluginBase):
         self.update_config(
             {
                 "onlyonce": self._onlyonce,
-                "cron": self._cron,
                 "enabled": self._enabled,
                 "use_proxy": self._use_proxy,
                 "storageplace": self._storageplace,
