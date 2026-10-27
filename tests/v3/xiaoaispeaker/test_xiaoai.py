@@ -79,9 +79,12 @@ class _FakePluginBase:
 _SETTINGS = _stub_env._Settings()
 _stub_env.install(_FakePluginBase, settings_obj=_SETTINGS)
 
+from unittest import mock  # noqa: E402
+
 sys.path.insert(0, str(_ROOT / "plugins.v3"))
 import xiaoaispeaker as x  # noqa: E402
-from xiaoaispeaker import lyrics, media, mina  # noqa: E402
+from app.sdk.logging import logger as _logger  # noqa: E402
+from xiaoaispeaker import library, lyrics, media, mina  # noqa: E402
 
 
 class _Resp:
@@ -1470,6 +1473,38 @@ class PluginStreamEndpointTest(unittest.TestCase):
         self.assertEqual(b"".join(response.iterator), self.track.read_bytes())
 
 
+class LibraryIndexTest(unittest.TestCase):
+    """索引自己那两件事：重建要留下一行能 grep 的结果，落盘的缓存不该谁都能读。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        base = Path(self._tmp.name).resolve()
+        self.root = base / "music"
+        (self.root / "周杰伦" / "范特西").mkdir(parents=True)
+        for name in ("01 - 稻香.mp3", "02 - 双截棍.mp3", "03 - 朴素.mp3"):
+            (self.root / "周杰伦" / "范特西" / name).write_bytes(b"V" * 64)
+        self.cache = base / "library-tags.json.gz"
+        self.index = library.LibraryIndex()
+        self.index.configure(self.cache)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_rebuild_leaves_one_greppable_line(self) -> None:
+        mark = len(_logger.lines)
+        # 上限 2 首：第三首没扫进来，页面上只会少一首，日志得说清是被上限截的
+        self.assertEqual(self.index.collect([self.root], media.DEFAULT_AUDIO_EXTS, 2), 2)
+        line = "\n".join(_logger.lines[mark:])
+        self.assertIn("曲库索引重建", line)
+        self.assertIn("耗时", line)
+        self.assertIn("已到上限 2 首", line)
+
+    def test_cache_file_is_owner_only(self) -> None:
+        self.index.collect([self.root], media.DEFAULT_AUDIO_EXTS, 200)
+        mode = self.cache.stat().st_mode & 0o777
+        self.assertEqual(mode, 0o600, "整库路径清单不该给容器里别的进程读")
+
+
 class PluginVoiceTest(unittest.TestCase):
     """语音链路：会话轮询的去重、口令判定与执行、睡眠定时、收藏/歌单接口。"""
 
@@ -1520,6 +1555,36 @@ class PluginVoiceTest(unittest.TestCase):
         self.assertIn(("play_operation", "D1", "stop"), client.calls)
         handled = self._listener_tick(plugin, client, [old, newer])
         self.assertEqual(handled, 0, "同一条记录不能被反复执行")
+
+    def test_slow_round_still_waits_a_full_interval(self) -> None:
+        """一轮跑得比间隔还久时，下一轮要等满间隔 —— 从本轮**结束**起算，不是从开始。
+
+        从开始起算的话，慢轮跑完「下次时间」已经在过去，宿主下一次 tick 立刻又发一轮：
+        配 2 秒实际是贴着打小米，两轮还会重叠成一天几十条 skipped 告警。
+        """
+        plugin, client = self._plugin(config={"voice_poll": 2}, asks=[])
+        listener = plugin._listener()
+        clock = {"t": time.time()}
+
+        class _Clock:
+            """只替掉 speech 模块里那个 time，其余调用原样转给真的 time。"""
+
+            def time(self) -> float:
+                return clock["t"]
+
+            def __getattr__(self, name):
+                return getattr(time, name)
+
+        def slow_ask(*args, **kwargs) -> list:
+            clock["t"] += 5.0  # 这轮问小米问掉 5 秒，比配置的 2 秒还久
+            return []
+
+        client.get_latest_ask = slow_ask
+        with mock.patch.object(x._speech, "time", _Clock()):
+            listener._next_at = 0.0
+            self.assertEqual(listener.tick(), 0)
+            self.assertGreaterEqual(listener.status()["next_in"], 2.0,
+                                    "慢轮之后不该立刻再来一轮")
 
     def test_listener_treats_fetch_failure_as_unknown(self) -> None:
         plugin, client = self._plugin(asks=None)

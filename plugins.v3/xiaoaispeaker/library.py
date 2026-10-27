@@ -26,6 +26,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from app.sdk.logging import logger
+
 from . import media as _media
 from .text import (
     MAX_SEARCH_RESULTS,
@@ -44,6 +46,9 @@ try:  # 有标签就读标签，没有就退回文件名与目录结构
     from mutagen import File as _MutagenFile  # type: ignore
 except Exception:  # pragma: no cover - 取决于宿主环境
     _MutagenFile = None
+
+# 日志前缀与插件保持一致：出问题时一条 grep 就能把整条链路捞出来
+_LOG_TAG = "[xiaoai]"
 
 # 索引上限：与上游 max_song_index 的量纲一致（要能容下上万首的库），
 # 再高就只是把内存和重建时间换成一个更慢的"我还在等"
@@ -297,6 +302,7 @@ class LibraryIndex:
         except Exception as err:  # pragma: no cover - 文件系统异常不该打断插件
             with self._lock:
                 self._last_error = f"scan_failed: {err}"
+            logger.warning(f"{_LOG_TAG} 曲库扫描失败，沿用上一次索引：{err}")
             return 0
         scanned = time.time()
         songs: List[Song] = []
@@ -317,6 +323,15 @@ class LibraryIndex:
             self._truncated = truncated
             self._last_error = ""
         self._save_cache()
+        # 每小时后台重建本来一行日志都没有：索引明明在工作，出问题却只能靠页面对数字。
+        # 截断与跳过是这里最该被看见的两件事，它们都只影响这一次扫描。
+        logger.info(
+            f"{_LOG_TAG} 曲库索引重建: {len(songs)} 首 {len(playlists)} 个歌单"
+            f" 耗时 {max(self._built_at - started, 0.0):.1f} 秒"
+            f" 标签缓存 {len(self._tag_cache)} 条"
+            + (f" 跳过 {skipped} 个" if skipped else "")
+            + (f" 已到上限 {limit} 首，剩下的没扫" if truncated else "")
+        )
         return len(songs)
 
     def refresh(self, roots: List[Path], exts: Tuple[str, ...],
@@ -401,6 +416,8 @@ class LibraryIndex:
             tmp = self._cache_path.with_suffix(self._cache_path.suffix + ".tmp")
             with gzip.open(tmp, "wt", encoding="utf-8") as handle:
                 json.dump({"v": _TAG_CACHE_VERSION, "songs": self._tag_cache}, handle)
+            # 整库路径清单不该给容器里别的进程读，跟 state/ 下那批带票据的文件一个权限
+            os.chmod(tmp, 0o600)
             os.replace(tmp, self._cache_path)
         except (OSError, ValueError):
             pass

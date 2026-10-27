@@ -128,8 +128,12 @@ class SpeechListener:
             return handled
         self._failures = 0
         # 空闲降频：没有 AI 对话在等追问时才拉长间隔
-        self._next_at = now + (self._interval if (handled or self._chat_on())
-                               else min(self._interval * 2, IDLE_POLL_SECONDS))
+        gap = self._interval if (handled or self._chat_on()) else min(
+            self._interval * 2, IDLE_POLL_SECONDS)
+        # 从本轮**结束**起算，不是从开始：一轮问小米要几秒，从开始算的话慢轮一跑完
+        # 「下次时间」就已经在过去，宿主下一次 tick 立刻又发一轮 —— 配 2 秒实际是贴着
+        # 打，两轮还会重叠，刷出一堆 skipped 告警。
+        self._next_at = time.time() + gap
         return handled
 
     def _chat_on(self) -> bool:
