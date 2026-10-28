@@ -99,7 +99,7 @@ class ANiStrmRelay(_PluginBase):
     plugin_name = "ANi Strm 自用版（CF中转）"
     plugin_desc = "自动获取当季所有番剧生成strm；内置CF中转代理携带cf_clearance直连openani，解决源站人机挑战后strm无法播放的问题（基于 honue 版 ANi-Strm 迭代）"
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/anistrm.png"
-    plugin_version = "0.1.9"
+    plugin_version = "0.2.0"
     plugin_author = "JontyLee（基于 honue ANi-Strm）"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "anistrm_"
@@ -109,7 +109,6 @@ class ANiStrmRelay(_PluginBase):
     _enabled = False
     _use_proxy = True
     _cron = DEFAULT_CRON
-    _onlyonce = False
     _storageplace = None
     _selected_seasons: List[str] = []
     _proxy_base = None
@@ -145,7 +144,6 @@ class ANiStrmRelay(_PluginBase):
         self._use_proxy = True if use_proxy is None else use_proxy
         cron = config.get("cron")
         self._cron = DEFAULT_CRON if cron is None else (cron or "").strip()
-        self._onlyonce = config.get("onlyonce", False)
         self._storageplace = config.get("storageplace") or "/downloads/strm"
         if "selected_seasons" in config:
             self._selected_seasons = config.get("selected_seasons") or []
@@ -199,15 +197,15 @@ class ANiStrmRelay(_PluginBase):
             f"rt={self._relay_token}" if (self._relay_enabled and self._relay_token) else ""
         )
         logger.info(
-            f"ANi-Strm配置加载：enabled={self._enabled}, onlyonce={self._onlyonce}, "
+            f"ANi-Strm配置加载：enabled={self._enabled}, "
             f"use_proxy={self._use_proxy}, base={effective_base}, "
             f"relay={self._relay_enabled}(upstream={self._relay_upstream}, "
             f"cookie={'已配置' if self._cf_clearance else '未配置'}), "
             f"seasons={self._selected_seasons or []}, storage={self._storageplace}"
         )
 
-        if not (self._enabled or self._onlyonce or self._relay_enabled):
-            logger.info("ANi-Strm未启用、未触发立即运行且未开启中转，跳过任务注册")
+        if not (self._enabled or self._relay_enabled):
+            logger.info("ANi-Strm未启用且未开启中转，跳过任务注册")
             return
 
         self._scheduler = BackgroundScheduler(timezone=settings.TZ)
@@ -224,28 +222,34 @@ class ANiStrmRelay(_PluginBase):
             except Exception as err:
                 logger.error(f"ANi-Strm定时任务配置错误：{err}")
 
-        if self._onlyonce:
-            logger.info("ANi-Strm服务启动，立即运行一次")
-            self._scheduler.add_job(
-                func=self.__task,
-                trigger="date",
-                run_date=datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(seconds=3),
-                name="ANiStrmRelay文件创建",
-            )
-            self._onlyonce = False
-
         if self._relay_enabled:
             self._heartbeat_misses = 0
+            # 保存/插件重载/MP重启后都会重走本初始化：约15秒即打第一拍探活，
+            # 尽早定性cf_clearance并捕获滚动凭证，不等完整12分钟间隔
             self._scheduler.add_job(
                 func=self.__relay_heartbeat,
                 trigger=IntervalTrigger(minutes=RELAY_HEARTBEAT_MINUTES),
                 name="ANiStrmRelay中转保活",
                 id="anistrm_relay_heartbeat",
-                # 保存配置约1分钟后先验一次：粘贴超过18分钟的token大概率已过期，
-                # 尽早定性并捕获滚动凭证，而不是干等首个完整间隔后一击毙命
-                next_run_time=datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(minutes=1),
+                next_run_time=datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(seconds=15),
             )
-            logger.info(f"ANi-Strm中转cf_clearance保活任务已注册（首拍1分钟后，此后每{RELAY_HEARTBEAT_MINUTES}分钟）")
+            logger.info(f"ANi-Strm中转cf_clearance保活任务已注册（首拍15秒后，此后每{RELAY_HEARTBEAT_MINUTES}分钟）")
+
+        # 保存配置即自动补齐一次strm：开启中转时排在首颗保活心跳（约15秒）之后，
+        # 用验活并滚动过的凭证起跑；未开中转则立即执行
+        if self._enabled:
+            pull_delay = 45 if self._relay_enabled else 3
+            logger.info(
+                f"ANi-Strm保存配置自动运行一次已排程（{pull_delay}秒后"
+                f"{'，先由首拍心跳验证cf_clearance' if self._relay_enabled else ''}）"
+            )
+            self._scheduler.add_job(
+                func=self.__task,
+                trigger="date",
+                run_date=datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(seconds=pull_delay),
+                name="ANiStrmRelay保存后自动补齐",
+                id="anistrm_relay_startup_pull",
+            )
 
         self.__update_config()
 
@@ -488,7 +492,7 @@ class ANiStrmRelay(_PluginBase):
             logger.warning(f"ANi-Strm中转保活连续{self._heartbeat_misses}次失败，自动停用内置中转：{err}")
             self._relay_enabled = False
             self.__update_config()
-            for job_id in ("anistrm_relay_heartbeat", "anistrm_relay_update"):
+            for job_id in ("anistrm_relay_heartbeat", "anistrm_relay_update", "anistrm_relay_startup_pull"):
                 try:
                     if self._scheduler and self._scheduler.get_job(job_id):
                         self._scheduler.remove_job(job_id)
@@ -729,7 +733,7 @@ class ANiStrmRelay(_PluginBase):
                                 "component": "VCol",
                                 "props": {
                                     "cols": 12,
-                                    "md": 3,
+                                    "md": 4,
                                 },
                                 "content": [
                                     {
@@ -745,7 +749,7 @@ class ANiStrmRelay(_PluginBase):
                                 "component": "VCol",
                                 "props": {
                                     "cols": 12,
-                                    "md": 3,
+                                    "md": 4,
                                 },
                                 "content": [
                                     {
@@ -761,23 +765,7 @@ class ANiStrmRelay(_PluginBase):
                                 "component": "VCol",
                                 "props": {
                                     "cols": 12,
-                                    "md": 3,
-                                },
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {
-                                            "model": "onlyonce",
-                                            "label": "立即运行一次",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {
-                                    "cols": 12,
-                                    "md": 3,
+                                    "md": 4,
                                 },
                                 "content": [
                                     {
@@ -1013,10 +1001,10 @@ class ANiStrmRelay(_PluginBase):
                                             "variant": "tonal",
                                             "text": "内置CF中转用法：\n"
                                             "1. 用浏览器（与MP同一出口IP）访问反代/源站地址并完成人机验证，复制 cf_clearance\n"
-                                            "2. 填入 cookie 与验证时浏览器的UA，填写「中转访问地址」后开启内置CF中转\n"
-                                            "3. 勾选「改写已存在strm」运行一次，旧直链自动替换为中转地址，之后取消勾选\n"
+                                            "2. 填入 cookie 与验证时浏览器的UA，填写「中转访问地址」后开启内置CF中转并保存\n"
+                                            "3. 保存后自动探活验活并补齐一次strm；如需把旧直链换成中转地址，勾选「改写已存在strm」后再保存\n"
                                             "cookie过期时播放会返回502提示，仅需更新cookie，strm文件无需重新生成\n"
-                                            "中转接口匿名可达，建议设置访问令牌；媒体服务器需能直连MP（开启中转后请勿再配http_proxy）",
+                                            "保活成功时会滚动续期cf_clearance并自动写回本设置；中转接口匿名可达，建议设置访问令牌；媒体服务器需能直连MP（开启中转后请勿再配http_proxy）",
                                             "style": "white-space: pre-line;",
                                         },
                                     },
@@ -1030,7 +1018,6 @@ class ANiStrmRelay(_PluginBase):
             "enabled": False,
             "use_proxy": True,
             "cron": DEFAULT_CRON,
-            "onlyonce": False,
             "storageplace": "/downloads/strm",
             "selected_seasons": ["latest"],
             "proxy_base": DEFAULT_UPSTREAM,
@@ -1062,7 +1049,6 @@ class ANiStrmRelay(_PluginBase):
         """
         self.update_config(
             {
-                "onlyonce": self._onlyonce,
                 "cron": self._cron,
                 "enabled": self._enabled,
                 "use_proxy": self._use_proxy,
