@@ -69,6 +69,12 @@ _SCAN = "_TagFlow__scan"
 _HAS_TAGS = "_TagFlow__is_complete"
 _SCRAPE = "_TagFlow__scrape_file"
 
+# 错峰（_pace_source）睡的是真实时间，而这些用例里的网络全是替身：换成记录「谁领到了哪一档
+# 铺开」的替身，免得整库那几条用例按秒空转。时序本身由 SourcePacingTest 拿原函数直接验。
+_REAL_PACE = mls.TagFlow._pace_source
+PACED: list = []
+mls.TagFlow._pace_source = lambda self, resource, spread: PACED.append((resource, spread))
+
 
 class _Resp:
     """requests.Response 的最小替身：只带插件要看的那三样（status_code / json / close）。
@@ -1063,8 +1069,8 @@ class ContractTest(unittest.TestCase):
         flow = (comp / "flow.ts").read_text(encoding="utf-8")
 
         notes = mls._FORM_NOTES
-        for phrase in ("留空即全部源", "只补缺", "强制覆盖", "宿主", "同分时",
-                       "目录结构兜底", "手工改过", "不会清空", "（1-3）", "回滚",
+        for phrase in ("留空即全部源", "只补缺", "强制覆盖", "宿主", "分数只是门槛",
+                       "一样全", "目录结构兜底", "手工改过", "不会清空", "（1-3）", "回滚",
                        "音频白名单", ".trickplay", "软链", "库内路径不出本机"):
             self.assertIn(phrase, notes)
         # 说明集中在一处、写在代码里，就不能只在 Vue 那一侧维护
@@ -1668,8 +1674,8 @@ class ContractTest(unittest.TestCase):
         fp.write_bytes(b"x")
         return fp
 
-    def test_fetch_candidates_merges_all_sources(self):
-        """没有满分候选时逐源问完，并给每个候选标上命中的源。"""
+    def test_fetch_candidates_asks_every_source_and_merges(self):
+        """全部源都问完（不再有「出到满分就停」），并给每个候选标上命中的源。"""
         fp = self._track()
         by_resource = {
             r: [{"name": "黑面", "artist": "陈奕迅", "album": f"{r} 精选"}]
@@ -1684,15 +1690,17 @@ class ContractTest(unittest.TestCase):
         finally:
             mls.RequestUtils = orig
         self.assertIsNone(failure)
-        self.assertEqual(calls, list(mls._DEFAULT_RESOURCES))
+        # 并行发出的，顺序不作断言；回来按配置的名单排好
+        self.assertEqual(sorted(calls), sorted(list(mls._DEFAULT_RESOURCES)))
         self.assertEqual([c["resource"] for c in cands], list(mls._DEFAULT_RESOURCES))
         # 专辑名各源不同 → 全部只有 2 分，落到阈值以下
         picked, score = p._pick_best(fp, cands)
         self.assertIsNone(picked)
         self.assertEqual(score, 2)
 
-    def test_fetch_candidates_stops_at_perfect_score(self):
-        """某源已出 3/3 候选就停，避免每个文件都打满全部源。"""
+    def test_fetch_candidates_keeps_asking_after_a_perfect_one(self):
+        """前一个源已经给了不相干的候选、第二个源出到 3/3 —— 剩下的源照样要问：
+        满分只说明三项对得上，说明不了它是给得最全的那一条。"""
         fp = self._track()
         by_resource = {
             "netease": [{"name": "无关曲", "artist": "无关人", "album": "无关碟"}],
@@ -1707,9 +1715,59 @@ class ContractTest(unittest.TestCase):
         finally:
             mls.RequestUtils = orig
         self.assertIsNone(failure)
-        self.assertEqual(calls, ["netease", "qmusic"])
+        self.assertEqual(sorted(calls), sorted(list(mls._DEFAULT_RESOURCES)))
         picked, score = p._pick_best(fp, cands)
         self.assertEqual((score, picked["resource"]), (3, "qmusic"))
+
+    def test_score_tie_is_broken_by_completeness(self):
+        """两条都 3/3 时选给得全的那一条 —— 音轨与年份不参与打分，却是要写进文件的东西。
+
+        酷狗/咪咕/MusicBrainz 的检索接口给不出音轨，只按分数就会按源顺序把带音轨的那条
+        让给先答的裸候选，而「这一轮到底给文件补上了几项」正是这里决定的。
+        """
+        fp = self._track()
+        p = self._plugin(min_score=3, resources=["kugou", "netease"])
+        bare = {"resource": "kugou", "name": "黑面", "artist": "陈奕迅",
+                "album": "黑白灰", "album_img": "http://s/1.jpg"}
+        rich = {"resource": "netease", "name": "黑面", "artist": "陈奕迅",
+                "album": "黑白灰", "album_img": "http://p/2.jpg",
+                "year": 1059609600000, "tracknumber": 7, "discnumber": 1}
+        self.assertEqual(mls.TagFlow._candidate_completeness(bare), 1)
+        self.assertEqual(mls.TagFlow._candidate_completeness(rich), 4)
+        for order in ([bare, rich], [rich, bare]):
+            picked, score, _ = p._best_candidate(fp, list(order))
+            self.assertEqual((score, picked["resource"]), (3, "netease"),
+                             "完整度没压过候选返回顺序")
+
+    def test_score_still_outranks_completeness(self):
+        """完整度只在同分之间比：分数是门槛也是主次，给得再全的对不上三项也不能写。"""
+        fp = self._track()
+        p = self._plugin(min_score=3, resources=["netease", "kugou"])
+        poor = {"resource": "netease", "name": "黑面", "artist": "陈奕迅",
+                "album": "别人的专辑", "year": "2003", "tracknumber": 7,
+                "discnumber": 1, "album_img": "http://p/2.jpg"}
+        exact = {"resource": "kugou", "name": "黑面", "artist": "陈奕迅",
+                 "album": "黑白灰"}
+        picked, score, hits = p._best_candidate(fp, [poor, exact])
+        self.assertEqual((score, picked["resource"]), (3, "kugou"))
+        self.assertEqual(hits["album"], mls._HIT)
+
+    def test_equal_completeness_falls_back_to_arrival_order(self):
+        """分数与完整度都一样才退回「排在前面那个源的候选先出现」—— 这一档必须留着，
+        不然并列的结果随候选返回顺序漂。_fetch_candidates 已经把并行回来的候选按配置的
+        源名单排好，所以这里的「先出现」就是名单里的先后。"""
+        fp = self._track()
+        p = self._plugin(min_score=3, resources=["netease", "qmusic"])
+        first = {"resource": "netease", "name": "黑面", "artist": "陈奕迅",
+                 "album": "黑白灰", "album_img": "http://p/1.jpg"}
+        second = {"resource": "qmusic", "name": "黑面", "artist": "陈奕迅",
+                  "album": "黑白灰", "album_img": "http://p/2.jpg"}
+        picked, score, _ = p._best_candidate(fp, [first, second])
+        self.assertEqual((score, picked["resource"]), (3, "netease"))
+        # 名单顺序反过来（qmusic 排在前），同一个平局就跟到 qmusic
+        p2 = self._plugin(min_score=3, resources=["qmusic", "netease"])
+        picked2, _, _ = p2._best_candidate(fp, [second, first])
+        self.assertEqual(picked2["resource"], "qmusic")
 
 
 
@@ -1863,6 +1921,9 @@ class RobustnessTest(unittest.TestCase):
         self.assertEqual(mixed["count"], 1)
         self.assertEqual(mixed["rejected"], 1)
         self.assertEqual(kicked[-1]["paths"], [str(tmp / "in.mp3")])
+        # 重试必须按覆盖写投递：只 force 不 overwrite 的话还是"只补缺"，
+        # 失败项重刮一遍等于白跑（账本 ts 刷新、written 永远 0）。
+        self.assertTrue(kicked[-1]["overwrite"])
 
         only_outside = asyncio.run(p.api_retry(_Req({"paths": ["/etc/hosts"]})))
         self.assertFalse(only_outside["accepted"])
@@ -1903,7 +1964,8 @@ class RobustnessTest(unittest.TestCase):
         kicked = []
         p._kick_scan = lambda **kw: kicked.append(kw) or True
         p._cmd_retry()
-        self.assertEqual(kicked, [{"force": True, "paths": [str(tmp / "in.mp3")]}])
+        self.assertEqual(kicked, [{"force": True, "paths": [str(tmp / "in.mp3")],
+                                   "overwrite": True}])
         self.assertIn("已不在库内", p.messages[-1]["text"])
 
 
@@ -2218,20 +2280,30 @@ class BuiltinSourcesTest(unittest.TestCase):
 
     # ---------------- 拉候选与后端派发 ----------------
 
-    def test_fetch_tags_resource_and_stops_at_perfect(self):
+    def test_fetch_asks_every_source_and_the_richest_wins(self):
+        """真实载荷上的两件事：全部源都问到（不再满分早停），并列时对文件最有用的那条胜出。
+
+        源名单故意倒过来配 —— MusicBrainz 排在最前，它只答得出文本（没封面、没音轨），
+        网易云排在最后却年份/音轨/碟号/封面俱全。旧规则「先出满分就停」在这里写进文件的是
+        一个裸候选，新规则看的是「这一轮能给文件补上几项」。
+        """
         asked = []
-        p = self._plugin(resources=list(mls._sources.RESOURCES))
+        order = list(reversed(mls._sources.RESOURCES))
+        p = self._plugin(resources=order)
         fp = self._track("晴天", "周杰伦", "叶惠美")
         orig = mls.RequestUtils
         mls.RequestUtils = self._answer(asked)
         try:
             cands, failure = p._fetch_candidates(fp)
-            # 满分候选（曲名+艺人+专辑全中）在第一个源就出现，后面的源不该再被问
             self.assertIsNone(failure)
-            self.assertEqual([c["resource"] for c in cands], ["netease"])
-            self.assertEqual(len(asked), 1)
+            self.assertEqual(len(asked), len(mls._sources.RESOURCES))
+            # 回来的候选按配置的名单排好，不是按谁先答完
+            self.assertEqual([c["resource"] for c in cands], order)
+            picked, score = p._pick_best(fp, cands)
         finally:
             mls.RequestUtils = orig
+        self.assertEqual(score, mls._MAX_SCORE)
+        self.assertEqual(picked["resource"], "netease")
 
     def test_fetch_reports_transport_only_when_no_source_answered(self):
         """全部源都连不上才是服务侧故障；只要有一个源答了空，就是"查不到"。"""
@@ -2806,7 +2878,7 @@ class V010LedgerTest(unittest.TestCase):
         orig_read = mls._read_music_tags
         orig_fetch = mls.TagFlow._fetch_candidates
         mls._read_music_tags = fake_read
-        mls.TagFlow._fetch_candidates = lambda self, path, identity=None, all_sources=False: ([cand], None)
+        mls.TagFlow._fetch_candidates = lambda self, path, identity=None, spread=None: ([cand], None)
         try:
             okf, reason, score, _, _, extra = p._TagFlow__scrape_file(fp)
         finally:
@@ -2843,9 +2915,7 @@ class V010LedgerTest(unittest.TestCase):
             {"resource": "netease", "name": "黑面（钢琴版）", "artist": "陈奕迅"},
         ]
         orig_fetch = mls.TagFlow._fetch_candidates
-        mls.TagFlow._fetch_candidates = (
-            lambda self, path, identity=None, all_sources=False: (
-                (cands, None) if all_sources else ([cands[0]], None)))
+        mls.TagFlow._fetch_candidates = lambda self, path, identity=None, spread=None: (cands, None)
         p.save_data(mls._KEY_FAILED, {str(fp): {
             "retries": 2, "reason": "未达阈值", "score": 2,
             "best": {"source": "kugou", "score": 2, "title": "黑面", "artist": "陈奕迅",
@@ -2863,6 +2933,110 @@ class V010LedgerTest(unittest.TestCase):
         self.assertEqual(res["candidates"][0]["fields"]["album"], "The Line-Up")
         self.assertEqual(res["history"]["source"], "kugou")
         self.assertEqual(res["history"]["retries"], 2)
+
+    def test_api_candidates_carries_tracknumber_and_full_lyrics(self) -> None:
+        """采纳要能落到音轨：接口此前只带 title/artist/album 三个完整值，
+
+        界面明明显示「第 7 轨」，采纳回来 tracknumber 还是空的 —— 与"截断串盖原文"
+        是同一类「看得见、写不进」。歌词同理：源给出可落盘的完整文本才带上。
+        """
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "陈奕迅" / "The Line-Up (2003)").mkdir(parents=True)
+        fp = tmp / "陈奕迅" / "The Line-Up (2003)" / "01 - 黑面.flac"
+        fp.write_bytes(b"x" * 100)
+        p = mls.TagFlow()
+        p._min_score = 3
+        p._scraper_paths = str(tmp)
+        p._active_resources = ["netease"]
+        p._is_library_path = lambda path: True
+        cands = [{"resource": "netease", "name": "黑面", "artist": "陈奕迅",
+                  "album": "The Line-Up", "tracknumber": "7/12",
+                  "lyrics": "[00:01.00]完整歌词文本"}]
+        orig_fetch = mls.TagFlow._fetch_candidates
+        mls.TagFlow._fetch_candidates = lambda self, path, identity=None, spread=None: (cands, None)
+        try:
+            res = p.api_candidates(self._req({"path": str(fp)}))
+        finally:
+            mls.TagFlow._fetch_candidates = orig_fetch
+        self.assertTrue(res["accepted"])
+        fields = res["candidates"][0]["fields"]
+        self.assertIn("tracknumber", res["candidates"][0]["fields"],
+                      "fields 里没带音轨，采纳就永远写不进 tracknumber")
+        self.assertEqual(fields["tracknumber"], "7/12")
+        self.assertEqual(fields["lyrics"], "[00:01.00]完整歌词文本")
+        self.assertEqual(fields["title"], "黑面")
+
+    def test_candidates_are_asked_in_parallel_and_short_cached(self) -> None:
+        """问源一条路：全部源并行发，墙钟≈最慢的那个源而不是四个圈之和。
+
+        同一文件在 TTL 内再问不重打平台 —— 改完还想比、双击按钮，都不该再来一遍网络。
+        自动刮削走的就是这同一条路（多带一层错峰铺开，见 SourcePacingTest）；这里从
+        /candidates 进来，spread 必须是 0 —— 人在弹层前等答案，不该为一秒半的铺开买单。
+        """
+        import threading as _threading
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "陈奕迅" / "The Line-Up (2003)").mkdir(parents=True)
+        fp = tmp / "陈奕迅" / "The Line-Up (2003)" / "01 - 黑面.flac"
+        fp.write_bytes(b"x" * 100)
+        p = mls.TagFlow()
+        p._min_score = 3
+        p._scraper_paths = str(tmp)
+        p._active_resources = ["netease", "qmusic", "kugou", "migu"]
+        p._is_library_path = lambda path: True
+        p.init_plugin({"scraper_paths": str(tmp), "resources": "netease,qmusic,kugou,migu"})
+        p._active_resources = ["netease", "qmusic", "kugou", "migu"]
+        threads: set = set()
+        calls: list = []
+        lock = _threading.Lock()
+
+        def slow_request(spec, timeout=None):
+            with lock:
+                calls.append(spec["resource"])
+                threads.add(_threading.get_ident())
+            time.sleep(0.15)
+            return {"r": spec["resource"]}, None
+
+        identity = {"title": "黑面", "artist": "陈奕迅", "album": "The Line-Up",
+                    "duration": None, "year": "2003"}
+        parsed = {
+            "netease": ([{"name": "黑面", "artist": "陈奕迅", "album": "The Line-Up"}], None),
+            "qmusic": ([{"name": "黑面", "artist": "陈奕迅", "album": "The Line-Up"}], None),
+            "kugou": ([], None),
+            "migu": ([], None),
+        }
+        orig_sr = mls.TagFlow._source_request
+        mls.TagFlow._source_request = staticmethod(slow_request)
+        orig_build = mls._sources.build_request
+        orig_parse = mls._sources.parse_candidates
+        orig_pace = mls.TagFlow._pace_source
+        paced: list = []
+        mls.TagFlow._pace_source = lambda self, resource, spread: paced.append((resource, spread))
+        mls._sources.build_request = lambda resource, keyword: {"resource": resource, "url": "http://x"}
+        mls._sources.parse_candidates = lambda resource, payload: parsed[resource]
+        try:
+            started = time.time()
+            res = p.api_candidates(self._req({"path": str(fp)}))
+            parallel_cost = time.time() - started
+            again = p.api_candidates(self._req({"path": str(fp)}))
+        finally:
+            mls.TagFlow._source_request = orig_sr
+            mls.TagFlow._pace_source = orig_pace
+            mls._sources.build_request = orig_build
+            mls._sources.parse_candidates = orig_parse
+        self.assertTrue(res["accepted"])
+        self.assertEqual(len(calls), 4)
+        # 4 个源每个睡 0.15 秒：串行为 0.6 秒起步，并行应接近单个 0.15
+        self.assertLess(parallel_cost, 0.45, "问源仍是串行，弹层要转四个圈")
+        self.assertGreater(len(threads), 1, "问源没走并行")
+        # 人工核对这条不铺开：每个源都领到 spread=0
+        self.assertEqual([r for r, _ in sorted(paced)],
+                         sorted(["netease", "qmusic", "kugou", "migu"]))
+        self.assertTrue(all(s == 0.0 for _, s in paced),
+                        "/candidates 在为一次人工核对铺开一秒半")
+        # 回来的候选按配置的源名单排序，界面不必自己猜
+        self.assertEqual([c["source"] for c in res["candidates"]], ["netease", "qmusic"])
+        self.assertEqual(again["candidates"], res["candidates"])
+        self.assertEqual(len(calls), 4, "TTL 内同一文件不该再打一遍平台")
 
     def test_api_candidates_rejects_out_of_library_and_no_title(self):
         p = mls.TagFlow()
@@ -2888,3 +3062,104 @@ class V010LedgerTest(unittest.TestCase):
         self.assertIn("历史最佳", page)
         # 徽标跟着列表总数自纠，补查进行中也不会两边各说各话
         self.assertIn("status.value.counts.deficient = total.value", page)
+        # 候选详情：逐字段勾选覆盖，写什么由人点名，不是「采纳」一把全盖
+        self.assertIn("openCandidate(cand)", page)
+        self.assertIn("applyCandidatePicked", page)
+        self.assertIn("candPicked", page)
+        # 编辑对所有桶开放（曾经只有缺项行有按钮，done/pending 想改一个字段的没处下手）
+        self.assertIn('<v-btn size="x-small" variant="text" color="primary" :loading="busy" @click="openEdit(item)">编辑</v-btn>', page)
+
+
+class SourcePacingTest(unittest.TestCase):
+    """每个文件一次问满全部源，所以发问的节拍必须打散。
+
+    齐整的并发节拍在平台侧就是一台机器的手感，最先被风控掐掉的又是排在最前的那个源。
+    这里的时间是假的（睡 = 拨表），铺开用的随机数也是给定值：断言的是「谁在什么时候
+    被允许发问」，而不是真的等一秒半。
+    """
+
+    def _pace(self, calls, gap=0.6, draws=(0.0,)):
+        """按顺序把真实 _pace_source 用在 (resource, spread) 上，返回每次睡了多久。
+
+        calls 是一条线串下来的（真实调用在五个工作线程里同时发生），因为随机铺开本来就是
+        「每发各领一个 delay」，串起来量出来的 delay 与并发时一致。
+        """
+        import types
+        clock = {"t": 1000.0}
+        slept: list = []
+        waits: list = []
+        drawn = iter(draws)
+
+        def _sleep(seconds):
+            slept.append(seconds)
+            clock["t"] += max(seconds, 0.0)
+
+        fake_time = types.SimpleNamespace(time=lambda: clock["t"], sleep=_sleep)
+        fake_random = types.SimpleNamespace(uniform=lambda _lo, hi: next(drawn) * hi)
+        orig = {name: getattr(mls, name) for name in ("time", "random", "_SOURCE_MIN_GAP")}
+        mls.time, mls.random, mls._SOURCE_MIN_GAP = fake_time, fake_random, gap
+        p = mls.TagFlow()
+        try:
+            for resource, spread in calls:
+                before = len(slept)
+                _REAL_PACE(p, resource, spread)
+                # 没到点的发问根本不调 sleep：按「这一次等了多久」记账，才是能断言的形状
+                waits.append(round(sum(slept[before:]), 6))
+        finally:
+            for name, value in orig.items():
+                setattr(mls, name, value)
+        return waits
+
+    def test_batch_is_spread_over_the_jitter_window(self):
+        """同一批里每个源各领 0~spread 上的一个点，而不是同一瞬间五发齐发。"""
+        slept = self._pace([("netease", 1.5), ("qmusic", 1.5), ("kugou", 1.5)],
+                           draws=(0.0, 1.0, 0.5))
+        self.assertEqual(slept, [0.0, 1.5, 0.75])
+
+    def test_manual_panel_asks_without_spreading(self):
+        """spread=0 就是立刻发问：人在弹层前等一次答案，不该为铺开多等。"""
+        self.assertEqual(self._pace([("netease", 0.0)]), [0.0])
+
+    def test_same_source_never_fires_back_to_back(self):
+        """同一个源连着被两个文件问到，至少隔 _SOURCE_MIN_GAP —— 铺开救不了这一种。
+
+        随机 delay 只保证一批之内不齐发；文件一个接一个跑得快时，网易云那条线会变成
+        连发，而它恰好是命中率最高、也最不该被掐的那个源。
+        """
+        self.assertEqual(self._pace([("netease", 0.0), ("netease", 0.0)], gap=0.6),
+                         [0.0, 0.6])
+        # 已经铺开过了也照样兜住间隔：第二发的 delay 落在间隔内时等到间隔结束才发
+        self.assertEqual(self._pace([("netease", 1.5), ("netease", 1.5)], gap=0.6,
+                                    draws=(1.0, 0.0)), [1.5, 0.6])
+
+    def test_sources_are_paced_independently(self):
+        """按源分别记账：酷狗刚被问过不该拖住咪咕。"""
+        self.assertEqual(self._pace([("netease", 0.0), ("migu", 0.0)], gap=0.6), [0.0, 0.0])
+
+    def test_scan_path_paces_every_source_with_the_default_spread(self):
+        """自动刮削这条（不带 spread 参数）必须真的铺开，而且每个源都算到。"""
+        fp = Path(tempfile.mkdtemp()) / "陈奕迅" / "黑白灰" / "07 - 黑面.flac"
+        fp.parent.mkdir(parents=True)
+        fp.write_bytes(b"x")
+        p = mls.TagFlow()
+        p._min_score = 3
+        p._active_resources = list(mls._DEFAULT_RESOURCES)
+        seen: list = []
+        orig_pace = mls.TagFlow._pace_source
+        orig_ru = mls.RequestUtils
+        mls.TagFlow._pace_source = lambda self, resource, spread: seen.append((resource, spread))
+        mls.RequestUtils = _ru(lambda url, body: _Resp(200, _payload(_source_of(url), [])))
+        try:
+            p._fetch_candidates(fp)
+            # 显式传 0 的那条（人工核对）不铺开，这里传的是模块默认
+            p._fetch_candidates(fp, spread=0.0)
+        finally:
+            mls.TagFlow._pace_source = orig_pace
+            mls.RequestUtils = orig_ru
+        # 五发同时在错峰，谁先领到时刻不作断言；要断言的是「每个源都算到了」
+        self.assertEqual(sorted(r for r, _ in seen[:len(mls._DEFAULT_RESOURCES)]),
+                         sorted(mls._DEFAULT_RESOURCES))
+        self.assertTrue(all(s == mls._SOURCE_SPREAD for r, s in seen[:5]),
+                        "整库那条没按默认档铺开")
+        self.assertTrue(all(s == 0.0 for _, s in seen[5:]),
+                        "spread=0 被吞掉了，人工核对也在等铺开")

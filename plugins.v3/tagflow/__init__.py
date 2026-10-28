@@ -10,8 +10,9 @@ MusicBrainz，构造与解析在 sources.py）：不需要额外部署服务，�
    排除目录整棵剪掉；
 2. 拿什么身份去问 —— 优先读文件已有的 tag，缺哪项就按 艺人/专辑 (年)/NN - 曲名 的目录结构兜底，
    只认严格位于音乐库之下的目录；发给平台的只有清洗后的「曲名-艺人」检索词，库内路径不出本机；
-3. 候选能不能用 —— 曲名 / 艺人 / 专辑 各 1 分（繁简与大小写归一后互相包含即算命中），按配置的
-   源顺序逐源问、某源出到 3/3 满分即停，最高分仍低于 min_score 就不写入；
+3. 候选能不能用 —— 曲名 / 艺人 / 专辑 各 1 分（繁简与大小写归一后互相包含即算命中），配置的源
+   一次并行问完、不早停，最高分仍低于 min_score 就不写入；满足阈值的候选不止一个时，比谁给得全
+   （年份 / 音轨 / 碟号 / 封面），还是一样全就按源顺序取先答的那一个；
 4. 要不要覆盖 —— 只补缺（四项齐全则按 mtime+size 记账跳过）或强制覆盖，最终取插件与宿主
    「设置 → 媒体刮削」里更强的一方；歌词默认交给宿主的 LyricsChain。
 
@@ -19,6 +20,8 @@ MusicBrainz，构造与解析在 sources.py）：不需要额外部署服务，�
 - 「服务侧没给答案」和「曲库里查不到」是两件事。源连不上、被风控、响应形状不认识，都不写失败账、
   不烧 retries，连续出现则熔断；只有源正常答了而候选不达标才记在文件头上。账本里存量的旧文案
   （MTW 那三条）仍留在 _TRANSPORT_REASONS 里，否则升级后同一类失败会被拆成两种记账方式。
+- 问源不分早晚停，一次就把全部源问完，所以请求的节拍必须打散（见 _pace_source）：整库连着齐发
+  在平台侧就是一台机器的手感，最先被风控掐的总是排在最前的那一个源。
 - 写标签不可回滚，所以 min_score 在服务端收敛到 1-3、路径必须落在库内、宁可不匹配也不猜身份
   （目录兜底猜不出来就留空，让它判「未达阈值」）。
 - 扫描只有一个入口：周期任务、/scan、/retry、「立即运行一次」都走带互斥的 guarded 入口。两本账
@@ -35,6 +38,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import threading
 import time
@@ -84,10 +88,17 @@ _KEY_TARGETED_RUNS = "last_targeted"
 # （CronTrigger.from_crontab），它的编号是 0=周一…6=周日，和 crontab 的 0/7=周日 差一位，
 # 而且不认 7。"0 3 * * 0" 在这个调度器上是周一，写名字才没有歧义。
 _DEFAULT_CRON = "0 3 * * sun"
-# _score_candidate 的满分：曲名 / 艺人 / 专辑 各 1 分。
+# _score_candidate 的满分：曲名 / 艺人 / 专辑 各 1 分。分数只是**门槛**（min_score），
+# 不是排序依据 —— 满足门槛的候选可能好几个源都给得出，它们在分数上分不出高下，
+# 差的是下面那些「不打折地写进文件、却一点不参与打分」的字段。
 _MAX_SCORE = 3
-# 打分的三项，顺序即失败原因里的表述顺序。
+# 打分的那三项，顺序即失败原因里的表述顺序。
 _MATCH_FIELDS = (("title", "曲名"), ("artist", "艺人"), ("album", "专辑"))
+# 并列同分时用来挑「哪个源给得全」的字段：都是宿主写入链真会落进文件、
+# 且数据页会列成缺项的那几项（音轨与年份正是酷狗/咪咕/MusicBrainz 的检索接口给不出的，
+# 详见 sources.py）。曲名/艺人/专辑不进这份表 —— 它们已经由分数决定，而且拿候选自己
+# 有没有值来比大小，会偏向「填了但填错」的那一条。
+_COMPLETENESS_FIELDS = ("year", "tracknumber", "discnumber", "cover")
 # 逐项判定的三种状态：对上 / 有得比但没对上 / 本地缺这项（无从比起）。
 _HIT = "hit"
 _MISS = "miss"
@@ -114,10 +125,27 @@ _LEGACY_CONFIG_KEYS = ("source_backend", "mtw_base_url", "mtw_username", "mtw_pa
 # 都以类名为键，升级后第一次加载要把它名下的配置与四本状态账搬过来，见 _migrate_legacy_identity。
 _LEGACY_PLUGIN_ID = "MusicLibraryScraper"
 # 熔断：连续多少个文件栽在「插件什么都没学到」上就中止本轮，别在平台风控的时段空打上千次请求。
+# 每个文件现在都是并行问满全部源，撞在风控时段上比早停那版更费请求，这条更要守着。
 _ABORT_AFTER_TRANSPORT = 5
-# 单次检索的超时（秒）。平台接口比自建服务更容易慢（限流时干脆挂着），而每个文件最多问五个源，
-# 这个值直接决定一轮卡住时能白等多久。
+# 单次请求的默认超时（秒）：平台接口比自建服务更容易慢（限流时干脆挂着）。问源那条走
+# 下面收紧过的并行超时，这里剩下的是单独发的那几发（歌词补取）。
 _SEARCH_TIMEOUT = 10.0
+# 问源全部并行（自动刮削与人工补齐同一走法）：五个源一个个串行问、每个 10 秒超时，最坏一次
+# 要转 50 秒圆圈。并行后墙钟约等于最慢的那个源，所以单次超时压到 6 秒：慢成那样的源
+# 不会给出更好的答案，而它拖着的这一秒是每个文件都要付的。
+_CANDIDATE_SOURCE_TIMEOUT = 6.0
+# 打散：一个文件一次问五个源，整库连着跑就是「每个节拍五发、其中总有几发打在同一个平台」。
+# 齐整的并发节拍最像机器人，也是最容易被风控的那一种 —— 所以每发之前先随机等
+# 0~_SOURCE_SPREAD 秒把这一批铺开，另按源记一条最短间隔，防止连续几个文件把同一个源
+# 打成连发（网易云排在最前，最先撞上风控的就是它）。代价是每文件多等一两秒，
+# 而一轮扫描本来就以分钟计；人工补齐问源不铺开，那是人在等一个答案，一次也谈不上节拍。
+_SOURCE_SPREAD = 1.5
+_SOURCE_MIN_GAP = 0.6
+# 同一文件问完一次就短存：改完还想再看、双击按钮、换个浏览器标签页，都不该再打一遍平台。
+# 结果只进内存不落盘 —— 候选是给这一次人工核对看的，不是账本。
+_CANDIDATES_TTL = 60.0
+# 候选短存最多记多少个文件：编辑弹层一次只看一条，留最近的这些够来回比对了。
+_CANDIDATES_KEEP = 40
 # 扫描中途落账的最小间隔（秒）：整轮动辄数小时，中途容器重启不该把进度全丢掉。
 # 按时间而不是按变更次数：plugindata 是单行 JSON，每次 save 都要把整本账重新序列化，
 # 固定"每 25 次落一次"在 5 万条目的库里会打出上千次全量写。
@@ -132,9 +160,12 @@ _PENDING_TTL = 30.0
 _FORM_NOTES = (
     "【识别源】插件直连 网易云 / QQ音乐 / 酷狗 / 咪咕 / MusicBrainz 的公开检索接口，不必部署"
     "任何服务；多选留空即全部源。发给平台的只有清洗后的「曲名-艺人」，库内路径不出本机。\n"
-    "【怎么算命中】曲名 / 艺人 / 专辑 各 1 分（繁简与大小写归一、互相包含即算命中），按配置顺序"
-    "逐源查询、某源出到 3/3 满分即停；都没满分就合并全部候选取最高分，同分时按源顺序取先答的那一个。"
-    "最高分低于「最低匹配分数」（默认 3，即三项全中）就记失败、不写入。分数只在（1-3）之间生效，"
+    "【怎么算命中】曲名 / 艺人 / 专辑 各 1 分（繁简与大小写归一、互相包含即算命中）。分数只是门槛："
+    "配置的源每个文件一次问完、随机错峰发出，不因某个源出到 3/3 满分就省掉其余源（错峰是为了"
+    "别让整库的同一个源连成齐发的节拍 —— 风控先掐的就是排在最前的那一个）。最高分低于「最低匹配分数」"
+    "（默认 3，即三项全中）记失败、不写入；满足门槛的候选不止一个时，比谁给得全（年份 / 音轨 / 碟号 /"
+    "封面 —— 网易云与 QQ 之外没有哪个源的检索接口给得出音轨号，这一档常把净决定给这两家），"
+    "一样全则按源顺序取先答的那一个。分数只在（1-3）之间生效，"
     "越界按最近的一界执行；调到 1-2 表示只对上曲名或艺人也照样改写标签，而标签写进文件、无法回滚。\n"
     "【本地身份从哪来】优先读文件已有的标签，缺哪项就按 艺人/专辑 (年)/NN - 曲名 的目录结构兜底；"
     "只有严格位于音乐库路径之下的目录才算艺人/专辑，库根本身的名字不参与猜测 —— 猜不出来就留空，"
@@ -400,6 +431,24 @@ def _has_embedded_lyrics(audio: Any, tags: Any) -> bool:
         except Exception:
             continue
     return False
+
+
+def _candidate_cover_url(c: dict) -> Optional[str]:
+    """候选上的封面地址，与 _candidate_to_musicinfo 共用一份取法：各源把它放在
+    顶层 album_img / pic / cover / img / album_pic / picture，网易云那种塞在 album
+    对象里的也要认。挑候选用它、写文件也用它，两边才不会一个是「这条候选有封面」、
+    另一个是落进文件时没有。"""
+    for key in ("album_img", "pic", "cover", "img", "album_pic", "picture"):
+        value = c.get(key)
+        if isinstance(value, str) and value:
+            return value
+    album_obj = c.get("album")
+    if isinstance(album_obj, dict):
+        for key in ("picUrl", "pic", "cover", "img"):
+            value = album_obj.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return None
 
 
 def _candidate_has_lyric(c: dict) -> bool:
@@ -738,7 +787,7 @@ class TagFlow(_PluginBase):
         "侧栏「整理」下常驻数据页，失败与有缺项逐文件可查可补。"
     )
     plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/tagflow.svg"
-    plugin_version = "0.10.0"
+    plugin_version = "0.12.0"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "musiclibraryscraper_"
@@ -776,6 +825,8 @@ class TagFlow(_PluginBase):
         self.__dict__.setdefault("_stop_flag", threading.Event())
         self.__dict__.setdefault("_pending_cache", None)
         self.__dict__.setdefault("_deficient_cache", None)
+        self.__dict__.setdefault("_cand_lock", threading.Lock())
+        self.__dict__.setdefault("_candidates_cache", {})
 
         # v0.10.0 改名的搬家：旧标识下的配置与状态账先接过来，再走正常加载
         config = self._migrate_legacy_identity(config)
@@ -1001,7 +1052,9 @@ class TagFlow(_PluginBase):
                 text=f"{len(paths)} 个失败项都已不在库内（文件被删或移走），账本留到下一轮清理。",
             )
             return
-        started = self._kick_scan(force=True, paths=accepted)
+        # 重试一律按覆盖写走：只 force 不 overwrite 的话还是"只补缺"，源上的值再不对
+        # 也一个字不动，按下按钮等于白跑一轮 —— 账本 ts 刷新了、written 却是 0。
+        started = self._kick_scan(force=True, paths=accepted, overwrite=True)
         tail = f"（{rejected} 个已不在库内，跳过）" if rejected else ""
         self.post_message(
             title=f"{self.plugin_name} 重试",
@@ -1081,7 +1134,13 @@ class TagFlow(_PluginBase):
 
     def api_status(self, request: Request) -> Dict[str, Any]:
         """GET /status —— 返回汇总、计数、配置回显（不含密码）与最近失败。"""
-        return self._build_status()
+        started = time.time()
+        out = self._build_status()
+        cost = time.time() - started
+        # 「页面一直转圈」得先知道圈卡在哪个接口：这条只在真的慢时留痕，不刷屏
+        if cost > 2:
+            logger.warning(f"[music-scraper] /status 用时 {cost:.1f} 秒")
+        return out
 
     def api_files(self, request: Request) -> Dict[str, Any]:
         """GET /files —— bucket=done|failed|pending|deficient&limit&offset&search&written 分页查询。"""
@@ -1104,7 +1163,12 @@ class TagFlow(_PluginBase):
             }
         search = (qp.get("search") or "").strip().lower()
 
+        started = time.time()
         rows = self._collect_rows(bucket)
+        cost = time.time() - started
+        if cost > 2:
+            logger.warning(f"[music-scraper] /files bucket={bucket} 用时 {cost:.1f} 秒"
+                           f"，{len(rows)} 行")
         if search:
             rows = [r for r in rows if search in r["path"].lower() or search in (r["name"] or "").lower()]
         # written=1：只看本插件改写过的。整个库跑过一遍后 done 桶绝大多数是宿主或往轮
@@ -1193,7 +1257,8 @@ class TagFlow(_PluginBase):
             logger.warning(f"[music-scraper] /retry 拒绝 {rejected} 个库外或非音频路径")
         if not accepted:
             return {"accepted": False, "reason": "out_of_library", "count": 0}
-        started = self._kick_scan(force=True, paths=accepted)
+        # 口径同 _cmd_retry：重试是用户点名要重刮，按覆盖写而不是只补缺。
+        started = self._kick_scan(force=True, paths=accepted, overwrite=True)
         return {
             "accepted": started,
             "count": len(accepted),
@@ -1265,11 +1330,16 @@ class TagFlow(_PluginBase):
         self.__dict__["_deficient_cache"] = None
         return {"accepted": True, "updated": sorted(fields)}
 
+    def _candidates_lock(self) -> threading.Lock:
+        """候选短存的锁：init_plugin 重跑不会换掉它（与扫描锁同一条路）。"""
+        return self.__dict__.setdefault("_cand_lock", threading.Lock())
+
     def api_candidates(self, request: Request) -> Dict[str, Any]:
         """GET /candidates?path= —— 人工补齐用的候选：每个源的最佳一条 + 账本里的历史最佳。
 
-        自动刮削是"第一个满分源就停"，人工核对要的恰恰相反：把各源都问一遍、由人比较
-        谁对得准。历史最佳（过去几轮评分最高的那条）从账本直读、不打网络 —— 差半分时
+        自动刮削取的是「满足门槛的候选里最完整的那一条」，人工核对要的是一源一条摆在一起
+        由人比较谁对得准：这里不合并、不排序取胜者，每个源只留它自己分最高的一条。
+        历史最佳（过去几轮评分最高的那条）从账本直读、不打网络 —— 差半分时
         它常常就是正确答案，只是没到自动写入的那条线，值得摆到弹层上让人决定采不采纳。
         候选值用与 _candidate_brief 同一套取值口径，弹层里看到的和采纳写入的必须是同一个串。
         """
@@ -1278,13 +1348,32 @@ class TagFlow(_PluginBase):
             return {"accepted": False, "reason": "no_path"}
         if not self._is_library_path(path):
             return {"accepted": False, "reason": "out_of_library"}
+        started = time.time()
         identity = _local_identity(Path(path), roots=self._identity_roots())
         if not identity["title"]:
             # 自动刮削同样跳过这类文件（整张 CD 压成一个 wav）：没有曲名就没法检索，
             # 手动也一样问不出。分开报错，否则界面只会显示"没有候选"。
             return {"accepted": False, "reason": "no_title"}
-        candidates, failure = self._fetch_candidates(Path(path), identity=identity,
-                                                     all_sources=True)
+        with self._candidates_lock():
+            hit = self.__dict__.get("_candidates_cache") or {}
+            cached = hit.get(path)
+            if cached and time.time() - float(cached.get("ts") or 0) < _CANDIDATES_TTL:
+                candidates, failure = list(cached.get("candidates") or []), cached.get("failure")
+            else:
+                candidates, failure = None, None
+        if candidates is None:
+            # spread=0：人在弹层前等这一次答案，不为错峰多等一秒半；风控要防的是整库连跑
+            candidates, failure = self._fetch_candidates(Path(path), identity=identity,
+                                                         spread=0.0)
+            with self._candidates_lock():
+                cache = self.__dict__.setdefault("_candidates_cache", {})
+                cache[path] = {"ts": time.time(), "candidates": candidates,
+                               "failure": failure}
+                for stale in sorted(cache, key=lambda k: cache[k]["ts"])[:-_CANDIDATES_KEEP]:
+                    cache.pop(stale, None)
+        logger.info(f"[music-scraper] 问源 {Path(path).name}："
+                    f"{len(self._active_resources)} 个源并行，用时 {time.time() - started:.1f} 秒"
+                    f"，返回 {len(candidates)} 条候选")
         if failure:
             return {"accepted": False, "reason": "sources_unreachable",
                     "detail": failure, "identity": identity}
@@ -1296,12 +1385,22 @@ class TagFlow(_PluginBase):
             brief = self._candidate_brief(c, score, hits)
             if not brief:
                 continue
-            # 账本摘要为省空间把长值截断过，采纳时不能拿截断串：随候选另带完整值
-            brief["fields"] = {
+            # 账本摘要为省空间把长值截断过，采纳时不能拿截断串：随候选另带完整值。
+            # tracknumber 也在其中 —— 源答得出音轨、界面也显示得出（「第 N 轨」），
+            # 之前偏偏没带这一项，采纳转一圈回来音轨还是空的。歌词只在源给的是
+            # 能落盘的文本时才带上，与写文件那步同一判据，弹层里能采纳的就一定能写进去。
+            lyric_value = str(c.get("lyrics") or c.get("lyric") or c.get("lrc") or "").strip()
+            full_fields = {
                 "title": str(c.get("name") or c.get("title") or "").strip(),
                 "artist": str(c.get("artist") or "").strip(),
                 "album": self._candidate_album_name(c),
+                "tracknumber": str(c.get("tracknumber") or c.get("track_number")
+                                   or c.get("index") or c.get("no") or "").strip()[:16],
             }
+            if lyric_value and not lyric_value.startswith("未找到") \
+                    and _is_persistable_lyric(lyric_value):
+                full_fields["lyrics"] = lyric_value
+            brief["fields"] = {key: value for key, value in full_fields.items() if value}
             source = brief["source"] or "unknown"
             current = grouped.get(source)
             if current is None or score > int(current.get("score") or 0):
@@ -2459,7 +2558,8 @@ class TagFlow(_PluginBase):
         return missing
 
     @staticmethod
-    def _source_request(spec: Dict[str, Any]) -> Tuple[Any, Optional[str]]:
+    def _source_request(spec: Dict[str, Any],
+                        timeout: float = _SEARCH_TIMEOUT) -> Tuple[Any, Optional[str]]:
         """按 sources.build_request 的描述发一次请求，返回 (响应体, 故障标记)。
 
         状态码自己拿：宿主 RequestUtils.get 会把非 2xx 折成 None，限流(429)、风控(403)
@@ -2469,10 +2569,10 @@ class TagFlow(_PluginBase):
         ru = RequestUtils(headers=dict(spec.get("headers") or {}))
         try:
             if spec.get("json") is not None:
-                resp = ru.post(url=spec["url"], json=spec["json"], timeout=_SEARCH_TIMEOUT)
+                resp = ru.post(url=spec["url"], json=spec["json"], timeout=timeout)
             else:
                 resp = ru.get_res(url=spec["url"], params=spec.get("params") or {},
-                                  timeout=_SEARCH_TIMEOUT)
+                                  timeout=timeout)
         except Exception as error:
             logger.warning(f"[music-scraper] 识别源请求异常：{spec.get('url')} — {error}")
             return None, _sources.UNREACHABLE
@@ -2496,50 +2596,89 @@ class TagFlow(_PluginBase):
             return payload, _sources.UNREACHABLE
         return payload, None
 
+    def _pace_source(self, resource: str, spread: float) -> None:
+        """发一个源的请求之前先错峰：随机铺开这一批，并守住每个源的最短间隔。
+
+        风控判的是节拍而不是单发内容 —— 五个源同时出发、每个文件都同一个时刻齐发，
+        在平台侧就是一台机器的手感。睡在锁外，锁只用来领一个时刻；同一批里五个源
+        各自领到 [now, now+spread] 上的一个点，跨文件的同一源至少隔 _SOURCE_MIN_GAP。
+        """
+        delay = random.uniform(0.0, spread) if spread > 0 else 0.0
+        lock = self.__dict__.setdefault("_pace_lock", threading.Lock())
+        next_at = self.__dict__.setdefault("_pace_next", {})
+        with lock:
+            now = time.time()
+            ready = max(now + delay, float(next_at.get(resource) or 0.0))
+            next_at[resource] = ready + _SOURCE_MIN_GAP
+        wait = ready - time.time()
+        if wait > 0:
+            time.sleep(wait)
+
+    def _paced_source_request(self, resource: str, spec: Dict[str, Any], spread: float):
+        """先错峰再发请求：整批铺开与按源最短间隔都由 _pace_source 决定。"""
+        self._pace_source(resource, spread)
+        return self._source_request(spec, timeout=_CANDIDATE_SOURCE_TIMEOUT)
+
     def _fetch_candidates(self, path: Path,
                                   identity: Optional[Dict[str, Any]] = None,
-                                  all_sources: bool = False
+                                  spread: Optional[float] = None
                                   ) -> Tuple[List[dict], Optional[str]]:
-        """逐个直连平台检索接口拉候选，返回 (候选, 服务侧故障原因)。
+        """直连平台检索接口把配置的源一次问完，返回 (候选, 服务侧故障原因)。
 
-        按源顺序问，某源出到满分候选就立刻停止；只有在**没有任何源给出可解析答案**时才回报
-        故障，否则一个源正常返回空列表就是"这份曲库查不到"的确定答案，要按文件失败记账。
-        all_sources=True 是为人工核对准备的：编辑弹层要把每个源各排在最前的候选都摆出来
-        由人判断，早停"第一个满分源就够"的省网络逻辑在这里反而是漏答案。
+        为什么不「出到满分就停」：满分只说明曲名/艺人/专辑三项对得上，而写进文件的东西
+        远不止这三项 —— 音轨与发行年不参与打分，酷狗/咪咕/MusicBrainz 的检索接口又给不出
+        音轨。早停在第一个满分源，等于在还没看到别的源怎么说之前，就把「哪个源给得全」
+        这个决定交掉了。现在全部源都问，由 _best_candidate 按分数与完整度挑。
+
+        代价是每个文件从「最多五发、常常一发」变成固定五发：慢的是额度而不是墙钟
+        （并行后一轮的耗时约等于最慢的那个源），撞在风控时段上浪费得更多，所以一边由
+        _ABORT_AFTER_TRANSPORT 熔断兜底，一边由 spread（见 _pace_source）把节拍打散。
+        人工补齐问源传 spread=0：那是人在等一次答案，不该再为它多等铺开的那一秒半。
+
+        故障归因没变：只有在**没有任何源给出可解析答案**时才回报服务侧故障，否则一个源
+        正常返回空列表就是"这份曲库查不到"的确定答案，要按文件失败记账。
+        并行回来的候选按配置的源名单排回原顺序：界面「每个源只留最高分」与打分并列时的
+        取先，都不必关心谁先答完。
         """
+        if spread is None:
+            spread = _SOURCE_SPREAD
         if identity is None:
             identity = _local_identity(path, roots=self._identity_roots())
         if not identity["title"]:
             return [], None
-        want = _want_from(identity)
         keyword = _sources.build_keyword(identity["title"], identity["artist"])
-        merged: List[dict] = []
-        best_score = 0
-        answered = 0
+        specs = []
         for resource in self._active_resources:
             spec = _sources.build_request(resource, keyword)
-            if not spec:
-                continue
-            payload, error = self._source_request(spec)
+            if spec:
+                specs.append((resource, spec))
+        if not specs:
+            # 配置里一个可用源都没剩下：没有答案可比，按服务侧故障记账（不烧文件重试额度）
+            return [], _UNREACHABLE_REASON
+        with ThreadPoolExecutor(max_workers=len(specs)) as pool:
+            outcomes = list(pool.map(
+                lambda item: self._paced_source_request(item[0], item[1], spread),
+                specs))
+        merged: List[dict] = []
+        answered = 0
+        for (resource, _spec), (payload, error) in zip(specs, outcomes):
             if error:
                 continue
             candidates, parse_error = _sources.parse_candidates(resource, payload)
             if parse_error:
-                # 平台改版或被截：这源没给出结论，继续问下一个
+                # 只有解析成候选才算"这个源答了"：200 + JSON 但形状不认识（平台改版）
+                # 和"曲库里查不到"是两件事 —— 把它算成答案，整库会被记成无候选、烧满重试
+                # 后永久跳过，而该做的其实是插件这边跟着改版修解析。
                 continue
-            # 只有解析成候选才算"这个源答了"：200 + JSON 但形状不认识（平台改版）
-            # 和"曲库里查不到"是两件事 —— 把它算成答案，整库会被记成无候选、烧满重试
-            # 后永久跳过，而该做的其实是插件这边跟着改版修解析。
             answered += 1
             for c in candidates:
                 c["resource"] = resource
                 merged.append(c)
-                if best_score < _MAX_SCORE:
-                    best_score = max(best_score, self._score_candidate(c, want))
-            if best_score >= _MAX_SCORE and not all_sources:
-                break
         if not merged and not answered:
             return [], _UNREACHABLE_REASON
+        merged.sort(key=lambda c: next(
+            (i for i, r in enumerate(self._active_resources)
+             if r == c.get("resource")), len(self._active_resources)))
         return merged, None
 
     # ---------------- 候选匹配 & 字段映射 ----------------
@@ -2553,7 +2692,13 @@ class TagFlow(_PluginBase):
     def _best_candidate(self, path: Path, candidates: List[dict],
                             identity: Optional[Dict[str, Any]] = None
                             ) -> Tuple[Optional[dict], int, Optional[Dict[str, str]]]:
-        """返回 (分最高的候选, 分数, 该候选的逐项判定)。
+        """返回 (最好的候选, 它的分数, 该候选的逐项判定)。
+
+        「最好」按 (-分数, -完整度) 比：分数决定能不能用（min_score 是门槛），完整度决定
+        在都能用之中写谁。分数并列而完整度不同，恰恰是最常见的那种局面 —— 网易云和酷狗
+        都给出 3/3，网易云那条还带着音轨与发行年；只按分数就会按源顺序取第一个，把
+        「这一轮到底给文件补上了几项」交给一个随机的先答者。
+        两项都一样才退回源顺序（候选已按配置的名单排好，严格比较保留先出现的）。
 
         分数不够时调用方要把"差在哪一项"写进失败原因：只知道 2/3 分，就分不清是
         候选本身对不上，还是本地压根没有这项可以去对（整张 CD 压成一个 wav 的文件
@@ -2562,13 +2707,36 @@ class TagFlow(_PluginBase):
         if identity is None:
             identity = _local_identity(path, roots=self._identity_roots())
         want = _want_from(identity)
-        best, best_score, best_hits = None, 0, None
+        best, best_key, best_score, best_hits = None, None, 0, None
         for c in candidates:
             hits = self._field_hits(c, want)
             score = sum(1 for state in hits.values() if state == _HIT)
-            if best is None or score > best_score:
-                best, best_score, best_hits = c, score, hits
+            key = (-score, -self._candidate_completeness(c))
+            if best is None or key < best_key:
+                best, best_key, best_score, best_hits = c, key, score, hits
         return best, max(best_score, 0), best_hits
+
+    @staticmethod
+    def _candidate_completeness(c: dict) -> int:
+        """候选给得出几项「不参与打分、但会写进文件」的信息，见 _COMPLETENESS_FIELDS。
+
+        只看候选自己有没有值，不看本地缺不缺：本地缺的那一项正是这一轮要补的，
+        给得全的源更可能填得上；而「按本地缺项加权」会让同一条候选在不同文件上排出
+        不同的次序，数据页上「同一个源这一行给的分」就对不上了。
+        """
+        given = 0
+        for field in _COMPLETENESS_FIELDS:
+            if field == "year":
+                # 各源的 year 形状不一（毫秒时间戳 / "2003-01-01" / "2003"），
+                # 归一不出年份的候选写不进文件，不能算它给了一项
+                ok = bool(TagFlow._normalize_year(c.get("year")))
+            elif field == "cover":
+                ok = bool(_candidate_cover_url(c))
+            else:
+                ok = bool(str(c.get(field) or "").strip())
+            if ok:
+                given += 1
+        return given
 
     @staticmethod
     def _field_hits(c: dict, want: dict) -> Dict[str, str]:
@@ -2677,18 +2845,7 @@ class TagFlow(_PluginBase):
         else:
             album = None
 
-        cover_url = None
-        for key in ("album_img", "pic", "cover", "img", "album_pic", "picture"):
-            value = c.get(key)
-            if isinstance(value, str) and value:
-                cover_url = value
-                break
-        if not cover_url and isinstance(album_obj, dict):
-            for key in ("picUrl", "pic", "cover", "img"):
-                value = album_obj.get(key)
-                if isinstance(value, str) and value:
-                    cover_url = value
-                    break
+        cover_url = _candidate_cover_url(c)
 
         album_artist = None
         for key in ("albumartist", "album_artist"):

@@ -14,9 +14,10 @@
 - 不做 Spotify 与 AcoustID。前者要 client/secret 换 OAuth token 才有检索，后者要音频指纹
   （fpcalc）加应用 key —— 两个都不是「拿曲名艺人去问」的文本检索源，插件这层没有可用的匿名接口。
 - 不做酷我。它的匿名检索接口（search.kuwo.cn/r.s）答的是「哪个录音在」而不是「这首歌属于哪张专辑」：
-  实测 ALBUM 与封面字段整片为空，排在最前的又常是伴奏、片段、演唱会串烧。满分要曲名+艺人+专辑
-  三项都对得上，这个源永远凑不齐第三项，只会把请求量和对不上的候选一起加进来；真要接得先按
-  MUSICRID 逐个补专辑与封面，那等于给每个候选多打一发。www 那个接口能给全，但要签名与 token。
+  实测 ALBUM 与封面字段整片为空，排在最前的又常是伴奏、片段、演唱会串烧。命中要曲名+艺人+专辑
+  三项都对得上，这个源永远凑不齐第三项：默认阈值下它一条也进不来，放宽到 2 分又只是多一批
+  对不上的候选来参与完整度比较；真要接得先按 MUSICRID 逐个补专辑与封面，那等于给每个候选
+  多打一发。www 那个接口能给全，但要签名与 token。
 - 不做 MusicBrainz 封面。检索响应里不带封面字段，为封面再追一次 coverartarchive
   请求等于给每个候选多打一发；MusicBrainz 的价值在繁体与别名文本对得上。
 
@@ -30,8 +31,10 @@ applications/task/services/*.so 里，本文件没有复制它的实现代码；
 import base64
 from typing import Any, Dict, List, Optional, Tuple
 
-# 源顺序即查询顺序：某源出到满分候选就立刻停止，把命中率最高、字段最全的中文源排在前面，
-# 只给文本兜底的 MusicBrainz 排最后（它答得出繁体与别名，答不出封面）。
+# 源顺序即候选名单的顺序：全部源每个文件一次并行问完（不早停），顺序用在两处 ——
+# 界面「每个源只留最高分」的排列，以及打分与完整度都并列时取先答的那一个。
+# 把命中率最高、字段最全的中文源排在前面，只给文本兜底的 MusicBrainz 排最后
+# （它答得出繁体与别名，答不出封面）。
 RESOURCES = ("netease", "qmusic", "kugou", "migu", "musicbrainz")
 
 # 解析故障的原因。两种都不是"这个文件查不到"的结论，调用方据此决定要不要给文件记失败：
@@ -143,7 +146,11 @@ def _netease_request(keyword: str, limit: int) -> Dict[str, Any]:
 
 
 def _netease_candidates(payload: Any) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-    """网易云检索结果。al.picUrl 是封面，publishTime 是毫秒时间戳，cd 是 "01" 这种字符串。"""
+    """网易云检索结果。al.picUrl 是封面，publishTime 是毫秒时间戳，cd 是 "01" 这种字符串。
+
+    no 是碟内曲序（实测《L.O.V.E.》的 Unity (Interlude) 回 no=9、cd='01'），
+    这个源没有"专辑总曲数"字段，所以写进文件的是裸曲序而不是 9/12。
+    """
     songs = _rows(payload, "result", "songs")
     if songs is None:
         # code 非 200 时 result 里根本没有 songs：这是平台没给答案，不是曲库里查不到
@@ -227,7 +234,11 @@ def _kugou_request(keyword: str, limit: int) -> Dict[str, Any]:
 
 
 def _kugou_candidates(payload: Any) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-    """酷狗：检索结果没有年份和轨道号，封面在 trans_param.union_cover 的 {size} 模板里。"""
+    """酷狗：检索结果没有年份和轨道号，封面在 trans_param.union_cover 的 {size} 模板里。
+
+    2026-10 实测过原始响应：条目里没有任何曲序字段（没有 no/index/track/cd 这些键），
+    trans_param 全是版权、音质、偏移量这类播放侧的东西 —— 不是解析漏读，是接口没给。
+    """
     if isinstance(payload, dict) and payload.get("status") not in (None, 1):
         return [], API_ERROR
     songs = _rows(payload, "data", "info")
@@ -277,7 +288,13 @@ def _migu_request(keyword: str, limit: int) -> Dict[str, Any]:
 
 
 def _migu_candidates(payload: Any) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-    """咪咕：封面是 imgItems 里的若干尺寸，取最大那档；成功码是字符串 "000000"。"""
+    """咪咕：封面是 imgItems 里的若干尺寸，取最大那档；成功码是字符串 "000000"。
+
+    2026-10 实测：条目带着 albums/isInDAlbum/dalbumId 这类"属于哪张专辑"的字段，
+    却没有曲序（search_all.do 的响应当里就没有 trackNo 这一项）。另外少了请求里的
+    searchSwitch={"song":1,...} 时 songResultData 整个不回（实测同词带与不带：0 行 / 20 行），
+    所以那几个头与这个开关不能删。
+    """
     if not isinstance(payload, dict) or str(payload.get("code")) != "000000":
         return [], API_ERROR
     songs = _rows(payload, "songResultData", "result")
@@ -333,7 +350,12 @@ def _musicbrainz_request(keyword: str, limit: int) -> Dict[str, Any]:
 
 
 def _musicbrainz_candidates(payload: Any) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-    """MusicBrainz：检索结果直接带 releases，专辑名与发行日期取第一条；无封面。"""
+    """MusicBrainz：检索结果直接带 releases，专辑名与发行日期取第一条；无封面。
+
+    2026-10 实测：检索响应里每条 release 只有 title/status/date/track-count 这些专辑级字段，
+    media[].tracks[].position（曲序）在按 release 单独取详情时才有 —— 那就是给每个候选再打
+    一发请求，和当初不接酷我封面的理由是同一件事。
+    """
     recordings = _rows(payload, "recordings")
     if recordings is None:
         return [], API_ERROR

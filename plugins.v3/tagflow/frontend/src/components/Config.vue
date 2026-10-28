@@ -90,7 +90,7 @@ const resourceItems = [
 const picked = computed(() => toResourceList(config.value.resources))
 const sourceNote = computed(() =>
   picked.value.length
-    ? `按这个顺序逐源问，某源出到满分就停`
+    ? `全部源一次问完（发出时随机错峰，防风控）；分数与完整度都并列时，按这个顺序取先`
     : `留空 = 全部源（${resourceItems.map(i => i.title.split(' ')[0]).join(' / ')}）`
 )
 
@@ -262,7 +262,8 @@ onMounted(() => {
         />
 
         <div class="text-caption text-grey mt-2">
-          曲名 / 艺人 / 专辑 各 1 分，默认要 3 分全中才写；分数低于阈值只记失败、不碰文件。
+          曲名 / 艺人 / 专辑 各 1 分，默认要 3 分全中才写；分数只是门槛，低于阈值只记失败、不碰文件。
+          过了门槛的候选不止一个时，比谁给得全（年份 / 音轨 / 碟号 / 封面）。
           调低到 1-2 就可能把翻唱、纯音乐版当成原曲，标签写进文件无法回滚。
         </div>
         <div class="text-caption text-grey mt-1">

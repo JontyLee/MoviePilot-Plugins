@@ -123,7 +123,7 @@ V3 新插件使用 `plugins.v3/<plugin_id_lower>/`、`tests/v3/<plugin_id_lower>
 公开（详见各插件使用说明的「上游与许可」一节与源码头部注释）：
 
 - [Music Tag Web](https://github.com/xhongc/music-tag-web) —— `GPL-3.0`。TagFlow音乐库刮削
-  的逐源查询、候选归一与打分约定以它为上游。
+  对各平台公开接口的调用约定、候选归一与打分约定以它为上游。
 - [songloft-plugin-miot](https://github.com/songloft-org/songloft-plugin-miot) —— `Apache-2.0`。
   小爱音箱插件的小米云端接入约定按它的契约移植。
 - [MiService](https://github.com/Yonsm/MiService) —— `MIT`。用于交叉核对小米登录与 ubus 的取值。

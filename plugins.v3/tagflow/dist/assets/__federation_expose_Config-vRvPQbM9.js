@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { F as FlowPipeline, a as FLOW_STEPS, _ as _export_sfc } from './flow-BVjcb_2i.js';
+import { F as FlowPipeline, a as FLOW_STEPS, _ as _export_sfc } from './flow-BW_Lw9Qv.js';
 
 const {defineComponent:_defineComponent} = await importShared('vue');
 
@@ -93,7 +93,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
     ];
     const picked = computed(() => toResourceList(config.value.resources));
     const sourceNote = computed(
-      () => picked.value.length ? `按这个顺序逐源问，某源出到满分就停` : `留空 = 全部源（${resourceItems.map((i) => i.title.split(" ")[0]).join(" / ")}）`
+      () => picked.value.length ? `全部源一次问完（发出时随机错峰，防风控）；分数与完整度都并列时，按这个顺序取先` : `留空 = 全部源（${resourceItems.map((i) => i.title.split(" ")[0]).join(" / ")}）`
     );
     function saveConfig() {
       if (props.standalone) return saveStandalone();
@@ -326,7 +326,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                 inset: "",
                 class: "mt-2"
               }, null, 8, ["modelValue"]),
-              _cache[21] || (_cache[21] = _createElementVNode("div", { class: "text-caption text-grey mt-2" }, " 曲名 / 艺人 / 专辑 各 1 分，默认要 3 分全中才写；分数低于阈值只记失败、不碰文件。 调低到 1-2 就可能把翻唱、纯音乐版当成原曲，标签写进文件无法回滚。 ", -1)),
+              _cache[21] || (_cache[21] = _createElementVNode("div", { class: "text-caption text-grey mt-2" }, " 曲名 / 艺人 / 专辑 各 1 分，默认要 3 分全中才写；分数只是门槛，低于阈值只记失败、不碰文件。 过了门槛的候选不止一个时，比谁给得全（年份 / 音轨 / 碟号 / 封面）。 调低到 1-2 就可能把翻唱、纯音乐版当成原曲，标签写进文件无法回滚。 ", -1)),
               _cache[22] || (_cache[22] = _createElementVNode("div", { class: "text-caption text-grey mt-1" }, " 五个源都是插件直连的公开检索接口，不必部署任何服务；只发清洗后的「曲名-艺人」， 库内路径与目录结构不出本机。 ", -1)),
               _cache[23] || (_cache[23] = _createElementVNode("div", { class: "text-caption text-grey mt-1" }, " 比对用的本地身份优先读文件已有标签，缺哪项就按目录结构兜底；猜不出来宁可判未达阈值， 也不拿目录名凑假身份改写标签。 ", -1))
             ]),
@@ -427,6 +427,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const Config = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-dc70a696"]]);
+const Config = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-dec3d452"]]);
 
 export { Config as default };

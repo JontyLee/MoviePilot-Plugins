@@ -124,14 +124,14 @@ const FLOW_STEPS = [
     key: "query",
     icon: "mdi-magnify",
     title: "检索",
-    caption: "逐源问，满分即停",
+    caption: "全部源并行问",
     knobs: "识别源"
   },
   {
     key: "score",
     icon: "mdi-scale-balance",
     title: "打分",
-    caption: "曲名/艺人/专辑 各 1 分",
+    caption: "分数够，再挑给得全的",
     knobs: "最低匹配分数"
   },
   {

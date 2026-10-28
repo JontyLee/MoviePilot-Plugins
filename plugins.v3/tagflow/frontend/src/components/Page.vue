@@ -345,8 +345,9 @@ async function openEdit(row: any) {
   }
 }
 
-// 「获取候选」：把内置源各问一遍（后端 this 条走 all_sources，不做"第一个满分就停"的早停），
-// 由人比较对得准的是谁；历史最佳从失败账直读、不联网 —— 自动刮削差半分时它常常就是
+// 「获取候选」：把内置源各问一遍摆在一起（自动刮削是「满足阈值的候选里挑给得最全的那一条」，
+// 这里不合并也不选胜者，每个源只留它自己分最高的一条），由人比较对得准的是谁；
+// 历史最佳从失败账直读、不联网 —— 自动刮削差半分时它常常就是
 // 正确答案，只是没到自动写入那条线，值得摆出来让人决定采不采纳。
 const editCandidates = ref<any[]>([])
 const editHistory = ref<any>(null)
@@ -381,11 +382,16 @@ async function fetchCandidates() {
 
 // 采纳只填非空值：候选没有年份时拿空串盖进表格，会把人已经填好的年份清掉
 // （而候选的"缺项"和文件里的"缺项"根本不是一回事）。
+// 歌词只有源真给出可落盘的文本时才在（后端与写文件用同一判据筛过）。
+const ADOPT_FIELDS = ['title', 'artist', 'album', 'year', 'tracknumber', 'lyrics'] as const
+
 function candidateFields(cand: any): Record<string, string> {
   const raw = cand?.fields || {}
   const out: Record<string, string> = {}
-  for (const key of ['title', 'artist', 'album', 'year', 'tracknumber']) {
-    const value = String(raw[key] ?? '').trim()
+  for (const key of ADOPT_FIELDS) {
+    // 历史最佳来自失败账的摘要（brief），短字段在顶层、没有完整 fields 一层：
+    // 顶层值截断过，但对曲名/艺人/专辑/年份/音轨这种短值够用；歌词只认真值，不拿摘要凑
+    const value = String(raw[key] ?? (key === 'lyrics' ? '' : cand?.[key] ?? '')).trim()
     if (value) out[key] = value
   }
   return out
@@ -398,13 +404,42 @@ function adoptCount(cand: any): number {
     .length
 }
 
-function adoptCandidate(cand: any) {
+// keys 省略 = 全部非空项；候选详情弹窗按勾选传，写哪些由人点名，不自动决定
+function adoptCandidate(cand: any, keys?: string[]) {
   const fields = candidateFields(cand)
-  const before = adoptCount(cand)
-  for (const [key, value] of Object.entries(fields)) {
+  const picked = keys ? Object.fromEntries(
+    Object.entries(fields).filter(([key]) => keys.includes(key))) : fields
+  const before = Object.entries(picked)
+    .filter(([key, value]) => value !== (editBase.value[key] || '')).length
+  for (const [key, value] of Object.entries(picked)) {
     (editForm.value as any)[key] = value
   }
   if (!before) notify('候选给出的值文件里已经有了', 'warning')
+  return before
+}
+
+// 候选详情弹窗：一条候选占一行看不清全部字段，"采纳"又是一次性全盖 ——
+// 这里逐字段列出候选值与文件现值，勾选要覆盖哪些。
+const candDialog = ref(false)
+const candDetail = ref<any>(null)
+const candPicked = ref<string[]>([])
+
+function openCandidate(cand: any) {
+  if (!cand) return
+  candDetail.value = cand
+  const fields = candidateFields(cand)
+  // 默认只勾"与文件现值不同"的项：把一堆一样的值勾上再点应用，等于没做决定
+  candPicked.value = Object.entries(fields)
+    .filter(([key, value]) => value !== (editBase.value[key] || ''))
+    .map(([key]) => key)
+  candDialog.value = true
+}
+
+function applyCandidatePicked() {
+  if (!candDetail.value || !candPicked.value.length) return
+  const n = adoptCandidate(candDetail.value, candPicked.value)
+  candDialog.value = false
+  notify(n ? `已填入 ${n} 项，点「保存」才写入文件` : '选的值和文件里的一样', n ? 'success' : 'warning')
 }
 
 // 逐项判定要说人话：hit 是"这一项对上了"，no_local 是本地根本没这项、没法比 ——
@@ -837,8 +872,10 @@ onMounted(() => {
             <template #item.mtime="{ item }">{{ fmtTime(item.mtime) }}</template>
             <template #item.size="{ item }">{{ fmtSize(item.size) }}</template>
             <template #item.actions="{ item }">
-              <v-btn v-if="item.status === 'deficient'" size="x-small" variant="text" color="primary" :loading="busy" @click="openEdit(item)">编辑</v-btn>
-              <v-btn v-else size="x-small" variant="text" color="primary" :loading="busy" @click="retryRow(item)">重试</v-btn>
+              <!-- 编辑对所有桶开放：done/pending 的行也可能藏着要手工改的字段的现值，
+                   只有缺项能点开就成了"界面上看得见、动手没处动" -->
+              <v-btn size="x-small" variant="text" color="primary" :loading="busy" @click="openEdit(item)">编辑</v-btn>
+              <v-btn v-if="item.status !== 'deficient'" size="x-small" variant="text" color="primary" :loading="busy" @click="retryRow(item)">重试</v-btn>
               <v-btn size="x-small" variant="text" @click="openDetail(item)">详情</v-btn>
             </template>
             <template #no-data>
@@ -1004,8 +1041,8 @@ onMounted(() => {
             </div>
           </v-form>
 
-          <!-- 内置源候选：自动刮削"第一个满分就停"，这里恰恰相反 —— 各源都问一遍摆出来，
-               由人比较谁对得准；采纳只填非空项，不覆盖已填好的值 -->
+          <!-- 内置源候选：自动刮削只在满足阈值的候选里挑给得最全的一条，这里恰恰相反 ——
+               各源都问一遍摆出来，由人比较谁对得准；采纳只填非空项，不覆盖已填好的值 -->
           <div class="mls-section mt-5">
             <div class="d-flex align-center">
               <div class="mls-section-title mb-0">内置源候选</div>
@@ -1014,7 +1051,8 @@ onMounted(() => {
                      prepend-icon="mdi-magnify" @click="fetchCandidates">获取全部源候选</v-btn>
             </div>
             <div v-if="editCandidateError" class="text-caption text-warning mt-2">{{ editCandidateError }}</div>
-            <v-card v-if="editHistory" variant="outlined" class="mt-2 pa-2">
+            <v-card v-if="editHistory" variant="outlined" class="mt-2 pa-2 mls-cand-click"
+                    @click="openCandidate(editHistory)">
               <div class="d-flex align-center flex-wrap gap-1">
                 <v-chip size="x-small" variant="tonal" color="warning" prepend-icon="mdi-history">
                   历史最佳 · {{ sourceText(editHistory.source || '') }} · {{ editHistory.score }} 分
@@ -1028,8 +1066,9 @@ onMounted(() => {
                         :color="state === 'hit' ? 'success' : state === 'no_local' ? 'grey' : 'warning'">
                   {{ fieldText(String(field)) }} {{ hitMark(state) }}
                 </v-chip>
+                <v-btn size="x-small" variant="text" color="primary" @click.stop="openCandidate(editHistory)">详情</v-btn>
                 <v-btn size="x-small" variant="text" :color="adoptCount(editHistory) ? 'primary' : 'grey'"
-                       :disabled="!adoptCount(editHistory)" @click="adoptCandidate(editHistory)">
+                       :disabled="!adoptCount(editHistory)" @click.stop="adoptCandidate(editHistory)">
                   采纳{{ adoptCount(editHistory) ? `（${adoptCount(editHistory)} 项）` : '（无新内容）' }}
                 </v-btn>
               </div>
@@ -1039,7 +1078,7 @@ onMounted(() => {
               </div>
             </v-card>
             <div v-for="cand in editCandidates" :key="`${cand.source}-${cand.title}-${cand.album}`"
-                 class="mls-cand">
+                 class="mls-cand mls-cand-click" @click="openCandidate(cand)">
               <div class="d-flex align-center flex-wrap gap-1">
                 <v-chip size="x-small" variant="tonal" color="primary">{{ sourceText(cand.source || '') }}</v-chip>
                 <v-chip size="x-small" variant="text" :color="cand.score >= 3 ? 'success' : 'warning'">
@@ -1051,8 +1090,9 @@ onMounted(() => {
                         :color="state === 'hit' ? 'success' : state === 'no_local' ? 'grey' : 'warning'">
                   {{ fieldText(String(field)) }} {{ hitMark(state) }}
                 </v-chip>
+                <v-btn size="x-small" variant="text" color="primary" @click.stop="openCandidate(cand)">详情</v-btn>
                 <v-btn size="x-small" variant="text" :color="adoptCount(cand) ? 'primary' : 'grey'"
-                       :disabled="!adoptCount(cand)" @click="adoptCandidate(cand)">
+                       :disabled="!adoptCount(cand)" @click.stop="adoptCandidate(cand)">
                   采纳{{ adoptCount(cand) ? `（${adoptCount(cand)} 项）` : '（无新内容）' }}
                 </v-btn>
               </div>
@@ -1062,10 +1102,11 @@ onMounted(() => {
               </div>
             </div>
             <div v-if="editCandidateLoading" class="text-caption text-grey mt-2">
-              正在逐个问内置源，源多时可能要十几秒
+              正在并行问内置源（最慢的一个答完就齐），慢的源最多等 6 秒
             </div>
             <div v-else-if="editCandidates.length" class="text-caption text-grey mt-2">
-              每个源只列分最高的一条；采纳只填非空项，还要改就在上面的表格里接着编辑，点「保存」才写入文件
+              每个源只列分最高的一条；点「详情」逐字段勾选要覆盖什么，点「采纳」一把填全部非空项，
+              都要再点「保存」才写入文件
             </div>
           </div>
         </v-card-text>
@@ -1080,6 +1121,47 @@ onMounted(() => {
           <v-btn variant="flat" color="primary" class="text-none"
                  :loading="busy" :disabled="editLoading || !editChanged.length" @click="submitEdit">
             保存
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <!-- 候选详情：逐字段对照候选值与文件现值，勾选要覆盖哪些 ——
+         点「采纳」一把全盖是替人做决定，这里让写进去的每一项都经过点名 -->
+    <v-dialog v-model="candDialog" max-width="640px">
+      <v-card variant="flat" border>
+        <v-card-title class="text-subtitle-1 d-flex align-center py-3">
+          候选详情 · {{ sourceText(candDetail?.source || '') }}
+          <v-chip v-if="candDetail" size="x-small" variant="text" class="ml-2"
+                  :color="candDetail.score >= 3 ? 'success' : 'warning'">{{ candDetail.score }} 分</v-chip>
+          <v-spacer />
+          <v-btn icon="mdi-close" size="x-small" variant="text" @click="candDialog = false" />
+        </v-card-title>
+        <v-divider />
+        <v-card-text v-if="candDetail" class="pa-4">
+          <div v-for="key in ADOPT_FIELDS" :key="key">
+            <v-checkbox v-if="candidateFields(candDetail)[key]" hide-details density="compact"
+                        :value="key" :label="fieldText(key)" v-model="candPicked">
+              <template #append>
+                <div class="text-caption" style="max-width: 380px; white-space: pre-wrap; word-break: break-all">
+                  <span class="text-grey">文件：</span>{{ editBase[key] || '（空）' }}
+                  <span class="ml-2 text-grey">候选：</span>{{ candidateFields(candDetail)[key] }}
+                </div>
+              </template>
+            </v-checkbox>
+          </div>
+          <div v-if="!Object.keys(candidateFields(candDetail)).length" class="text-caption text-grey">
+            这条候选没有给出任何可采纳的值
+          </div>
+        </v-card-text>
+        <v-divider />
+        <v-card-actions>
+          <div class="text-caption text-grey">应用只填入编辑表格，点「保存」才写入文件</div>
+          <v-spacer />
+          <v-btn variant="text" class="text-none" @click="candDialog = false">取消</v-btn>
+          <v-btn variant="flat" color="primary" class="text-none"
+                 :disabled="!candPicked.length" @click="applyCandidatePicked">
+            应用所选{{ candPicked.length ? `（${candPicked.length} 项）` : '' }}
           </v-btn>
         </v-card-actions>
       </v-card>
@@ -1125,6 +1207,8 @@ onMounted(() => {
   padding: 6px 10px;
   border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
 }
+.mls-cand-click { cursor: pointer; }
+.mls-cand-click:hover { background: rgba(var(--v-theme-on-surface), .04); }
 .mls-diff { border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
 .mls-diff-old { color: rgba(var(--v-theme-on-surface), .6); text-decoration: line-through; }
 .mls-diff-new { font-weight: 600; }
