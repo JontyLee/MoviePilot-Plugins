@@ -72,12 +72,12 @@ V3 新插件使用 `plugins.v3/<plugin_id_lower>/`、`tests/v3/<plugin_id_lower>
 
 | 项 | 值 |
 | --- | --- |
-| 类名 / 目录 | `MusicLibraryScraper` / `plugins.v3/musiclibraryscraper/` |
+| 类名 / 目录 | `TagFlow` / `plugins.v3/tagflow/` |
 | 配置前缀 | `musiclibraryscraper_` |
-| 版本 | 0.9.0 |
+| 版本 | 0.10.0 |
 | 元数据来源 | 插件直连的各平台公开检索接口（网易云 / QQ音乐 / 酷狗 / 咪咕 / MusicBrainz），不必部署任何服务 |
 | 图标 | `icons/tagflow.svg`（仓库自绘，市场走 raw 地址） |
-| 使用说明 | [docs/musiclibraryscraper.md](./docs/musiclibraryscraper.md) |
+| 使用说明 | [docs/tagflow.md](./docs/tagflow.md) |
 
 定时扫描音乐目录，为每个文件检索元数据，再沿用 MP 原生音乐刮削链路写入标签与封面。
 只写入 MP 认识的字段：曲名、艺人、专辑、专辑艺人、年份、轨道号、碟号、封面、歌词。
@@ -166,7 +166,7 @@ GitHub 仓库的 `main` 分支；仓库地址通过 `PLUGIN_MARKET` 配置，多
 - [插件 API 专题](./docs/V3_API_Response_Adaptation.md)
 - [仓库与发布指南](./docs/Repository_Guide.md)
 - [FAQ 索引](./docs/FAQ.md)
-- [TagFlow音乐库刮削 使用说明](./docs/musiclibraryscraper.md)
+- [TagFlow音乐库刮削 使用说明](./docs/tagflow.md)
 - [小爱音箱 使用说明](./docs/xiaoaispeaker.md)
 - [插件仓测试说明](./tests/README.md)
 - [MoviePilot-Frontend V3 模块联邦指南](https://github.com/jxxghp/MoviePilot-Frontend/blob/v3/docs/module-federation-guide.md)

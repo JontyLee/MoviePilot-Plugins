@@ -1,6 +1,6 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import Page from './__federation_expose_Page-Der7Rktg.js';
-import Config from './__federation_expose_Config-BkowejZ2.js';
+import Page from './__federation_expose_Page-by-tAwkn.js';
+import Config from './__federation_expose_Config-BilinnzG.js';
 import { _ as _export_sfc } from './flow-BVjcb_2i.js';
 
 const {defineComponent:_defineComponent} = await importShared('vue');

@@ -1,10 +1,10 @@
-"""MusicLibraryScraper 增量扫描 & 状态账 单测。
+"""TagFlow 增量扫描 & 状态账 单测。
 
 只验证插件自身逻辑（done/failed 记账、mtime+size 增量跳过、失败重试上限、定向重试、
 prune、配置回显与回写不泄漏凭据）。识别源的网络与 MP 写入通过替换私有方法
 __scrape_file / __is_complete 完全屏蔽；真的发请求那几条用 RequestUtils 替身作答。
 
-运行：python3 tests/v3/musiclibraryscraper/test_incremental_scan.py
+运行：python3 tests/v3/tagflow/test_incremental_scan.py
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ import unittest
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(_ROOT / "tests" / "v3" / "musiclibraryscraper"))
+sys.path.insert(0, str(_ROOT / "tests" / "v3" / "tagflow"))
 
 import _stub_env  # noqa: E402
 
@@ -63,11 +63,11 @@ _stub_env.install(_FakePluginBase)
 
 # 桩就绪后再导入插件（其顶层 import app.* / apscheduler / fastapi 才会成功）。
 sys.path.insert(0, str(_ROOT / "plugins.v3"))
-import musiclibraryscraper as mls  # noqa: E402
+import tagflow as mls  # noqa: E402
 
-_SCAN = "_MusicLibraryScraper__scan"
-_HAS_TAGS = "_MusicLibraryScraper__is_complete"
-_SCRAPE = "_MusicLibraryScraper__scrape_file"
+_SCAN = "_TagFlow__scan"
+_HAS_TAGS = "_TagFlow__is_complete"
+_SCRAPE = "_TagFlow__scrape_file"
 
 
 class _Resp:
@@ -187,7 +187,7 @@ class IncrementalScanTest(unittest.TestCase):
         for name in files:
             fp = tmp / name
             fp.write_bytes(b"x" * 100)
-        p = mls.MusicLibraryScraper()
+        p = mls.TagFlow()
         p._scraper_paths = str(tmp)
         p._exclude_paths = ""
         p._active_resources = ["netease"]
@@ -198,8 +198,8 @@ class IncrementalScanTest(unittest.TestCase):
         def fake_scrape(fp, tags=None, overwrite=False):
             counters["scrape"] += 1
             if files[Path(fp).name] == "ok":
-                return (True, "", 3, "qmusic", {})
-            return (False, "无候选", None, "", {})
+                return (True, "", 3, "qmusic", {}, {})
+            return (False, "无候选", None, "", {}, {})
 
         def fake_tag(fp, tags=None):
             counters["tag"] += 1
@@ -272,7 +272,7 @@ class IncrementalScanTest(unittest.TestCase):
 
         def always_ok(fp, tags=None, overwrite=False):
             c["scrape"] += 1
-            return (True, "", 3, "netease", {})
+            return (True, "", 3, "netease", {}, {})
 
         setattr(p, _SCRAPE, always_ok)
         c["scrape"] = 0
@@ -297,7 +297,7 @@ class IncrementalScanTest(unittest.TestCase):
 
         def outage(fp, tags=None, overwrite=False):
             counters["scrape"] += 1
-            return (False, reason or mls._UNREACHABLE_REASON, None, "", {})
+            return (False, reason or mls._UNREACHABLE_REASON, None, "", {}, {})
 
         setattr(p, _SCRAPE, outage)
         if existing_failed:
@@ -411,7 +411,7 @@ class IncrementalScanTest(unittest.TestCase):
             c["scrape"] += 1
             if Path(fp).name == "2.mp3":
                 raise RuntimeError("宿主内部异常")
-            return (True, "", 3, "netease", {})
+            return (True, "", 3, "netease", {}, {})
 
         setattr(p, _SCRAPE, flaky)
         self._scan(p)
@@ -473,7 +473,7 @@ class IncrementalScanTest(unittest.TestCase):
             str(tmp / "a.mp3"): {"retries": 1, "reason": "未达阈值（最低匹配分数 3）", "score": 2},
             str(tmp / "b.mp3"): {"retries": 1, "reason": "未达阈值（最低匹配分数 3）", "score": 1},
             str(tmp / "c.mp3"): {
-                "retries": mls.MusicLibraryScraper.MAX_RETRY, "reason": "MTW 无候选",
+                "retries": mls.TagFlow.MAX_RETRY, "reason": "MTW 无候选",
             },
         })
         groups = p._build_status()["failure_reasons"]
@@ -567,7 +567,7 @@ class IncrementalScanTest(unittest.TestCase):
 
         def record(fp, tags=None, overwrite=False):
             seen.append(overwrite)
-            return (True, "", 3, "netease", {})
+            return (True, "", 3, "netease", {}, {})
 
         p, tmp, c = self._plugin({"z.mp3": "ok"})
         setattr(p, _SCRAPE, record)
@@ -598,7 +598,7 @@ class IncrementalScanTest(unittest.TestCase):
         def with_tags(fp, tags=None, overwrite=False):
             # 补空判定已经把解析结果传进来了，身份匹配必须复用而不是重读
             assert tags is not None
-            return (True, "", 3, "netease", {})
+            return (True, "", 3, "netease", {}, {})
 
         def complete(fp, tags=None):
             assert tags is not None
@@ -723,7 +723,7 @@ class ContractTest(unittest.TestCase):
         min_score 直接赋值、不过 _clamp_min_score：有一条用例要的就是"阈值高于满分"，
         看的是候选选不选得中，不是配置收敛（收敛归 test_min_score_clamped_*）。
         """
-        p = mls.MusicLibraryScraper()
+        p = mls.TagFlow()
         if min_score is not None:
             p._min_score = min_score
         if resources is not None:
@@ -801,17 +801,17 @@ class ContractTest(unittest.TestCase):
         p._cron = "0 3 * * 0"
         svc = p.get_service()
         self.assertEqual(len(svc), 1)
-        self.assertEqual(svc[0]["id"], "MusicLibraryScraper.Scan")
+        self.assertEqual(svc[0]["id"], "TagFlow.Scan")
         self.assertEqual(svc[0]["trigger"], ("crontab", "0 3 * * 0"))
 
     def test_render_mode_and_page(self):
-        self.assertEqual(mls.MusicLibraryScraper.get_render_mode(), ("vue", "dist/assets"))
+        self.assertEqual(mls.TagFlow.get_render_mode(), ("vue", "dist/assets"))
         self.assertEqual(self._plugin().get_page(), [])
 
     def test_built_remote_entry_serves_app_page(self):
         """侧栏 nav_key=main 时宿主按 ./AppPage → ./Page 找组件：只暴露 ./Page 的话
         点入口会报「无法加载插件全页组件」，而这只有装了才看得见 —— 拿产物先断言一次。"""
-        entry = (_ROOT / "plugins.v3" / "musiclibraryscraper" / "dist" / "assets" / "remoteEntry.js")
+        entry = (_ROOT / "plugins.v3" / "tagflow" / "dist" / "assets" / "remoteEntry.js")
         if not entry.exists():
             self.skipTest(f"{entry} 尚未构建")
         text = entry.read_text(encoding="utf-8")
@@ -824,7 +824,7 @@ class ContractTest(unittest.TestCase):
         p = self._plugin()
         apis = p.get_api()
         self.assertEqual({a["path"] for a in apis},
-                         {"/status", "/files", "/file", "/retry", "/scan", "/edit", "/config"})
+                         {"/status", "/files", "/file", "/retry", "/scan", "/edit", "/candidates", "/config"})
         self.assertTrue(all(a["auth"] == "bear" for a in apis))
         # /file 也走 bear：它按路径读任意库内文件的 tag 文本，无认证的读接口等于把
         # 音乐库内容和路径结构挂在一个公开 URL 上。
@@ -859,7 +859,7 @@ class ContractTest(unittest.TestCase):
 
         默认按关的话，升级完入口"就没了"，而这次升级本来什么都没改变过。
         """
-        p = mls.MusicLibraryScraper()
+        p = mls.TagFlow()
         p.init_plugin({"enabled": True, "scraper_paths": "/music"})
         self.assertTrue(p._show_sidebar_nav)
         p.init_plugin({"enabled": True, "show_sidebar_nav": False, "scraper_paths": "/music"})
@@ -868,7 +868,7 @@ class ContractTest(unittest.TestCase):
     # ---------------- 侧栏配置对话框那两条接口 ----------------
 
     def _configured(self):
-        p = mls.MusicLibraryScraper()
+        p = mls.TagFlow()
         p.init_plugin({
             "enabled": True,
             "scraper_paths": "/music",
@@ -924,7 +924,7 @@ class ContractTest(unittest.TestCase):
         留空的意思是"全部源"，包括以后新加的源。对话框拿生效值起头，用户什么也没改
         点一次保存，配置里就固化了当前这五个 —— 以后插件多接一个平台也不会轮到他。
         """
-        p = mls.MusicLibraryScraper()
+        p = mls.TagFlow()
         p.init_plugin({"enabled": True, "scraper_paths": "/music"})
         res = p.api_get_config(None)
         self.assertEqual(res["resources"], [])
@@ -935,7 +935,7 @@ class ContractTest(unittest.TestCase):
 
     def test_writeback_keeps_blank_resources_blank(self):
         """回写要保住「留空」：onlyonce 回写与对话框保存都会整体替换这份配置。"""
-        p = mls.MusicLibraryScraper()
+        p = mls.TagFlow()
         p.init_plugin({"enabled": True, "scraper_paths": "/music", "resources": []})
         p.init_plugin({**p._config_snapshot(), "onlyonce": True})
         self.assertEqual(p._configs[-1]["resources"], [])
@@ -1073,7 +1073,7 @@ class ContractTest(unittest.TestCase):
         # Vue 配置页：一眼能懂的短句 + 去 docs 的入口
         for phrase in ("只补缺", "强制覆盖", "留空 = 全部源", "（1-3）", "宿主",
                        ".trickplay", "无法回滚", "库内路径与目录结构不出本机",
-                       "docs/musiclibraryscraper.md"):
+                       "docs/tagflow.md"):
             self.assertIn(phrase, cfg)
         # 阈值范围要与服务端夹紧一致，写 0-3 会诱导用户填出不可逆的 0
         for surface, name in ((src, "__init__"), (cfg, "Config.vue"), (notes, "_FORM_NOTES")):
@@ -1120,14 +1120,14 @@ class ContractTest(unittest.TestCase):
         # 文档里可以提这段历史，但属性、表单项和默认值都不能再有它
         self.assertNotIn("_mtw_select_mode", src)
         self.assertNotIn("select_mode", cfg)
-        _, defaults = mls.MusicLibraryScraper().get_form()
+        _, defaults = mls.TagFlow().get_form()
         self.assertNotIn("mtw_select_mode", defaults)
         self.assertNotIn("候选排序", src)
 
     def test_icon_is_vendored_in_repo(self):
         """图标必须走本仓库 raw 地址，不能热链 MTW 实例（实例下线会连带市场图标一起裂）。"""
         self.assertTrue(
-            mls.MusicLibraryScraper.plugin_icon.startswith(
+            mls.TagFlow.plugin_icon.startswith(
                 "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/"
             )
         )
@@ -1143,7 +1143,7 @@ class ContractTest(unittest.TestCase):
         root = Path(mls.__file__).resolve().parents[2]
         sources = (Path(mls.__file__).parent / "sources.py").read_text(encoding="utf-8")
         readme = (root / "README.md").read_text(encoding="utf-8")
-        doc = (root / "docs" / "musiclibraryscraper.md").read_text(encoding="utf-8")
+        doc = (root / "docs" / "tagflow.md").read_text(encoding="utf-8")
         for surface in (sources, readme, doc):
             self.assertIn("music-tag-web", surface)
             self.assertIn("GPL-3.0", surface)
@@ -1220,12 +1220,12 @@ class ContractTest(unittest.TestCase):
         blank = {"title": "", "artist": "", "album": "", "duration": None}
         want = mls._want_from(mls._local_identity(flat, blank, roots=roots))
         noisy = {"name": "轨迹", "artist": "Media", "album": "music"}
-        self.assertEqual(mls.MusicLibraryScraper._score_candidate(noisy, want), 1)
+        self.assertEqual(mls.TagFlow._score_candidate(noisy, want), 1)
         # 没有 clamp 时 artist="media"、album="music" 都是从库根及其上一级目录名凑出来的，
         # 同一份候选刚好凑满 3 分并被写进文件（写标签不可回滚）
         unchecked = mls._want_from(mls._local_identity(flat, blank))
         self.assertEqual(unchecked["artist"], "media")
-        self.assertEqual(mls.MusicLibraryScraper._score_candidate(noisy, unchecked), 3)
+        self.assertEqual(mls.TagFlow._score_candidate(noisy, unchecked), 3)
 
     def test_identity_roots_are_the_configured_paths(self):
         """clamp 用的边界是配置原文：库根本身是软链时 realpath 会让每个文件都判成库外。"""
@@ -1336,7 +1336,7 @@ class ContractTest(unittest.TestCase):
 
     def test_score_candidate_counts_title_artist_album(self):
         want = {"title": "黑面", "artist": "陈奕迅", "album": "黑白灰"}
-        score = mls.MusicLibraryScraper._score_candidate
+        score = mls.TagFlow._score_candidate
         self.assertEqual(
             score({"name": "黑面", "artist": "陈奕迅", "album": "黑白灰"}, want), 3
         )
@@ -1378,7 +1378,7 @@ class ContractTest(unittest.TestCase):
         只看分数做不出决定：曲名没对上要去改文件名或放宽阈值，本地读不出曲名
         （整张 CD 压成一个 wav）则该把这类文件排出扫描范围 —— 两种提示相反。
         """
-        hits = mls.MusicLibraryScraper._field_hits
+        hits = mls.TagFlow._field_hits
         want = {"title": "黑面", "artist": "陈奕迅", "album": "黑白灰"}
         self.assertEqual(
             hits({"name": "黑面", "artist": "陈奕迅", "album": "The Line-Up"}, want),
@@ -1391,12 +1391,12 @@ class ContractTest(unittest.TestCase):
             mls._NO_LOCAL,
         )
         self.assertEqual(
-            mls.MusicLibraryScraper._miss_text({"title": mls._HIT, "artist": mls._HIT,
+            mls.TagFlow._miss_text({"title": mls._HIT, "artist": mls._HIT,
                                                 "album": mls._MISS}),
             "专辑未对上",
         )
         self.assertEqual(
-            mls.MusicLibraryScraper._miss_text({"title": mls._MISS, "artist": mls._NO_LOCAL,
+            mls.TagFlow._miss_text({"title": mls._MISS, "artist": mls._NO_LOCAL,
                                                 "album": mls._HIT}),
             "曲名未对上、本地无艺人",
         )
@@ -1416,7 +1416,7 @@ class ContractTest(unittest.TestCase):
         orig = mls.RequestUtils
         mls.RequestUtils = _ru(_handler)
         try:
-            okf, reason, score, _, _ = p._MusicLibraryScraper__scrape_file(fp)
+            okf, reason, score, _, _, _ = p._TagFlow__scrape_file(fp)
         finally:
             mls.RequestUtils = orig
         self.assertFalse(okf)
@@ -1439,7 +1439,7 @@ class ContractTest(unittest.TestCase):
         orig = mls.RequestUtils
         mls.RequestUtils = _ru(_handler)
         try:
-            okf, reason, _, _, _ = p._MusicLibraryScraper__scrape_file(fp)
+            okf, reason, _, _, _, _ = p._TagFlow__scrape_file(fp)
         finally:
             mls.RequestUtils = orig
         self.assertFalse(okf)
@@ -1472,7 +1472,7 @@ class ContractTest(unittest.TestCase):
         mls.RequestUtils = _ru(_handler)
         mls.logger = _Log()
         try:
-            p._MusicLibraryScraper__scan(target_paths=[str(fp)])
+            p._TagFlow__scan(target_paths=[str(fp)])
         finally:
             mls.RequestUtils = orig_ru
             mls.logger = orig_log
@@ -1639,7 +1639,7 @@ class ContractTest(unittest.TestCase):
         0 或负数 => 只对上曲名就整库改写标签（写进文件回不来）；
         大于满分 => 永远达不到阈值，整库烧满 retries 后永久跳过。
         """
-        clamp = mls.MusicLibraryScraper._clamp_min_score
+        clamp = mls.TagFlow._clamp_min_score
         # 越界按最近的一界执行：0/负数与 1 本就等价（0 分选不出候选）
         for too_low in (0, -1, "-3"):
             self.assertEqual(clamp(too_low), 1)
@@ -1734,7 +1734,7 @@ class RobustnessTest(unittest.TestCase):
     """复盘后的并发/生命周期/入参边界回归。"""
 
     def _plugin(self):
-        p = mls.MusicLibraryScraper()
+        p = mls.TagFlow()
         p._enabled = True
         p._cron = "0 3 * * 0"
         return p
@@ -1813,7 +1813,7 @@ class RobustnessTest(unittest.TestCase):
     def test_stop_signal_survives_stop_service(self):
         """stop_service 里 set 完立刻 clear 等于从没停过；信号还得是每实例独立的。"""
         p = self._plugin()
-        other = mls.MusicLibraryScraper()
+        other = mls.TagFlow()
         p.stop_service()
         self.assertTrue(p._stop_event().is_set())
         self.assertFalse(other._stop_event().is_set())
@@ -2018,7 +2018,7 @@ class RobustnessTest(unittest.TestCase):
 
     def test_onlyonce_writeback_carries_every_config_key(self):
         """宿主 update_config 是整体替换不是合并：只回写 onlyonce 会清掉其余配置。"""
-        p = mls.MusicLibraryScraper()
+        p = mls.TagFlow()
         _content, defaults = p.get_form()
         config = {
             **defaults,
@@ -2094,7 +2094,7 @@ class BuiltinSourcesTest(unittest.TestCase):
     }
 
     def _plugin(self, resources=None, min_score=3):
-        p = mls.MusicLibraryScraper()
+        p = mls.TagFlow()
         p._min_score = min_score
         p._active_resources = mls._normalize_resources(resources)
         return p
@@ -2187,7 +2187,7 @@ class BuiltinSourcesTest(unittest.TestCase):
         mls._music_text_key = staticmethod(
             lambda value: "".join(to_simplified.get(ch, ch) for ch in str(value)))
         try:
-            hits = mls.MusicLibraryScraper._field_hits(c, {
+            hits = mls.TagFlow._field_hits(c, {
                 "title": "晴天", "artist": "周杰伦", "album": "叶惠美", "source": "local"})
         finally:
             mls._music_text_key = orig_key
@@ -2320,12 +2320,12 @@ class BuiltinSourcesTest(unittest.TestCase):
         p._scraper_paths = str(tmp)
         p._exclude_paths = ""
         p._force_all = False
-        p._MusicLibraryScraper__done = {}
+        p._TagFlow__done = {}
         orig_ru, orig_log = mls.RequestUtils, mls.logger
         mls.RequestUtils = _ru(lambda url, body: None)
         mls.logger = type("_L", (), {"__getattr__": lambda self, n: (lambda *a, **k: None)})()
         try:
-            p._MusicLibraryScraper__scan()
+            p._TagFlow__scan()
         finally:
             mls.RequestUtils = orig_ru
             mls.logger = orig_log
@@ -2399,7 +2399,7 @@ class RewriteLedgerTest(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp())
         for name in outcomes:
             (tmp / name).write_bytes(b"x" * 100)
-        p = mls.MusicLibraryScraper()
+        p = mls.TagFlow()
         p._scraper_paths = str(tmp)
         p._exclude_paths = ""
         p._active_resources = ["netease"]
@@ -2410,8 +2410,8 @@ class RewriteLedgerTest(unittest.TestCase):
         def fake_scrape(fp, tags=None, overwrite=False):
             diff = outcomes[Path(fp).name]
             if diff is None:
-                return (False, "无候选", None, "", {})
-            return (True, "", 3, "qmusic", diff)
+                return (False, "无候选", None, "", {}, {})
+            return (True, "", 3, "qmusic", diff, {})
 
         setattr(p, _SCRAPE, fake_scrape)
         setattr(p, _HAS_TAGS, lambda fp, tags=None: state["complete"])
@@ -2451,7 +2451,7 @@ class RewriteLedgerTest(unittest.TestCase):
         return _Req(query)
 
     def _book(self, entries):
-        p = mls.MusicLibraryScraper()
+        p = mls.TagFlow()
         p.save_data("done", entries)
         return p
 
@@ -2481,7 +2481,7 @@ class RewriteLedgerTest(unittest.TestCase):
 
     def test_other_buckets_ignore_written_filter(self):
         """written 只对 done 有意义：失败桶没有改写记录，硬筛会变成空列表骗人。"""
-        p = mls.MusicLibraryScraper()
+        p = mls.TagFlow()
         p.save_data("failed", {"/m/a.mp3": {"retries": 1, "last_ts": "t", "reason": "无候选"}})
         self.assertEqual(p.api_files(self._files_req({"bucket": "failed", "written": "1"}))["total"], 1)
 
@@ -2504,7 +2504,7 @@ class RewriteLedgerTest(unittest.TestCase):
         gone = tmp / "gone.mp3"
 
         def plugin(in_library):
-            p = mls.MusicLibraryScraper()
+            p = mls.TagFlow()
             # _is_library_path 真实语义就包含"是个存在的音频文件"，桩只再放开扩展名判定
             p._is_library_path = lambda path: in_library and Path(path).is_file()
             return p
@@ -2524,7 +2524,7 @@ class RewriteLedgerTest(unittest.TestCase):
         fp = tmp / "a.mp3"
         fp.write_bytes(b"x" * 100)
         key = str(fp)
-        p = mls.MusicLibraryScraper()
+        p = mls.TagFlow()
         p._is_library_path = lambda path: True
         p.save_data("done", {key: {"ts": "2026-10-05 10:00:00", "source": "qmusic",
                                    "set": {"album": ["", "The Line-Up"]},
@@ -2547,7 +2547,7 @@ class RewriteLedgerTest(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp())
         (tmp / "a.mp3").write_bytes(b"x" * 100)
         (tmp / "a.lrc").write_text("[00:01.00]黑面", encoding="utf-8")
-        p = mls.MusicLibraryScraper()
+        p = mls.TagFlow()
         p._is_library_path = lambda path: True
         with self._patched(_read_music_tags=lambda path, with_lyrics_text=False: dict(payload)):
             res = p.api_file(self._files_req({"path": str(tmp / "a.mp3")}))
@@ -2557,7 +2557,7 @@ class RewriteLedgerTest(unittest.TestCase):
         self.assertNotIn("lyrics", res["missing"])
 
     def test_api_file_reports_unreadable(self):
-        p = mls.MusicLibraryScraper()
+        p = mls.TagFlow()
         p._is_library_path = lambda path: True
         with self._patched(
                 _read_music_tags=lambda path, with_lyrics_text=False: self._tags(unreadable=True)):
@@ -2578,9 +2578,10 @@ class RewriteLedgerTest(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp())
         fp = tmp / "a.mp3"
         fp.write_bytes(b"x" * 100)
-        p = mls.MusicLibraryScraper()
+        p = mls.TagFlow()
         p._is_library_path = lambda path: True
-        reads = [self._tags(), self._tags(album="The Line-Up", year="2003")]
+        reads = [self._tags(), self._tags(album="The Line-Up", year="2003"),
+                 self._tags(album="The Line-Up", year="2003")]
         with self._patched(
                 _read_music_tags=lambda path, with_lyrics_text=False: reads.pop(0),
                 _write_music_tags=lambda path, fields: True):
@@ -2592,17 +2593,20 @@ class RewriteLedgerTest(unittest.TestCase):
         self.assertTrue(entry["set_ts"])
         # 没有扫描记录可沿用来源时标 manual，数据页才不会把人工填的都说成某个源刮的
         self.assertEqual(entry["source"], "manual")
+        # 缺项清单按写后的文件重算并落账：专辑/年份补上了就不该再数进来，
+        # 「有缺项」桶与徽标都读这一笔，不跟上人改完了徽标还挂着
+        self.assertEqual(entry["missing"], ["tracknumber", "cover", "lyrics"])
 
     def test_manual_edit_merges_into_existing_record(self):
         tmp = Path(tempfile.mkdtemp())
         fp = tmp / "a.mp3"
         fp.write_bytes(b"x" * 100)
         key = str(fp)
-        p = mls.MusicLibraryScraper()
+        p = mls.TagFlow()
         p._is_library_path = lambda path: True
         p.save_data("done", {key: {"mtime": 1, "size": 100, "ts": "t", "source": "qmusic",
                                    "set": {"cover": ["无", "有"]}, "set_ts": "t"}})
-        reads = [self._tags(), self._tags(year="2003")]
+        reads = [self._tags(), self._tags(year="2003"), self._tags(year="2003")]
         with self._patched(
                 _read_music_tags=lambda path, with_lyrics_text=False: reads.pop(0),
                 _write_music_tags=lambda path, fields: True):
@@ -2616,7 +2620,7 @@ class RewriteLedgerTest(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp())
         fp = tmp / "a.mp3"
         fp.write_bytes(b"x" * 100)
-        p = mls.MusicLibraryScraper()
+        p = mls.TagFlow()
         p._is_library_path = lambda path: True
         with self._patched(
                 _read_music_tags=lambda path, with_lyrics_text=False: self._tags(),
@@ -2643,3 +2647,244 @@ class RewriteLedgerTest(unittest.TestCase):
         self.assertNotIn("title: row.title", page)
         # 只提交真正动过的项：整表原样发回去会把人没碰的值又盖一遍
         self.assertIn("for (const key of editChanged.value)", page)
+
+
+class V010LedgerTest(unittest.TestCase):
+    """v0.10.0 三件事：改名搬家、缺项落账（桶与徽标同口径）、补齐弹层能问源。
+
+    断言的都是"两边会不会各说各话"这一类：搬家漏一本账 = 升级完配置与进度全丢；
+    计数与列表分家 = 徽标 125、列表 33；候选接口没把完整值带出来 = 采纳写进文件的是截断串。
+    """
+
+    @contextlib.contextmanager
+    def _patched(self, **values):
+        orig = {name: getattr(mls, name) for name in values}
+        for name, value in values.items():
+            setattr(mls, name, value)
+        try:
+            yield
+        finally:
+            for name, value in orig.items():
+                setattr(mls, name, value)
+
+    def _tags(self, **over):
+        base = {"title": "黑面", "artist": "陈奕迅", "album": "", "year": "",
+                "tracknumber": "", "duration": None, "has_cover": False,
+                "has_lyrics": False, "lyrics": "", "unreadable": False}
+        base.update(over)
+        return base
+
+    def _req(self, query):
+        class _Req:
+            def __init__(self, q):
+                self.query_params = q
+        return _Req(query)
+
+    # ---------------- 改名搬家 ----------------
+
+    def test_legacy_identity_migration(self):
+        """旧标识（类名）名下的配置与四本账要整个接过来：宿主的存储以类名为域。"""
+        p = mls.TagFlow()
+        legacy_config = {"enabled": True, "scraper_paths": "/music", "min_score": 2}
+        books = {
+            mls._KEY_DONE: {"/music/a.flac": {"mtime": 1, "size": 2, "ts": "t", "source": "netease"}},
+            mls._KEY_FAILED: {"/music/b.flac": {"retries": 2, "reason": "无候选"}},
+            mls._KEY_RUNS: {"scanned": 7},
+            mls._KEY_TARGETED_RUNS: {"scanned": 1},
+        }
+        p.get_config = lambda plugin_id=None: (
+            dict(legacy_config) if plugin_id == mls._LEGACY_PLUGIN_ID else {})
+        # 桩里 get_data/save_data 不分域（宿主分），把四本旧账原样摆进实例存储即可
+        p._store.update(books)
+
+        moved = p._migrate_legacy_identity(None)
+        self.assertEqual(moved, legacy_config)
+        # update_config 写的就是新家这一行（宿主 PluginInstanceOper.save_config_data 整体替换）
+        self.assertEqual(p._configs, [legacy_config])
+        for key, value in books.items():
+            self.assertEqual(p._store[key], value)
+
+    def test_migration_does_not_touch_existing_books(self):
+        p = mls.TagFlow()
+        p.get_config = lambda plugin_id=None: {}
+        p.save_data(mls._KEY_DONE, {"x": {}})
+        before = dict(p._store)
+        moved = p._migrate_legacy_identity({"enabled": True})
+        self.assertEqual(moved, {"enabled": True})
+        self.assertEqual(p._store, before)
+
+    # ---------------- 缺项落账 ----------------
+
+    def test_deficient_bucket_backfills_legacy_entries_once(self):
+        """旧 done 条目没有 missing 键：第一次打开这一桶并行补查并落账，之后不再读盘。"""
+        p = mls.TagFlow()
+        p._min_score = 3
+        tmp = Path(tempfile.mkdtemp())
+        fp = tmp / "01 - 黑面.flac"
+        fp.write_bytes(b"x" * 100)
+        key = str(fp)
+        p.save_data(mls._KEY_DONE, {key: {"mtime": 1, "size": 2, "ts": "t", "source": None}})
+        reads = {"n": 0}
+
+        def fake_read(path, with_lyrics_text=False):
+            reads["n"] += 1
+            return self._tags()
+
+        with self._patched(_read_music_tags=fake_read):
+            rows = p._collect_rows("deficient")
+            again = p._collect_rows("deficient")
+        self.assertEqual([r["path"] for r in rows], [key])
+        self.assertEqual(rows[0]["missing"],
+                         ["album", "year", "tracknumber", "cover", "lyrics"])
+        self.assertEqual(again, rows)
+        self.assertEqual(reads["n"], 1)
+        entry = p._load_done()[key]
+        self.assertEqual(entry["missing"],
+                         ["album", "year", "tracknumber", "cover", "lyrics"])
+
+    def test_deficient_count_and_bucket_share_the_ledger(self):
+        """徽标与列表同一个口径：只数核对过、且确实还缺项的条目；runs 里那个旧数字不再作数。"""
+        p = mls.TagFlow()
+        p._min_score = 3
+        p.save_data(mls._KEY_DONE, {
+            "/music/a.flac": {"mtime": 1, "size": 1, "ts": "t", "missing": ["cover"]},
+            "/music/b.flac": {"mtime": 1, "size": 1, "ts": "t", "missing": []},
+            "/music/c.flac": {"mtime": 1, "size": 1, "ts": "t"},
+        })
+        p.save_data(mls._KEY_RUNS, {"deficient": 125})
+        self.assertEqual(p._deficient_count(p._load_done()), 1)
+        rows = p._collect_rows("deficient")
+        self.assertEqual([r["path"] for r in rows], ["/music/a.flac"])
+
+    def test_edit_refreshes_missing_even_without_diff(self):
+        """值本来就一样（diff 空）也要刷新缺项：人在这页补完，徽标必须跟着掉。"""
+        tmp = Path(tempfile.mkdtemp())
+        fp = tmp / "a.mp3"
+        fp.write_bytes(b"x" * 100)
+        p = mls.TagFlow()
+        p._min_score = 3
+        p._is_library_path = lambda path: True
+        p.save_data(mls._KEY_DONE, {str(fp): {"mtime": 1, "size": 100, "ts": "t",
+                                              "source": "netease", "missing": ["album"]}})
+
+        class _Req:
+            async def json(_self):
+                return {"path": str(fp), "fields": {"album": "The Line-Up"}}
+
+        with self._patched(_read_music_tags=lambda path, with_lyrics_text=False: self._tags(),
+                           _write_music_tags=lambda path, fields: True):
+            res = asyncio.run(p.api_edit(_Req()))
+        self.assertTrue(res["accepted"])
+        entry = p._load_done()[str(fp)]
+        # 桩里的"写后读取"按文件现状给值（专辑仍是空）：缺项一律按写后的文件重算，
+        # 而不是照着提交上来的字段猜 —— 这一条正是徽标能不能跟着掉的关键
+        self.assertNotIn("set", entry)
+        self.assertEqual(entry["missing"], ["album", "year", "tracknumber", "cover", "lyrics"])
+
+    def test_scan_records_history_best_on_failure(self):
+        """差半分时把分最高的候选随失败落账：编辑弹层不用重打网络就能看到当时是谁给的。"""
+        tmp = Path(tempfile.mkdtemp())
+        fp = tmp / "01 - 黑面.flac"
+        fp.write_bytes(b"x" * 100)
+        p = mls.TagFlow()
+        p._scraper_paths = str(tmp)
+        p._exclude_paths = ""
+        p._active_resources = ["netease"]
+        p._min_score = 3
+
+        def fake_read(path, with_lyrics_text=False):
+            return {"title": "黑面", "artist": "陈奕迅", "album": "The Line-Up",
+                    "year": "2003", "tracknumber": "1", "duration": None,
+                    "has_cover": False, "has_lyrics": False, "lyrics": "",
+                    "unreadable": False}
+
+        cand = {"resource": "netease", "name": "黑面", "title": "黑面",
+                "artist": "陈奕迅", "artists": [{"name": "陈奕迅"}],
+                "album": {"name": "不是这一张"}, "year": "2003-01-01",
+                "tracknumber": 7, "id": "42"}
+
+        orig_read = mls._read_music_tags
+        orig_fetch = mls.TagFlow._fetch_candidates
+        mls._read_music_tags = fake_read
+        mls.TagFlow._fetch_candidates = lambda self, path, identity=None, all_sources=False: ([cand], None)
+        try:
+            okf, reason, score, _, _, extra = p._TagFlow__scrape_file(fp)
+        finally:
+            mls._read_music_tags = orig_read
+            mls.TagFlow._fetch_candidates = orig_fetch
+        self.assertFalse(okf)
+        self.assertEqual(score, 2)
+        best = extra["best"]
+        self.assertEqual(best["source"], "netease")
+        self.assertEqual(best["score"], 2)
+        self.assertEqual(best["album"], "不是这一张")
+        self.assertEqual(best["tracknumber"], "7")
+        self.assertEqual(best["year"], "2003")
+        self.assertEqual(best["hits"]["album"], mls._MISS)
+        self.assertEqual(p._candidate_album_name(cand), "不是这一张")
+
+    # ---------------- /candidates ----------------
+
+    def test_api_candidates_groups_per_source_with_full_values(self):
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "陈奕迅" / "The Line-Up (2003)").mkdir(parents=True)
+        fp = tmp / "陈奕迅" / "The Line-Up (2003)" / "01 - 黑面.flac"
+        fp.write_bytes(b"x" * 100)
+        p = mls.TagFlow()
+        p._min_score = 3
+        p._scraper_paths = str(tmp)
+        p._active_resources = ["netease", "qmusic"]
+        p._is_library_path = lambda path: True
+        cands = [
+            {"resource": "qmusic", "name": "黑面", "artist": "陈奕迅",
+             "album": "The Line-Up", "year": "2003", "tracknumber": 1},
+            {"resource": "netease", "name": "黑面", "artist": "陈奕迅",
+             "album": "The Line-Up", "year": "2003"},
+            {"resource": "netease", "name": "黑面（钢琴版）", "artist": "陈奕迅"},
+        ]
+        orig_fetch = mls.TagFlow._fetch_candidates
+        mls.TagFlow._fetch_candidates = (
+            lambda self, path, identity=None, all_sources=False: (
+                (cands, None) if all_sources else ([cands[0]], None)))
+        p.save_data(mls._KEY_FAILED, {str(fp): {
+            "retries": 2, "reason": "未达阈值", "score": 2,
+            "best": {"source": "kugou", "score": 2, "title": "黑面", "artist": "陈奕迅",
+                     "album": "", "year": "", "tracknumber": "", "hits": {}, "has_lyric": False}}})
+        try:
+            res = p.api_candidates(self._req({"path": str(fp)}))
+        finally:
+            mls.TagFlow._fetch_candidates = orig_fetch
+        self.assertTrue(res["accepted"])
+        # 顺序按配置的源名单，不是候选返回顺序；每个源只留分最高那条
+        self.assertEqual(res["resources"], ["netease", "qmusic"])
+        self.assertEqual([c["source"] for c in res["candidates"]], ["netease", "qmusic"])
+        self.assertEqual(res["candidates"][0]["score"], 3)
+        # 采纳用的是完整值，不是账本摘要那种截断串
+        self.assertEqual(res["candidates"][0]["fields"]["album"], "The Line-Up")
+        self.assertEqual(res["history"]["source"], "kugou")
+        self.assertEqual(res["history"]["retries"], 2)
+
+    def test_api_candidates_rejects_out_of_library_and_no_title(self):
+        p = mls.TagFlow()
+        p._min_score = 3
+        p._is_library_path = lambda path: False
+        self.assertEqual(p.api_candidates(self._req({"path": "/etc/passwd"}))["reason"],
+                         "out_of_library")
+        p._is_library_path = lambda path: True
+        tmp = Path(tempfile.mkdtemp())
+        # 轨道号开头、后面没有曲名（整张 CD 压成一个文件的典型命名）：tag 与目录结构都给不出曲名
+        fp = tmp / "01 - .flac"
+        fp.write_bytes(b"x")
+        with self._patched(_read_music_tags=lambda path, with_lyrics_text=False: self._tags(title="")):
+            res = p.api_candidates(self._req({"path": str(fp)}))
+        self.assertEqual(res["reason"], "no_title")
+
+    def test_data_page_wires_the_candidate_panel(self):
+        page = (Path(mls.__file__).parent / "frontend" / "src" / "components" / "Page.vue"
+                ).read_text(encoding="utf-8")
+        self.assertIn("/candidates${query({ path: editRow.value.path })}", page)
+        # 采纳只填非空项：候选没有年份时不该把人填好的年份清掉
+        self.assertIn("if (value) out[key] = value", page)
+        self.assertIn("历史最佳", page)
+        # 徽标跟着列表总数自纠，补查进行中也不会两边各说各话
+        self.assertIn("status.value.counts.deficient = total.value", page)

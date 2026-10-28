@@ -157,6 +157,11 @@ async function loadFiles(retryOutOfRange = true) {
     )
     rows.value = data?.items || []
     total.value = data?.total || 0
+    // 徽标和列表现在都是账本口径，但旧账本要等打开一次这一桶才补全核对结果：
+    // 列表总数是当场数出来的，比 status 里的旧值新，拿它修正徽标，两边才不会再各说各话
+    if (bucket.value === 'deficient' && !search.value && status.value?.counts) {
+      status.value.counts.deficient = total.value
+    }
     // 桶变小时页码会越界（重试成功后失败项就没了几十条）：越界的 offset 拿回空页，
     // 界面看着像"该桶暂无数据"，其实后面还有内容。收敛到最后一页再取一次。
     if (retryOutOfRange && total.value > 0 && !rows.value.length) {
@@ -314,6 +319,9 @@ async function openEdit(row: any) {
   editMissing.value = (row.missing || []) as string[]
   editHasCover.value = !editMissing.value.includes('cover')
   editLyricsFrom.value = ''
+  editCandidates.value = []
+  editHistory.value = null
+  editCandidateError.value = ''
   editDialog.value = true
   editLoading.value = true
   try {
@@ -335,6 +343,76 @@ async function openEdit(row: any) {
   } finally {
     editLoading.value = false
   }
+}
+
+// 「获取候选」：把内置源各问一遍（后端 this 条走 all_sources，不做"第一个满分就停"的早停），
+// 由人比较对得准的是谁；历史最佳从失败账直读、不联网 —— 自动刮削差半分时它常常就是
+// 正确答案，只是没到自动写入那条线，值得摆出来让人决定采不采纳。
+const editCandidates = ref<any[]>([])
+const editHistory = ref<any>(null)
+const editCandidateLoading = ref(false)
+const editCandidateError = ref('')
+
+async function fetchCandidates() {
+  if (!editRow.value) return
+  editCandidateLoading.value = true
+  editCandidateError.value = ''
+  try {
+    const res = await (props.api as MoviePilotApi).get(`${base.value}/candidates${query({ path: editRow.value.path })}`)
+    if (res?.accepted) {
+      editCandidates.value = res.candidates || []
+      editHistory.value = res.history || null
+      if (!editCandidates.value.length) editCandidateError.value = '各源都没有答这一条'
+    } else if (res?.reason === 'no_title') {
+      editCandidateError.value = '读不出本地曲名，无法检索（文件名和 tag 都没给出曲名）'
+    } else if (res?.reason === 'sources_unreachable') {
+      editCandidateError.value = `识别源没答上：${res.detail || '网络/风控'}`
+    } else if (res?.reason === 'out_of_library') {
+      editCandidateError.value = '该文件不在配置的音乐库范围内'
+    } else {
+      editCandidateError.value = res?.reason || '获取失败'
+    }
+  } catch (e: any) {
+    editCandidateError.value = `获取失败：${e?.message || e}`
+  } finally {
+    editCandidateLoading.value = false
+  }
+}
+
+// 采纳只填非空值：候选没有年份时拿空串盖进表格，会把人已经填好的年份清掉
+// （而候选的"缺项"和文件里的"缺项"根本不是一回事）。
+function candidateFields(cand: any): Record<string, string> {
+  const raw = cand?.fields || {}
+  const out: Record<string, string> = {}
+  for (const key of ['title', 'artist', 'album', 'year', 'tracknumber']) {
+    const value = String(raw[key] ?? '').trim()
+    if (value) out[key] = value
+  }
+  return out
+}
+
+function adoptCount(cand: any): number {
+  const fields = candidateFields(cand)
+  return Object.entries(fields)
+    .filter(([key, value]) => value !== (editBase.value[key] || ''))
+    .length
+}
+
+function adoptCandidate(cand: any) {
+  const fields = candidateFields(cand)
+  const before = adoptCount(cand)
+  for (const [key, value] of Object.entries(fields)) {
+    (editForm.value as any)[key] = value
+  }
+  if (!before) notify('候选给出的值文件里已经有了', 'warning')
+}
+
+// 逐项判定要说人话：hit 是"这一项对上了"，no_local 是本地根本没这项、没法比 ——
+// 后两种在挑选时含义完全不同（改文件名 / 改阈值 / 换源）。
+const HIT_TEXT: Record<string, string> = { hit: '对', miss: '不对', no_local: '无' }
+
+function hitMark(state: string) {
+  return HIT_TEXT[state] || state
 }
 
 async function submitEdit() {
@@ -552,7 +630,7 @@ onMounted(() => {
         <!-- 概览：整体流转与结论先看，再进具体某一桶 -->
         <div v-if="view === 'overview'" class="mls-pane">
           <!-- 流转动画占第一屏：在不在跑、跑到哪一环、各环落下多少，一眼看完。
-               逐项判据不在这里摊开，仓库 docs/musiclibraryscraper.md 才有地方写那些。 -->
+               逐项判据不在这里摊开，仓库 docs/tagflow.md 才有地方写那些。 -->
           <div class="mls-section">
             <div class="mls-flow-head">
               <div class="mls-section-title">本轮流转</div>
@@ -857,7 +935,7 @@ onMounted(() => {
     </v-dialog>
 
     <!-- 补齐缺项：已有的先填进去，人只补还缺的那几项 -->
-    <v-dialog v-model="editDialog" max-width="720px">
+    <v-dialog v-model="editDialog" max-width="800px">
       <v-card variant="flat">
         <div class="mls-dlg-head">
           <v-avatar color="primary" variant="tonal" rounded="lg" size="36" class="mr-3">
@@ -921,9 +999,75 @@ onMounted(() => {
             </div>
 
             <div v-if="!editHasCover" class="text-caption text-grey mt-3">
-              缺封面这里补不了：封面要下载后内嵌，用行上的「重试」让识别源再刮一次
+              缺封面这里补不了：封面要下载后内嵌，用行上的「重试」让识别源再刮一次；
+              下面的候选里带封面的源可以先采纳文本，再重试补图
             </div>
           </v-form>
+
+          <!-- 内置源候选：自动刮削"第一个满分就停"，这里恰恰相反 —— 各源都问一遍摆出来，
+               由人比较谁对得准；采纳只填非空项，不覆盖已填好的值 -->
+          <div class="mls-section mt-5">
+            <div class="d-flex align-center">
+              <div class="mls-section-title mb-0">内置源候选</div>
+              <v-spacer />
+              <v-btn size="small" variant="tonal" color="info" :loading="editCandidateLoading"
+                     prepend-icon="mdi-magnify" @click="fetchCandidates">获取全部源候选</v-btn>
+            </div>
+            <div v-if="editCandidateError" class="text-caption text-warning mt-2">{{ editCandidateError }}</div>
+            <v-card v-if="editHistory" variant="outlined" class="mt-2 pa-2">
+              <div class="d-flex align-center flex-wrap gap-1">
+                <v-chip size="x-small" variant="tonal" color="warning" prepend-icon="mdi-history">
+                  历史最佳 · {{ sourceText(editHistory.source || '') }} · {{ editHistory.score }} 分
+                </v-chip>
+                <span class="text-caption text-grey text-truncate" :title="editHistory.reason || ''">
+                  {{ editHistory.reason || '未达阈值' }}
+                </span>
+                <v-spacer />
+                <v-chip v-for="(state, field) in (editHistory.hits || {})" :key="field"
+                        size="x-small" variant="text"
+                        :color="state === 'hit' ? 'success' : state === 'no_local' ? 'grey' : 'warning'">
+                  {{ fieldText(String(field)) }} {{ hitMark(state) }}
+                </v-chip>
+                <v-btn size="x-small" variant="text" :color="adoptCount(editHistory) ? 'primary' : 'grey'"
+                       :disabled="!adoptCount(editHistory)" @click="adoptCandidate(editHistory)">
+                  采纳{{ adoptCount(editHistory) ? `（${adoptCount(editHistory)} 项）` : '（无新内容）' }}
+                </v-btn>
+              </div>
+              <div class="text-caption mt-1">
+                曲名：{{ editHistory.title || '—' }}｜艺人：{{ editHistory.artist || '—' }}｜
+                专辑：{{ editHistory.album || '—' }}｜{{ editHistory.year || '—' }} · 第 {{ editHistory.tracknumber || '—' }} 轨
+              </div>
+            </v-card>
+            <div v-for="cand in editCandidates" :key="`${cand.source}-${cand.title}-${cand.album}`"
+                 class="mls-cand">
+              <div class="d-flex align-center flex-wrap gap-1">
+                <v-chip size="x-small" variant="tonal" color="primary">{{ sourceText(cand.source || '') }}</v-chip>
+                <v-chip size="x-small" variant="text" :color="cand.score >= 3 ? 'success' : 'warning'">
+                  {{ cand.score }} 分
+                </v-chip>
+                <v-chip v-if="cand.has_lyric" size="x-small" variant="text" color="grey">源上有歌词</v-chip>
+                <v-spacer />
+                <v-chip v-for="(state, field) in (cand.hits || {})" :key="field" size="x-small" variant="text"
+                        :color="state === 'hit' ? 'success' : state === 'no_local' ? 'grey' : 'warning'">
+                  {{ fieldText(String(field)) }} {{ hitMark(state) }}
+                </v-chip>
+                <v-btn size="x-small" variant="text" :color="adoptCount(cand) ? 'primary' : 'grey'"
+                       :disabled="!adoptCount(cand)" @click="adoptCandidate(cand)">
+                  采纳{{ adoptCount(cand) ? `（${adoptCount(cand)} 项）` : '（无新内容）' }}
+                </v-btn>
+              </div>
+              <div class="text-caption mt-1">
+                曲名：{{ cand.title || '—' }}｜艺人：{{ cand.artist || '—' }}｜
+                专辑：{{ cand.album || '—' }}｜{{ cand.year || '—' }} · 第 {{ cand.tracknumber || '—' }} 轨
+              </div>
+            </div>
+            <div v-if="editCandidateLoading" class="text-caption text-grey mt-2">
+              正在逐个问内置源，源多时可能要十几秒
+            </div>
+            <div v-else-if="editCandidates.length" class="text-caption text-grey mt-2">
+              每个源只列分最高的一条；采纳只填非空项，还要改就在上面的表格里接着编辑，点「保存」才写入文件
+            </div>
+          </div>
         </v-card-text>
         <v-divider />
         <v-card-actions>
@@ -950,7 +1094,10 @@ onMounted(() => {
 .mls-head-text { min-width: 0; }
 .mls-body { display: flex; min-height: 440px; }
 .mls-nav {
-  flex: 0 0 176px;
+  /* 208px：默认 176px 时"失败待重试"+图标+数字徽标三段挤在一行，Vuetify 的 nav 标题
+     是 nowrap+ellipsis，最长的两个桶名都被切成"失败待重…"。徽标只在部分桶出现，
+     按最长的一项给宽度。 */
+  flex: 0 0 208px;
   border-right: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
   background: rgba(var(--v-theme-on-surface), .02);
 }
@@ -974,6 +1121,10 @@ onMounted(() => {
 .mls-dlg-head { display: flex; align-items: center; gap: 8px; padding: 14px 18px; min-width: 0; }
 .mls-dlg-head-text { min-width: 0; flex: 1 1 auto; }
 .mls-chips { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.mls-cand {
+  padding: 6px 10px;
+  border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+}
 .mls-diff { border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
 .mls-diff-old { color: rgba(var(--v-theme-on-surface), .6); text-decoration: line-through; }
 .mls-diff-new { font-weight: 600; }

@@ -32,7 +32,7 @@ const DEFAULTS = {
   fill_lyrics: false
 }
 
-const DOCS_URL = 'https://github.com/JontyLee/MoviePilot-Plugins/blob/main/docs/musiclibraryscraper.md'
+const DOCS_URL = 'https://github.com/JontyLee/MoviePilot-Plugins/blob/main/docs/tagflow.md'
 
 // 老配置里的多选可能是分号/逗号分隔的字符串，控件要数组。这里只做拆分与去重，
 // 不替用户把选项补全 —— 留空就是"全部源"，交给后端解释。
@@ -182,7 +182,7 @@ onMounted(() => {
           </div>
           <v-btn :href="DOCS_URL" target="_blank" rel="noopener" variant="text" size="small"
                  class="text-none mt-1" prepend-icon="mdi-open-in-new">
-            docs/musiclibraryscraper.md
+            docs/tagflow.md
           </v-btn>
         </div>
       </section>

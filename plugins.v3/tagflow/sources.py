@@ -327,7 +327,7 @@ def _musicbrainz_request(keyword: str, limit: int) -> Dict[str, Any]:
         "url": "https://musicbrainz.org/ws/2/recording",
         # MusicBrainz 的使用条款要求调用方自报身份，没有 From 容易被限流。
         "headers": {"user-agent": _USER_AGENT,
-                    "from": "MoviePilot-MusicLibraryScraper/0.7 (local music library scraper)"},
+                    "from": "MoviePilot-TagFlow/0.10 (local music library scraper)"},
         "params": {"query": keyword, "fmt": "json", "limit": str(limit)},
     }
 

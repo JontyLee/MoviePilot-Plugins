@@ -1,7 +1,7 @@
 """在导入插件前，向 sys.modules 注入宿主 app.* / 第三方依赖的最小桩。
 
 本地没有 MoviePilot 运行环境与 apscheduler/fastapi/pydantic，插件模块顶层 import
-会失败。这里提供足够让 `import musiclibraryscraper` 通过、且可驱动 __scan 增量逻辑
+会失败。这里提供足够让 `import tagflow` 通过、且可驱动 __scan 增量逻辑
 的替身；真实单测只验证插件自身的增量/记账逻辑，不触碰 MTW 网络与 MP 写入。
 """
 from __future__ import annotations

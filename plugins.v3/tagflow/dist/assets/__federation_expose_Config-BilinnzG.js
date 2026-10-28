@@ -21,7 +21,7 @@ const _hoisted_11 = {
 };
 const _hoisted_12 = { class: "mls-actions" };
 const {ref,computed,inject,onMounted} = await importShared('vue');
-const DOCS_URL = "https://github.com/JontyLee/MoviePilot-Plugins/blob/main/docs/musiclibraryscraper.md";
+const DOCS_URL = "https://github.com/JontyLee/MoviePilot-Plugins/blob/main/docs/tagflow.md";
 const _sfc_main = /* @__PURE__ */ _defineComponent({
   __name: "Config",
   props: {
@@ -208,7 +208,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                   "prepend-icon": "mdi-open-in-new"
                 }, {
                   default: _withCtx(() => [..._cache[14] || (_cache[14] = [
-                    _createTextVNode(" docs/musiclibraryscraper.md ", -1)
+                    _createTextVNode(" docs/tagflow.md ", -1)
                   ])]),
                   _: 1
                 })
@@ -427,6 +427,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const Config = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-03fb4135"]]);
+const Config = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-dc70a696"]]);
 
 export { Config as default };

@@ -1,7 +1,7 @@
 // 流水线只有一份描述：配置页拿它画「一个文件要过几道判断」，数据页拿它画「这一轮走到哪、
 // 各环落了多少文件」。两处同源，改了环节不会只改一个页面。
 // 这里只留界面要显示的最短文字 —— 逐项判据、失败归因、各源现状都在仓库的
-// docs/musiclibraryscraper.md，配置页与概览不该长成一篇说明文。
+// docs/tagflow.md，配置页与概览不该长成一篇说明文。
 export interface FlowStep {
   key: string
   icon: string

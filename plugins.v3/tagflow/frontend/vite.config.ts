@@ -9,7 +9,7 @@ export default defineConfig({
   plugins: [
     vue(),
     federation({
-      name: 'MusicLibraryScraper',
+      name: 'TagFlow',
       filename: 'remoteEntry.js',
       base: 'auto',
       exposes: {

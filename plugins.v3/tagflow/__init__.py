@@ -1,5 +1,5 @@
 """
-musiclibraryscraper —— MoviePilot v3 插件（插件名：TagFlow音乐库刮削）
+tagflow —— MoviePilot v3 插件（插件名：TagFlow音乐库刮削）
 
 周期扫描音乐目录，为每个文件检索元数据，再沿用 MP 原生的音乐刮削链（ScrapingChain）写入
 标签与封面。元数据来自插件直连的各平台公开检索接口（网易云 / QQ音乐 / 酷狗 / 咪咕 /
@@ -39,6 +39,7 @@ import re
 import threading
 import time
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -109,6 +110,9 @@ _NO_CANDIDATE_REASON = "识别源无候选"
 # v0.6.x 之前那几个 MTW 后端的配置键。识别源全部由插件直连平台之后它们不再被读取，
 # 只用来在升级后说明一次「你原来配的地址与账密去哪了」；下次保存配置（整体替换）就把它们清掉。
 _LEGACY_CONFIG_KEYS = ("source_backend", "mtw_base_url", "mtw_username", "mtw_password")
+# v0.10.0 改名（目录/类名/实例 ID → TagFlow）之前的标识。宿主的 config_data 与 plugindata
+# 都以类名为键，升级后第一次加载要把它名下的配置与四本状态账搬过来，见 _migrate_legacy_identity。
+_LEGACY_PLUGIN_ID = "MusicLibraryScraper"
 # 熔断：连续多少个文件栽在「插件什么都没学到」上就中止本轮，别在平台风控的时段空打上千次请求。
 _ABORT_AFTER_TRANSPORT = 5
 # 单次检索的超时（秒）。平台接口比自建服务更容易慢（限流时干脆挂着），而每个文件最多问五个源，
@@ -124,7 +128,7 @@ _PENDING_TTL = 30.0
 # 配置页底部的一段集中说明：来源、查询与选取规则、两档写入模式、宿主策略叠加。
 # 不跟在单个配置项下面，选项本身只留最短的标签，细节全部收在这里。
 # 这里是「原生表单」那一份，宿主插件管理页用的就是它，判据必须自足；
-# Vue 配置页只留短句，长文在 docs/musiclibraryscraper.md。
+# Vue 配置页只留短句，长文在 docs/tagflow.md。
 _FORM_NOTES = (
     "【识别源】插件直连 网易云 / QQ音乐 / 酷狗 / 咪咕 / MusicBrainz 的公开检索接口，不必部署"
     "任何服务；多选留空即全部源。发给平台的只有清洗后的「曲名-艺人」，库内路径不出本机。\n"
@@ -141,7 +145,7 @@ _FORM_NOTES = (
     "【会处理的文件】宿主音频白名单与本插件支持列表的交集；Jellyfin 的 .trickplay 缓存目录整棵"
     "跳过，指向库外的软链不碰（写标签是按路径落到真实文件的）。\n"
     "【侧栏入口】勾上并启用插件后，主界面「整理」下出现本页，逐文件核对与补齐缺项都在那里做。"
-    "逐项判据、失败归因与各源现状见仓库内 docs/musiclibraryscraper.md。"
+    "逐项判据、失败归因与各源现状见仓库内 docs/tagflow.md。"
 )
 
 # 各容器格式的 tag key：ID3 帧名 / MP4 atom / Vorbis 注释 / APEv2。
@@ -713,16 +717,18 @@ class _MusicScrapeChain(ScrapingChain):
     """复用 libraryscraper 的 trickplay 排除策略，避免 Jellyfin 预览目录被递归。"""
 
     def scrape_metadata(self, fileitem, *args, **kwargs):
-        if fileitem and MusicLibraryScraper._is_trickplay_path(Path(fileitem.path)):
+        if fileitem and TagFlow._is_trickplay_path(Path(fileitem.path)):
             return False, "跳过 Jellyfin 预览缓存目录"
         return super().scrape_metadata(fileitem, *args, **kwargs)
 
 
-class MusicLibraryScraper(_PluginBase):
+class TagFlow(_PluginBase):
     """扫描音乐库，按识别源检索候选，交由 MP ScrapingChain 完成写入。
 
-    目录名 / 类名 / 配置前缀沿用 v0.2.x：MP 的 config_data 以 plugin_config_prefix 为键、
-    plugindata 以类名为键，改它们会让已存配置和已积累的状态账一起失效，所以更名只动展示层。
+    v0.10.0 起目录名 / 类名 / 实例 ID 统一为 TagFlow。MP 的 config_data 与 plugindata
+    都以类名为键，所以改名第一次加载要搬家：init_plugin 里从旧标识 MusicLibraryScraper
+    把配置与四本状态账各复制一份过来（幂等，新域名已有数据就不再动）。
+    配置前缀沿用 musiclibraryscraper_ 不动，减少一处无谓的键名变化。
     """
 
     plugin_name = "TagFlow音乐库刮削"
@@ -732,7 +738,7 @@ class MusicLibraryScraper(_PluginBase):
         "侧栏「整理」下常驻数据页，失败与有缺项逐文件可查可补。"
     )
     plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/tagflow.svg"
-    plugin_version = "0.9.0"
+    plugin_version = "0.10.0"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "musiclibraryscraper_"
@@ -771,6 +777,9 @@ class MusicLibraryScraper(_PluginBase):
         self.__dict__.setdefault("_pending_cache", None)
         self.__dict__.setdefault("_deficient_cache", None)
 
+        # v0.10.0 改名的搬家：旧标识下的配置与状态账先接过来，再走正常加载
+        config = self._migrate_legacy_identity(config)
+
         if config:
             self._enabled = bool(config.get("enabled"))
             # 缺键按开：升级过来的装机没有这一项，默认关会让入口"升级完就消失"，
@@ -803,6 +812,33 @@ class MusicLibraryScraper(_PluginBase):
             # 只写 {"onlyonce": False} 会把其余配置一起清掉。
             self.update_config(self._config_snapshot())
             self._kick_scan()
+
+    def _migrate_legacy_identity(self, config: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """把改名前留在旧标识 MusicLibraryScraper 名下的配置与状态账搬到 TagFlow。
+
+        宿主按类名存 config_data 与 plugindata：不搬的话升级后第一次加载就是空配置、
+        空账本，整库会被当成从没刮过一样重打一遍，手工补齐的记录也全丢。幂等 ——
+        新域名下已有数据就不再动；旧行留着，由用户卸载旧插件时一起清掉。
+        """
+        try:
+            if not config:
+                legacy = self.get_config(_LEGACY_PLUGIN_ID)
+                if isinstance(legacy, dict) and legacy:
+                    # update_config 的 plugin_id 默认取当前类名，写的就是新家这一行
+                    self.update_config(legacy)
+                    config = legacy
+                    logger.info("[music-scraper] 已从旧标识 MusicLibraryScraper 搬入配置")
+            if self.get_data(_KEY_DONE) is None and self.get_data(_KEY_FAILED) is None:
+                books = {k: self.get_data(k, plugin_id=_LEGACY_PLUGIN_ID)
+                         for k in (_KEY_DONE, _KEY_FAILED, _KEY_RUNS, _KEY_TARGETED_RUNS)}
+                if any(v is not None for v in books.values()):
+                    for k, v in books.items():
+                        if v is not None:
+                            self.save_data(k, v)
+                    logger.info("[music-scraper] 已从旧标识 MusicLibraryScraper 搬入状态账")
+        except Exception as err:  # noqa: BLE001 - 搬家失败不阻断加载
+            logger.warning(f"[music-scraper] 改名搬家失败（不影响本轮加载）：{err}")
+        return config
 
     def _config_snapshot(self) -> Dict[str, Any]:
         """当前配置的全量形状（键必须与 get_form 的 defaults 一致）。
@@ -1014,6 +1050,13 @@ class MusicLibraryScraper(_PluginBase):
                 "summary": "编辑单个文件的元数据字段",
             },
             {
+                "path": "/candidates",
+                "endpoint": self.api_candidates,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "单文件人工检索候选：全部源的最佳结果 + 账本里的历史最佳",
+            },
+            {
                 "path": "/scan",
                 "endpoint": self.api_scan,
                 "methods": ["POST"],
@@ -1182,18 +1225,29 @@ class MusicLibraryScraper(_PluginBase):
         # 手工补齐也算本插件改写：不记进 done 的话，在这页改过的文件和库里的其它文件
         # 混在一起，"我动过哪几个"就找不回来了。差集按文件现状算，宿主或别的程序同时
         # 改过的字段会一起显出来，比照抄提交上来的字段诚实。
+        # 带歌词文本读一次就够：判"有没有歌词"看 has_lyrics 与看 lyrics 是否非空是同一件事，
+        # 而 _missing_fields 要的正是带文本的版本；差集仍按写入前后两次同口径的轻量读取算，
+        # 不与带 lyrics 的版本相减，免得多出一笔"歌词从无到有"的假改写。
         diff = _tag_diff(before, _read_music_tags(target))
+        after = _read_music_tags(target, with_lyrics_text=True)
+        try:
+            st = target.stat()
+            after_stat = (int(st.st_mtime), st.st_size)
+        except OSError:
+            after_stat = (None, None)
+        done = self._load_done()
+        # 缺项清单按写后的文件重算并落账（无改动的补空点击同样要刷新，否则徽标还按旧状态数）：
+        # 「有缺项」桶现在从账本直数，这里不跟上，人把封面补上了徽标还挂着。
+        entry = done.get(path)
+        known = isinstance(entry, dict)
+        # 复制再改：不复制的话下面的赋值会直接污染 _load_done 里的原条目 ——
+        # 而"不新建条目"那一路是不落盘的，脏了就等着下一轮扫描被顺手写进账本。
+        entry = dict(entry) if known else {}
+        entry["mtime"] = after_stat[0] if after_stat[0] is not None else entry.get("mtime")
+        entry["size"] = after_stat[1] if after_stat[1] is not None else entry.get("size")
+        entry["missing"] = self._missing_fields(target, after)
         if diff:
-            done = self._load_done()
-            try:
-                st = target.stat()
-                mtime, size = int(st.st_mtime), st.st_size
-            except OSError:
-                mtime = size = None
-            entry = done.get(path) if isinstance(done.get(path), dict) else {}
             now_iso = self._now_iso()
-            entry["mtime"] = mtime if mtime is not None else entry.get("mtime")
-            entry["size"] = size if size is not None else entry.get("size")
             entry["ts"] = now_iso
             entry["source"] = entry.get("source") or "manual"
             merged = dict(entry.get("set") or {})
@@ -1201,12 +1255,73 @@ class MusicLibraryScraper(_PluginBase):
             merged.update(diff)
             entry["set"] = merged
             entry["set_ts"] = now_iso
+        # 没在账本里、这轮又没实际写出改动的文件不新建条目：凭空挂一条 done 会让增量缓存
+        # 把它当成"已处理"跳过，而这个文件其实一次都没被刮削过。
+        if diff or known:
             done[path] = entry
             self.save_data(_KEY_DONE, done)
         # tag 刚被改过，两份缓存必须作废：否则缺陷清单还会按编辑前的状态报缺项。
         self.__dict__["_pending_cache"] = None
         self.__dict__["_deficient_cache"] = None
         return {"accepted": True, "updated": sorted(fields)}
+
+    def api_candidates(self, request: Request) -> Dict[str, Any]:
+        """GET /candidates?path= —— 人工补齐用的候选：每个源的最佳一条 + 账本里的历史最佳。
+
+        自动刮削是"第一个满分源就停"，人工核对要的恰恰相反：把各源都问一遍、由人比较
+        谁对得准。历史最佳（过去几轮评分最高的那条）从账本直读、不打网络 —— 差半分时
+        它常常就是正确答案，只是没到自动写入的那条线，值得摆到弹层上让人决定采不采纳。
+        候选值用与 _candidate_brief 同一套取值口径，弹层里看到的和采纳写入的必须是同一个串。
+        """
+        path = str(request.query_params.get("path") or "").strip()
+        if not path:
+            return {"accepted": False, "reason": "no_path"}
+        if not self._is_library_path(path):
+            return {"accepted": False, "reason": "out_of_library"}
+        identity = _local_identity(Path(path), roots=self._identity_roots())
+        if not identity["title"]:
+            # 自动刮削同样跳过这类文件（整张 CD 压成一个 wav）：没有曲名就没法检索，
+            # 手动也一样问不出。分开报错，否则界面只会显示"没有候选"。
+            return {"accepted": False, "reason": "no_title"}
+        candidates, failure = self._fetch_candidates(Path(path), identity=identity,
+                                                     all_sources=True)
+        if failure:
+            return {"accepted": False, "reason": "sources_unreachable",
+                    "detail": failure, "identity": identity}
+        want = _want_from(identity)
+        grouped: Dict[str, dict] = {}
+        for c in candidates:
+            hits = self._field_hits(c, want)
+            score = sum(1 for state in hits.values() if state == _HIT)
+            brief = self._candidate_brief(c, score, hits)
+            if not brief:
+                continue
+            # 账本摘要为省空间把长值截断过，采纳时不能拿截断串：随候选另带完整值
+            brief["fields"] = {
+                "title": str(c.get("name") or c.get("title") or "").strip(),
+                "artist": str(c.get("artist") or "").strip(),
+                "album": self._candidate_album_name(c),
+            }
+            source = brief["source"] or "unknown"
+            current = grouped.get(source)
+            if current is None or score > int(current.get("score") or 0):
+                grouped[source] = brief
+        history = None
+        entry = self._load_failed().get(path)
+        if isinstance(entry, dict) and isinstance(entry.get("best"), dict):
+            history = dict(entry["best"])
+            history["reason"] = entry.get("reason")
+            history["retries"] = entry.get("retries")
+            history["last_ts"] = entry.get("last_ts")
+        return {
+            "accepted": True,
+            "path": path,
+            "identity": {k: identity.get(k) for k in ("title", "artist", "album")},
+            # 顺序按配置的源名单，界面不用自己猜；没答的源不会出现在这里
+            "resources": [r for r in self._active_resources if r in grouped],
+            "candidates": [grouped[r] for r in self._active_resources if r in grouped],
+            "history": history,
+        }
 
     async def api_scan(self, request: Request) -> Dict[str, Any]:
         """POST /scan —— body {force?:bool}，触发一次（增量或全量）扫描。"""
@@ -1301,7 +1416,7 @@ class MusicLibraryScraper(_PluginBase):
         return [
             {
                 "nav_key": "main",
-                "title": "音乐库刮削",
+                "title": self.plugin_name,
                 "icon": "mdi-music-circle-outline",
                 "section": "organize",
                 "permission": "manage",
@@ -1315,8 +1430,8 @@ class MusicLibraryScraper(_PluginBase):
             return []
         return [
             {
-                "id": "MusicLibraryScraper.Scan",
-                "name": "音乐库刮削",
+                "id": "TagFlow.Scan",
+                "name": self.plugin_name,
                 "trigger": self._build_cron_trigger(self._cron),
                 # 必须走带互斥的入口：直接给 __scan 会绕开运行标志，cron 与手动触发
                 # 就能并发跑，两本账各自读到结尾再写回，后写的把先写的整本盖掉。
@@ -1831,28 +1946,29 @@ class MusicLibraryScraper(_PluginBase):
                         exhausted += 1
                         continue
 
-                # 每个文件的 tag 只解析一次：补空判定与匹配身份共用这份读取结果
+                # 每个文件的 tag 只解析一次：补空判定、缺项核对与匹配身份共用这份读取结果
                 tags = _read_music_tags(fp)
+                # 缺项清单照 _missing_fields 的口径算，就地判这份已读的 tags
+                # （不再落盘扫封面，只有 .lrc 旁挂那一判会碰磁盘）。
+                missing_now = self._missing_fields(fp, tags)
 
-                # "有缺项"：核心项齐了、但次级字段还缺的文件。照 _missing_fields 的口径
-                # 就地判这份已读的 tags，不再调函数（它每次会重解析 + 落盘扫封面）。
-                # 放在 __is_complete 的 continue 之前，否则补空判够格就跳过了永远数不到。
-                if tags.get("title") and tags.get("artist") and tags.get("album") \
-                        and (not tags.get("year") or not tags.get("tracknumber")
-                             or not tags.get("has_cover") or not tags.get("has_lyrics")):
+                # "有缺项"：核心项齐了、但次级字段还缺的文件。放在 __is_complete 的
+                # continue 之前，否则补空判够格就跳过了永远数不到。
+                if tags.get("title") and tags.get("artist") and tags.get("album") and missing_now:
                     deficient += 1
 
                 # 补空模式：tag 与封面都齐了才跳过。
                 if not effective_force and self.__is_complete(fp, tags):
                     prev = done.get(key)
                     source = prev.get("source") if isinstance(prev, dict) else None
-                    done[key] = self._done_entry(prev, mtime, size, now_iso, source)
+                    done[key] = self._done_entry(prev, mtime, size, now_iso, source,
+                                                 missing=missing_now)
                     failed.pop(key, None)
                     skipped_tagged += 1
                     dirty = True
                     continue
 
-                okf, reason, score, source, written_fields = self.__scrape_file(
+                okf, reason, score, source, written_fields, extra = self.__scrape_file(
                     fp, tags=tags, overwrite=effective_overwrite)
             except Exception as err:
                 # 单个文件把插件或宿主打崩不能带走整轮：崩在第七千个文件上，前面六千多个
@@ -1888,7 +2004,8 @@ class MusicLibraryScraper(_PluginBase):
                 transport_streak = 0
                 if okf:
                     done[key] = self._done_entry(done.get(key), mtime, size, now_iso,
-                                                 source, written_fields)
+                                                 source, written_fields,
+                                                 missing=extra.get("missing"))
                     if written_fields:
                         written += 1
                     failed.pop(key, None)
@@ -1902,6 +2019,11 @@ class MusicLibraryScraper(_PluginBase):
                         "retries": prev_retries + 1,
                         "last_ts": now_iso, "reason": reason, "score": score,
                     }
+                    # 评分最高的候选随失败一起落账：分数差半分时，"差在哪、差多少"
+                    # 只有当场问过快照才留得下来，编辑弹层靠它展示可采纳的候选，
+                    # 不用为看一眼旧结论再打一遍全部源。
+                    if extra.get("best"):
+                        failed[key]["best"] = extra["best"]
                     done.pop(key, None)
                     failed_n += 1
                     dirty = True
@@ -1978,13 +2100,17 @@ class MusicLibraryScraper(_PluginBase):
 
     @staticmethod
     def _done_entry(prev: Any, mtime: int, size: int, now_iso: str, source: Any,
-                    written_fields: Optional[Dict[str, List[str]]] = None) -> Dict[str, Any]:
+                    written_fields: Optional[Dict[str, List[str]]] = None,
+                    missing: Optional[List[str]] = None) -> Dict[str, Any]:
         """done 账的一条记录，改写记录（set）跨轮留住。
 
         written_fields 非空就是本轮改的，连 set_ts 一起刷新；本轮没动文件就照抄上一条 ——
         增量模式下绝大多数文件下一轮走的是"已齐、跳过"，不抄的话那条改写记录第一轮之后
         就消失了，"哪些文件是本插件写过的"这个历史事实会变成"上一轮写了谁"。
         没改过文件的条目干脆不挂 set 键：账本是单行 JSON，整库都挂个空 dict 是白胖。
+        missing 是这条记录最近一次核对时的缺项清单（_missing_fields 的口径）。有它，
+        「有缺项」桶和徽标就都从账本直数，不必为看一眼缺项把整库的 tag 重读一遍；
+        空清单也照记 —— 键在不在区分"已核对是齐的"和"老账本还没核对过"，两者不能混。
         """
         entry: Dict[str, Any] = {"mtime": mtime, "size": size, "ts": now_iso, "source": source}
         if written_fields:
@@ -1993,6 +2119,10 @@ class MusicLibraryScraper(_PluginBase):
         elif isinstance(prev, dict) and prev.get("set"):
             entry["set"] = prev["set"]
             entry["set_ts"] = prev.get("set_ts") or prev.get("ts")
+        if missing is not None:
+            entry["missing"] = list(missing)
+        elif isinstance(prev, dict) and "missing" in prev:
+            entry["missing"] = prev["missing"]
         return entry
 
     def __is_complete(self, path: Path, tags: Optional[Dict[str, Any]] = None) -> bool:
@@ -2008,31 +2138,37 @@ class MusicLibraryScraper(_PluginBase):
         )
 
     def __scrape_file(self, path: Path, tags: Optional[Dict[str, Any]] = None,
-                      overwrite: bool = False) -> Tuple[bool, str, Optional[int], str, Dict[str, List[str]]]:
-        """处理单个文件，返回 (是否成功, 失败原因, 命中分数, 命中来源, 本插件改写了哪几项)。
+                      overwrite: bool = False) -> Tuple[bool, str, Optional[int], str,
+                                                        Dict[str, List[str]], Dict[str, Any]]:
+        """处理单个文件，返回 (是否成功, 失败原因, 命中分数, 命中来源, 本插件改写了哪几项, 补充信息)。
 
-        最后一项只在写成功时非空：它是写入前后各读一次 tag 算出来的差集，所以宿主策略
+        倒数第二项只在写成功时非空：它是写入前后各读一次 tag 算出来的差集，所以宿主策略
         拦下覆盖、或候选值本来就与文件里的一样，都会诚实地回空 dict。
+        补充信息带两样：成功后写完再核对的缺项清单（missing），以及失败时评分最高的那条
+        候选（best）—— 后者是「有缺项/失败的文件手动补齐时先看源上怎么说」的数据来源，
+        当时不记，过后编辑弹层就只能重新打一遍网络才知道上次那一分是谁给的。
         """
         identity = _local_identity(path, tags, roots=self._identity_roots())
         if not identity["title"]:
             # 和"识别源无候选"分开：那种是问过了、曲库里确实查不到，这种是一次都没问 ——
             # 该做的是把这类文件（整张 CD 压成一个 wav）排出扫描范围，不是放宽阈值。
-            return False, "本地读不出曲名（tag 与目录结构都没给出）", None, "", {}
+            return False, "本地读不出曲名（tag 与目录结构都没给出）", None, "", {}, {}
         candidates, failure = self._fetch_candidates(path, identity=identity)
         if failure:
             # 服务侧故障：不能算这个文件的锅，调用方按原因前缀区分后不记 retries。
-            return False, failure, None, "", {}
+            return False, failure, None, "", {}, {}
         if not candidates:
-            return False, _NO_CANDIDATE_REASON, None, "", {}
+            return False, _NO_CANDIDATE_REASON, None, "", {}, {}
         picked, score, hits = self._best_candidate(path, candidates, identity=identity)
+        best = self._candidate_brief(picked, score, hits) if picked else None
         if not picked or score < self._min_score:
             # 分数不够时把"差在哪一项"一起写进原因：2/3 分本身不够用来看该改文件名、
             # 该放宽阈值，还是该把这类文件排出扫描范围 —— 曲名没对上和本地根本没有曲名，
             # 要做的决定完全相反。
             miss = self._miss_text(hits)
             detail = f"未达阈值（最低匹配分数 {self._min_score}）"
-            return False, f"{detail}：{miss}" if miss else detail, score, "", {}
+            extra = {"best": best} if best else {}
+            return False, (f"{detail}：{miss}" if miss else detail), score, "", {}, extra
         source = str(picked.get("resource") or "").strip()
         if self._fill_lyrics and not _candidate_has_lyric(picked):
             lyric = self._fetch_lyric(source, picked)
@@ -2040,7 +2176,8 @@ class MusicLibraryScraper(_PluginBase):
                 picked["lyrics"] = lyric
         info = self._candidate_to_musicinfo(picked, path)
         if not info:
-            return False, "候选信息不完整，无法转换", score, source, {}
+            extra = {"best": best} if best else {}
+            return False, "候选信息不完整，无法转换", score, source, {}, extra
         try:
             fileitem = schemas.FileItem(
                 type="file",
@@ -2063,11 +2200,43 @@ class MusicLibraryScraper(_PluginBase):
             logger.info(f"[music-scraper] 刮削成功: {path.name} → {info.title}（{source or '未知源'}）")
             # 改写了哪几项以文件为准：拿候选自己拼"我写了什么"，会在宿主按自己的
             # 覆盖策略拦下那一笔时说假话（而这句话是数据页上"插件动过我的文件吗"的依据）。
-            return True, "", score, source, _tag_diff(
-                tags if tags is not None else _read_music_tags(path),
-                _read_music_tags(path))
+            after = _read_music_tags(path)
+            diff = _tag_diff(tags if tags is not None else _read_music_tags(path), after)
+            return True, "", score, source, diff, {"missing": self._missing_fields(path, after)}
         logger.warning(f"[music-scraper] 刮削失败: {path.name} — {msg}")
-        return False, f"写入失败：{msg}", score, source, {}
+        extra = {"best": best} if best else {}
+        return False, f"写入失败：{msg}", score, source, {}, extra
+
+    @staticmethod
+    def _candidate_album_name(c: dict) -> str:
+        """候选里的专辑名：源上 album 可能是字符串也可能是 {name|title}，取法与 _candidate_to_musicinfo 一致。"""
+        album_obj = c.get("album")
+        if isinstance(album_obj, dict):
+            return str(album_obj.get("name") or album_obj.get("title") or "").strip()
+        return str(album_obj or "").strip()
+
+    @classmethod
+    def _candidate_brief(cls, c: Optional[dict], score: int,
+                         hits: Optional[Dict[str, str]]) -> Optional[Dict[str, Any]]:
+        """把候选折叠成账本里的一条摘要：够编辑弹层展示「当时分最高的是谁、给了什么值」。
+
+        只存短字段（长值截断），失败账是整本单行 JSON，一条摘要背着整段歌词会把账撑肥。
+        """
+        if not c:
+            return None
+        album = cls._candidate_album_name(c)
+        year = cls._normalize_year(c.get("year"))
+        return {
+            "source": str(c.get("resource") or "").strip(),
+            "score": score,
+            "title": _clip_diff_value(str(c.get("name") or c.get("title") or "")),
+            "artist": _clip_diff_value(str(c.get("artist") or "")),
+            "album": _clip_diff_value(album),
+            "year": str(year) if year else "",
+            "tracknumber": str(c.get("tracknumber") or "").strip()[:16],
+            "hits": hits or {},
+            "has_lyric": bool(_candidate_has_lyric(c)),
+        }
 
     # ---------------- 查询辅助（供 status/files） ----------------
 
@@ -2085,9 +2254,21 @@ class MusicLibraryScraper(_PluginBase):
             if isinstance(score, int) and not isinstance(score, bool):
                 if item["best_score"] is None or score > item["best_score"]:
                     item["best_score"] = score
-            if int(entry.get("retries") or 0) < MusicLibraryScraper.MAX_RETRY:
+            if int(entry.get("retries") or 0) < TagFlow.MAX_RETRY:
                 item["retryable"] += 1
         return sorted(grouped.values(), key=lambda r: -r["count"])
+
+    @staticmethod
+    def _deficient_count(done: Dict[str, Any]) -> int:
+        """账本里核对过、且确实还有缺项的条目数 —— 「有缺项」桶与徽标的同一个口径。
+
+        之前计数取自 runs.deficient（只数本轮碰过的文件），列表却是打开时全盘遍历现读
+        tag：一个"这一轮有多少文件不够齐"，一个"整个库现在有多少文件不够齐"，两个口径
+        注定对不上（125 对 33 就是这么来的），现读那一档还要几十秒。missing 落账之后
+        两边都从账本直数，未核对的旧条目不算（补查那一次就会把它们变成已核对）。
+        """
+        return sum(1 for v in done.values()
+                   if isinstance(v, dict) and v.get("missing"))
 
     def _build_status(self) -> Dict[str, Any]:
         """组装状态汇总：runs + 分桶计数 + 配置回显（不含密码）+ 最近失败。"""
@@ -2123,7 +2304,7 @@ class MusicLibraryScraper(_PluginBase):
                 "retryable": retryable,
                 "exhausted": exhausted,
                 "pending_unknown": runs.get("pending", 0),
-                "deficient": runs.get("deficient", 0),
+                "deficient": self._deficient_count(done),
             },
             "failure_reasons": failure_reasons,
             "config": {
@@ -2144,6 +2325,43 @@ class MusicLibraryScraper(_PluginBase):
             },
             "recent_failed": recent_failed,
         }
+
+    def _backfill_missing(self, done: Dict[str, dict]) -> int:
+        """给旧版 done 账补 missing 键（一次性），返回核对条数。
+
+        账本自己不说"谁有缺项"的话，之前每次开「有缺项」桶都要全盘遍历 + 逐文件读 tag，
+        几百个文件就是几十秒；而计数还另取自本轮 runs（只数这轮碰过的文件），和列表
+        永远对不上号。核对一次把结论落账后，桶和徽标都变成账本直数。
+        补查并行跑（tag 读取是磁盘等待），每个文件只读一次；改的就是调用方手里这份 done，
+        所以补完由调用方按账本出行，别另返回一份，否则同一批条目会被数两遍。
+        账本在这一次就落盘，之后不再有这活儿。读不出来的按"已核对、无缺项"记空清单：
+        不是文件有缺，是没法核对，反复重读只会把每次打开都拖成一次全库扫描。
+        """
+        legacy = [(path, entry) for path, entry in done.items()
+                  if isinstance(entry, dict) and "missing" not in entry]
+        if not legacy:
+            return 0
+
+        def resolve(path: str) -> List[str]:
+            fp = Path(path)
+            try:
+                fp.stat()
+            except OSError:
+                return []
+            try:
+                return self._missing_fields(fp)
+            except Exception:
+                return []
+
+        workers = min(16, max(4, len(legacy)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for (_, entry), missing in zip(legacy, pool.map(
+                    resolve, [item[0] for item in legacy])):
+                entry["missing"] = missing
+        checked = len(legacy)
+        self.save_data(_KEY_DONE, done)
+        logger.info(f"[music-scraper] 旧账本缺项补查完成：核对 {checked} 条并写入账本")
+        return checked
 
     def _collect_rows(self, bucket: str) -> List[Dict[str, Any]]:
         """把某桶整理成表格行 {path,name,mtime,size,status,reason,retries,score,ts}；
@@ -2189,21 +2407,22 @@ class MusicLibraryScraper(_PluginBase):
             cached = self.__dict__.get("_deficient_cache")
             if cached and time.time() - cached["ts"] < _PENDING_TTL:
                 return list(cached["rows"])
-            for fp in self._enumerate_files():
-                missing = self._missing_fields(fp)
+            done = self._load_done()
+            # v0.10.0 前记下的 done 条目没有 missing 键（当时没人把缺项落到账上），
+            # 先补一次并落账：只有这一批要读 tag，且每个文件在这一条请求里最多读一次。
+            # 补完直接走下面同一份账本循环出行 —— 另起一份返回值会把刚补出来的条目数两遍。
+            self._backfill_missing(done)
+            for path, v in done.items():
+                if not isinstance(v, dict) or "missing" not in v:
+                    continue
+                missing = list(v.get("missing") or [])
                 if not missing:
                     continue
-                key = str(fp)
-                try:
-                    st = fp.stat()
-                    mtime, size = int(st.st_mtime), st.st_size
-                except OSError:
-                    mtime, size = None, None
                 rows.append({
-                    "path": key, "name": fp.name,
-                    "mtime": mtime, "size": size,
+                    "path": path, "name": Path(path).name,
+                    "mtime": v.get("mtime"), "size": v.get("size"),
                     "status": "deficient", "reason": ",".join(missing),
-                    "retries": None, "score": None, "ts": None,
+                    "retries": None, "score": None, "ts": v.get("ts"),
                     "missing": missing,
                 })
             self.__dict__["_deficient_cache"] = {"ts": time.time(), "rows": list(rows)}
@@ -2278,12 +2497,15 @@ class MusicLibraryScraper(_PluginBase):
         return payload, None
 
     def _fetch_candidates(self, path: Path,
-                                  identity: Optional[Dict[str, Any]] = None
+                                  identity: Optional[Dict[str, Any]] = None,
+                                  all_sources: bool = False
                                   ) -> Tuple[List[dict], Optional[str]]:
         """逐个直连平台检索接口拉候选，返回 (候选, 服务侧故障原因)。
 
         按源顺序问，某源出到满分候选就立刻停止；只有在**没有任何源给出可解析答案**时才回报
         故障，否则一个源正常返回空列表就是"这份曲库查不到"的确定答案，要按文件失败记账。
+        all_sources=True 是为人工核对准备的：编辑弹层要把每个源各排在最前的候选都摆出来
+        由人判断，早停"第一个满分源就够"的省网络逻辑在这里反而是漏答案。
         """
         if identity is None:
             identity = _local_identity(path, roots=self._identity_roots())
@@ -2314,7 +2536,7 @@ class MusicLibraryScraper(_PluginBase):
                 merged.append(c)
                 if best_score < _MAX_SCORE:
                     best_score = max(best_score, self._score_candidate(c, want))
-            if best_score >= _MAX_SCORE:
+            if best_score >= _MAX_SCORE and not all_sources:
                 break
         if not merged and not answered:
             return [], _UNREACHABLE_REASON
@@ -2416,7 +2638,7 @@ class MusicLibraryScraper(_PluginBase):
     @staticmethod
     def _score_candidate(c: dict, want: dict) -> int:
         """沿用 Music Tag Web 的 utils.match_song 约定：title / artist / album 各 0/1。"""
-        hits = MusicLibraryScraper._field_hits(c, want)
+        hits = TagFlow._field_hits(c, want)
         return sum(1 for state in hits.values() if state == _HIT)
 
     def _fetch_lyric(self, source: str, picked: dict) -> Optional[str]:
