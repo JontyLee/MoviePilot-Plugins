@@ -8,6 +8,7 @@ ANi-Strm 自用迭代（内置 CF 透传中转）。
 open ANi 字幕组提供。
 """
 import re
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -40,6 +41,9 @@ RELAY_HEARTBEAT_MINUTES = 5
 RELAY_HEARTBEAT_MAX_MISSES = 2
 # 保活失败后的补试间隔（分钟），覆盖 CF 短暂排队/网络抖动，远小于凭证有效期
 RELAY_HEARTBEAT_RETRY_MINUTES = 3
+# FlareSolverr 凭证自动续期间隔（分钟）：cf_clearance 绝对有效期约30分钟且本域
+# 不滚动续发，必须赶在到期前用 FlareSolverr 重新解题取新凭证
+FLARESOLVER_REFRESH_MINUTES = 14
 # 定时更新（strm补齐）默认周期：每天 04:00，避开观看高峰；置空则禁用
 DEFAULT_CRON = "0 4 * * *"
 # CF 挑战页特征标记
@@ -99,7 +103,7 @@ class ANiStrmRelay(_PluginBase):
     plugin_name = "ANi Strm 自用版（CF中转）"
     plugin_desc = "自动获取当季所有番剧生成strm；内置CF中转代理携带cf_clearance直连openani，解决源站人机挑战后strm无法播放的问题（基于 honue 版 ANi-Strm 迭代）"
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/anistrm.png"
-    plugin_version = "0.2.1"
+    plugin_version = "0.3.0"
     plugin_author = "JontyLee（基于 honue ANi-Strm）"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "anistrm_"
@@ -120,6 +124,11 @@ class ANiStrmRelay(_PluginBase):
     _relay_token = ""
     _relay_public_base = ""
     _rewrite_existing = False
+    # FlareSolverr 服务地址（如 http://<地址>:8191）：配置后 cf_clearance 到期前
+    # 由它自动重新解题续发新证与配套UA，cookie 设置项可留空
+    _fs_url = ""
+    # 上次 FlareSolverr 续期成功时间戳（心跳线程据此判断周期到点）
+    _fs_last_ts = 0.0
     # 内置中转实际转发的上游源站（即原始 proxy_base 配置值）
     _relay_upstream = ""
     # 本轮保活连续失败次数（成功后清零，达到阈值才停机）
@@ -129,6 +138,8 @@ class ANiStrmRelay(_PluginBase):
         super().__init__()
         self._client = AniStrmClient()
         self._strm_service = StrmFileService()
+        # 待处理的凭证急换请求：中转回源命中挑战页时置位，由保活心跳线程消费
+        self._urgent_refresh = threading.Event()
 
     def init_plugin(self, config: dict = None):
         """
@@ -177,6 +188,7 @@ class ANiStrmRelay(_PluginBase):
         self._relay_token = (config.get("relay_token") or "").strip()
         self._relay_public_base = (config.get("relay_public_base") or "").strip().rstrip("/")
         self._rewrite_existing = bool(config.get("rewrite_existing"))
+        self._fs_url = (config.get("fs_url") or "").strip()
 
         # 中转转发目标始终是原始反代/源站地址
         self._relay_upstream = self._proxy_base
@@ -224,6 +236,14 @@ class ANiStrmRelay(_PluginBase):
 
         if self._relay_enabled:
             self._heartbeat_misses = 0
+            if self._fs_url:
+                # FlareSolverr 自动续期由保活心跳线程编排：首拍即换证、周期到点换证、
+                # 挑战页急换都在同一线程串行，避免与独立续期任务重复解题
+                self._fs_last_ts = 0.0
+                logger.info(
+                    f"ANi-Strm已启用FlareSolverr凭证自动续期（{self._fs_url}），"
+                    f"首拍换证后每{FLARESOLVER_REFRESH_MINUTES}分钟换证"
+                )
             # 保存/插件重载/MP重启后都会重走本初始化：约15秒即打第一拍探活，
             # 尽早定性cf_clearance并捕获滚动凭证，不等完整心跳间隔
             self._scheduler.add_job(
@@ -441,18 +461,103 @@ class ANiStrmRelay(_PluginBase):
         logger.info("ANi-Strm中转已捕获滚动刷新的cf_clearance（热生效并已持久化）")
         self.__update_config()
 
+    def __fs_due(self) -> bool:
+        """
+        判断 FlareSolverr 周期续期是否到点（相对上次成功时间达到间隔）。
+
+        :return: 到点返回 True；本次执行后推迟时间戳，由调用方更新
+        """
+        if not self._fs_url:
+            return False
+        if self._fs_last_ts and time.time() - self._fs_last_ts < FLARESOLVER_REFRESH_MINUTES * 60:
+            return False
+        return True
+
+    def __fs_refresh(self):
+        """
+        FlareSolverr 凭证续期：调用其解完 CF 挑战后回传的 cf_clearance 与配套 UA 成对热替换。
+
+        cf_clearance 与出口IP+UA绑定且本域不滚动续发，绝对有效期约30分钟；
+        FlareSolverr 常驻 profile 实测可通过该域的托管挑战。凭证、UA 与内置默认值
+        三者必须同换同用，续期失败只告警不改现有值，由保活心跳兜底判定停机。
+
+        :return: 是否成功取到新凭证
+        """
+        if not self._fs_url:
+            return False
+        err: Optional[Exception] = None
+        resp: Optional[httpx.Response] = None
+        for attempt in (1, 2):
+            try:
+                resp = httpx.post(
+                    self._fs_url.rstrip("/") + "/v1",
+                    json={
+                        "cmd": "request.get",
+                        "url": self._relay_upstream.rstrip("/") + "/",
+                        "timeout": 150,
+                        "maxTimeout": 140000,
+                    },
+                    timeout=180.0,
+                )
+                err = None
+                break
+            except Exception as first_err:
+                err = first_err
+                if attempt == 1:
+                    logger.warning(f"ANi-Strm FlareSolverr续期首次异常（{first_err}），30秒后重试一次")
+                    time.sleep(30)
+        if err is not None or resp is None:
+            logger.warning(f"ANi-Strm FlareSolverr续期失败（保留现有凭证）：{err}")
+            return False
+        try:
+            payload = resp.json()
+        except Exception as parse_err:
+            logger.warning(f"ANi-Strm FlareSolverr响应解析失败：{parse_err}")
+            return False
+        if payload.get("status") != "ok":
+            logger.warning(
+                f"ANi-Strm FlareSolverr未解题成功：{str(payload.get('message'))[:120]}"
+            )
+            return False
+        solution = payload.get("solution") or {}
+        clearance = ""
+        for cookie in solution.get("cookies") or []:
+            if cookie.get("name") == "cf_clearance":
+                clearance = cookie.get("value") or ""
+                break
+        ua = solution.get("userAgent") or ""
+        if not clearance or not ua:
+            logger.warning("ANi-Strm FlareSolverr响应缺少cf_clearance或UA，忽略本次续期")
+            return False
+        self._cf_clearance = clearance
+        self._cf_user_agent = ua
+        _CLEARANCE_MEMORY["token"] = clearance
+        _CLEARANCE_MEMORY["issued_ts"] = _clearance_issued_ts(clearance)
+        self._fs_last_ts = time.time()
+        logger.info(
+            f"ANi-Strm已从FlareSolverr取得新的cf_clearance（签发于"
+            f"{datetime.fromtimestamp(_CLEARANCE_MEMORY['issued_ts'])}，配套UA已同步，热生效并已持久化）"
+        )
+        self.__update_config()
+        return True
+
     def __relay_heartbeat(self):
         """
         cf_clearance 保活心跳：定期以解题浏览器UA+凭证直连上游探活，顺带捕获滚动刷新的新凭证。
 
-        运行于 APScheduler 工作线程，不能复用绑定 FastAPI 事件循环的全局异步客户端，
-        使用独立的短生命周期同步 HTTP/2 客户端。探活失败（命中挑战页或网络异常）时
-        停用内置中转、同时摘除保活与定时拉取任务并发送通知，避免失效凭证下持续
-        批量请求源站加重配额惩罚，也避免媒体服务器持续打到已失效的中转。
+        配置了 FlareSolverr 时兼任续期执行器：到点的常规续期、中转回源命中挑战页
+        置位的急换、以及连续探活失败后的兜底换证，都在本线程串行完成；只有
+        FlareSolverr 也不可用（或未配置）时才按原逻辑停用中转并通知。
         """
-        if not self._cf_clearance:
+        if not self._cf_clearance and not self._fs_url:
             return
         try:
+            if self._fs_url and (
+                self._urgent_refresh.is_set() or self.__fs_due()
+            ):
+                # 挑战页急换优先消费；无急换时按周期到点主动换证
+                self._urgent_refresh.clear()
+                self.__fs_refresh()
             resp = self.__relay_probe()
             body_head = resp.content[:4096]
             challenged = any(mark in body_head for mark in CHALLENGE_MARKS) or (
@@ -469,6 +574,37 @@ class ANiStrmRelay(_PluginBase):
             )
         except Exception as err:
             self._heartbeat_misses += 1
+            if self._fs_url:
+                # 配置了 FlareSolverr：探活失败立即急换凭证再验；只有换不到证才判凭证死亡
+                self._urgent_refresh.set()
+                logger.warning(
+                    f"ANi-Strm中转保活第{self._heartbeat_misses}次失败（{err}），FlareSolverr立即换证兜底"
+                )
+                if self.__fs_refresh():
+                    # 换证成功但本拍未验证：下一拍（5分钟内）用新证重探
+                    self._heartbeat_misses = 0
+                    return
+                if self._heartbeat_misses < RELAY_HEARTBEAT_MAX_MISSES:
+                    next_run = datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(minutes=RELAY_HEARTBEAT_RETRY_MINUTES)
+                    try:
+                        if self._scheduler and self._scheduler.get_job("anistrm_relay_heartbeat"):
+                            self._scheduler.add_job(
+                                func=self.__relay_heartbeat,
+                                trigger=IntervalTrigger(minutes=RELAY_HEARTBEAT_MINUTES),
+                                name="ANiStrmRelay中转保活",
+                                id="anistrm_relay_heartbeat",
+                                next_run_time=next_run,
+                                replace_existing=True,
+                            )
+                    except Exception as reschedule_err:
+                        logger.warning(f"ANi-Strm保活补试任务重排失败：{reschedule_err}")
+                    logger.warning(
+                        f"ANi-Strm FlareSolverr换证失败（第{self._heartbeat_misses}次），"
+                        f"{RELAY_HEARTBEAT_RETRY_MINUTES}分钟后补试，连续{RELAY_HEARTBEAT_MAX_MISSES}次才停机"
+                    )
+                    return
+                self.__relay_stop(f"{err}；FlareSolverr 也无法取得新的cf_clearance")
+                return
             if self._heartbeat_misses < RELAY_HEARTBEAT_MAX_MISSES:
                 # 单次失败先短间隔补试，覆盖CF排队抖动/瞬时网络异常，不立即停机
                 next_run = datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(minutes=RELAY_HEARTBEAT_RETRY_MINUTES)
@@ -489,33 +625,46 @@ class ANiStrmRelay(_PluginBase):
                     f"{RELAY_HEARTBEAT_RETRY_MINUTES}分钟后补试，连续{RELAY_HEARTBEAT_MAX_MISSES}次才停机"
                 )
                 return
-            logger.warning(f"ANi-Strm中转保活连续{self._heartbeat_misses}次失败，自动停用内置中转：{err}")
-            self._relay_enabled = False
-            self.__update_config()
-            for job_id in ("anistrm_relay_heartbeat", "anistrm_relay_update", "anistrm_relay_startup_pull"):
-                try:
-                    if self._scheduler and self._scheduler.get_job(job_id):
-                        self._scheduler.remove_job(job_id)
-                except Exception as remove_err:
-                    logger.warning(f"ANi-Strm摘除任务 {job_id} 失败：{remove_err}")
-            self.post_message(
-                title="【ANi Strm 中转】保活失败，内置CF中转已停用",
-                text=(
-                    f"**插件**：{self.plugin_name} v{self.plugin_version}\n"
-                    f"**时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                    f"**源站**：{self._relay_upstream}\n"
-                    f"**原因**：{str(err)[:120]}\n"
-                    "\n"
-                    "**影响**\n"
-                    "- 内置CF中转已自动停用，strm 播放请求将返回 503\n"
-                    "- 保活心跳与定时拉取任务均已摘除，不会自动重试\n"
-                    "\n"
-                    "**恢复步骤**\n"
-                    "1. 用与服务器相同出口IP的浏览器访问源站，重新完成人机验证\n"
-                    "2. 在插件设置填入新的 cf_clearance 与该浏览器UA\n"
-                    "3. 重新打开「内置CF中转」开关并保存，保活与定时拉取自动恢复"
-                ),
-            )
+            self.__relay_stop(str(err))
+
+    def __relay_stop(self, reason: str):
+        """
+        停用内置CF中转：摘除保活、续期与拉取任务并发送通知，避免死证下持续打源站。
+
+        :param reason: 触发停机的失败摘要
+        """
+        logger.warning(f"ANi-Strm中转凭证失效且FlareSolverr不可用，自动停用内置中转：{reason}")
+        self._relay_enabled = False
+        self.__update_config()
+        for job_id in (
+            "anistrm_relay_heartbeat",
+            "anistrm_fs_refresh",
+            "anistrm_relay_update",
+            "anistrm_relay_startup_pull",
+        ):
+            try:
+                if self._scheduler and self._scheduler.get_job(job_id):
+                    self._scheduler.remove_job(job_id)
+            except Exception as remove_err:
+                logger.warning(f"ANi-Strm摘除任务 {job_id} 失败：{remove_err}")
+        self.post_message(
+            title="【ANi Strm 中转】凭证失效，内置CF中转已停用",
+            text=(
+                f"**插件**：{self.plugin_name} v{self.plugin_version}\n"
+                f"**时间**：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"**源站**：{self._relay_upstream}\n"
+                f"**原因**：{reason[:120]}\n"
+                "\n"
+                "**影响**\n"
+                "- 内置CF中转已自动停用，strm 播放请求将返回 503\n"
+                "- 保活心跳、凭证续期与定时拉取任务均已摘除，不会自动重试\n"
+                "\n"
+                "**恢复步骤**\n"
+                f"1. 检查 FlareSolverr 是否存活（配置地址：{self._fs_url or '未配置'}）\n"
+                "2. 或临时用与服务器相同出口IP的浏览器过一遍人机验证，粘贴新的 cf_clearance 与UA\n"
+                "3. 重新打开「内置CF中转」开关并保存，保活、续期与定时拉取自动恢复"
+            ),
+        )
 
     def __relay_probe(self) -> httpx.Response:
         """
@@ -632,6 +781,9 @@ class ANiStrmRelay(_PluginBase):
                         "ANi-Strm中转收到CF挑战页：cf_clearance已失效（或出口IP/UA变更），"
                         "请在同出口IP浏览器重新过一次人机验证并更新插件中的cookie"
                     )
+                    # 配置了 FlareSolverr 时置位急换：由下一拍保活心跳立即换新证
+                    if self._relay_enabled and self._fs_url:
+                        self._urgent_refresh.set()
                     return JSONResponse(
                         {
                             "success": False,
@@ -881,8 +1033,31 @@ class ANiStrmRelay(_PluginBase):
                                             "model": "cf_clearance",
                                             "label": "cf_clearance Cookie",
                                             "rows": 2,
-                                            "placeholder": "浏览器过一次人机验证后复制 cf_clearance 的值（不含其它cookie）",
-                                            "hint": "cf_clearance 与出口IP+User-Agent绑定；过期后播放出现502提示时，重新验证并更新此处即可，已生成的strm文件不需要重新生成",
+                                            "placeholder": "浏览器过一次人机验证后复制 cf_clearance 的值（不含其它cookie）；配置了下方FlareSolverr后可留空，由续期自动写入",
+                                            "hint": "cf_clearance 与出口IP+User-Agent绑定，绝对有效期约30分钟且不滚动续期；配置 FlareSolverr 地址后由插件自动重新解题续发（含配套UA），无需手工粘贴",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {
+                                    "cols": 12,
+                                },
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "fs_url",
+                                            "label": "FlareSolverr 地址",
+                                            "placeholder": "http://<FlareSolverr地址>:8191",
+                                            "hint": "填写后 cf_clearance 到期前自动重新解题换新证（约14分钟一次），并同步其浏览器UA；留空则维持手工粘贴+保活模式",
                                             "persistent-hint": True,
                                         },
                                     }
@@ -1000,11 +1175,12 @@ class ANiStrmRelay(_PluginBase):
                                             "type": "warning",
                                             "variant": "tonal",
                                             "text": "内置CF中转用法：\n"
-                                            "1. 用浏览器（与MP同一出口IP）访问反代/源站地址并完成人机验证，复制 cf_clearance\n"
-                                            "2. 填入 cookie 与验证时浏览器的UA，填写「中转访问地址」后开启内置CF中转并保存\n"
-                                            "3. 保存后自动探活验活并补齐一次strm；如需把旧直链换成中转地址，勾选「改写已存在strm」后再保存\n"
-                                            "cookie过期时播放会返回502提示，仅需更新cookie，strm文件无需重新生成\n"
-                                            "保活成功时会滚动续期cf_clearance并自动写回本设置；中转接口匿名可达，建议设置访问令牌；媒体服务器需能直连MP（开启中转后请勿再配http_proxy）",
+                                            "推荐：填好「FlareSolverr 地址」后开启内置CF中转并保存，"
+                                            "cookie 与配套UA由插件自动重新解题续发（约14分钟一换），无需手工粘贴\n"
+                                            "手工模式：浏览器（与MP同一出口IP）访问源站过人机验证，复制 cf_clearance 与该浏览器UA填入\n"
+                                            "旧 strm 是直链的，勾选「改写已存在strm」保存一次换成中转地址，之后取消勾选\n"
+                                            "cookie过期时播放会返回502提示；配置了FlareSolverr会自动换证自愈，未配置时仅需更新cookie，strm文件无需重新生成\n"
+                                            "中转接口匿名可达，建议设置访问令牌；媒体服务器需能直连MP（开启中转后请勿再配http_proxy）",
                                             "style": "white-space: pre-line;",
                                         },
                                     },
@@ -1061,6 +1237,7 @@ class ANiStrmRelay(_PluginBase):
                 "relay_token": self._relay_token,
                 "relay_public_base": self._relay_public_base,
                 "rewrite_existing": self._rewrite_existing,
+                "fs_url": self._fs_url,
             }
         )
 
