@@ -1125,11 +1125,15 @@ class PluginQueueTest(unittest.TestCase):
 
     def test_tick_advances_only_after_grace_and_two_stops(self) -> None:
         stopped = {"status": 0, "volume": 10, "position": 0, "duration": 0}
-        plugin, client = self._plugin(status=stopped)
+        playing = {"status": 1, "volume": 10, "position": 1000, "duration": 60000}
+        plugin, client = self._plugin(status=playing)
         plugin._set_queue_state(self.tracks, 0, "D1")
         plugin.save_data("last", {"device_id": "D1", "path": self.tracks[0],
                                   "started_at": time.time(), "title": "一"})
         before = len([c for c in client.calls if c[0] == "play"])
+        plugin._tick()
+        self.assertEqual(len([c for c in client.calls if c[0] == "play"]), before)
+        client._status = stopped
         plugin._tick()
         self.assertEqual(len([c for c in client.calls if c[0] == "play"]), before,
                          "推流后宽限期内不该连播")
@@ -1144,6 +1148,80 @@ class PluginQueueTest(unittest.TestCase):
         after = len([c for c in client.calls if c[0] == "play"])
         self.assertEqual(after, before + 1, "连续两次停止后应推进下一首")
         self.assertEqual(plugin._queue_state()["index"], 1)
+
+    def test_tick_silent_after_restart(self) -> None:
+        """模拟 MP 重启后的第一件事：队列和 last 都还是旧状态、设备报 0。
+
+        没亲眼见播过就推进，等于重启后约 40 秒音箱自己唱起来——这正是 v0.6.4 堵住的洞。
+        """
+        stopped = {"status": 0, "volume": 10, "position": 0, "duration": 0}
+        plugin, client = self._plugin(status=stopped)
+        plugin._set_queue_state(self.tracks, 0, "D1")
+        plugin.save_data("last", {"device_id": "D1", "path": self.tracks[0],
+                                  "started_at": time.time() - 600})
+        before = len([c for c in client.calls if c[0] == "play"])
+        for _ in range(6):
+            plugin._tick()
+        self.assertEqual(len([c for c in client.calls if c[0] == "play"]), before,
+                         "本进程没见过这一首在播，重启后不该盲推")
+
+    def test_tick_skips_plugin_pause(self) -> None:
+        """插件自己发的暂停要落标记，巡检见标记就不推进。"""
+        playing = {"status": 1, "volume": 10, "position": 1000, "duration": 60000}
+        stopped = {"status": 0, "volume": 10, "position": 0, "duration": 0}
+        plugin, client = self._plugin(status=playing)
+        plugin._set_queue_state(self.tracks, 0, "D1")
+        plugin._tick()
+        self.assertTrue(plugin._control("pause").ok)
+        self.assertEqual(plugin._queue_state().get("paused_token"),
+                         plugin._queue_token(plugin._queue_state()))
+        client._status = stopped
+        plugin.save_data("last", {"device_id": "D1", "started_at": time.time() - 600})
+        before = len([c for c in client.calls if c[0] == "play"])
+        for _ in range(4):
+            plugin._tick()
+        self.assertEqual(len([c for c in client.calls if c[0] == "play"]), before,
+                         "暂停被当成播完，会把你没听完的那首切掉")
+        # 口令恢复播放后连播要能回来
+        plugin._control("play")
+        self.assertNotIn("paused_token", plugin._queue_state())
+        client._status = playing
+        plugin._tick()
+        client._status = stopped
+        plugin._tick()
+        plugin._tick()
+        self.assertEqual(len([c for c in client.calls if c[0] == "play"]), before + 1,
+                         "恢复播放后连播应恢复")
+
+    def test_tick_pause_cleared_by_device_resume(self) -> None:
+        """设备侧按键恢复播放插件看不见，巡检见到 status=1 时要把标记擦掉。"""
+        playing = {"status": 1, "volume": 10, "position": 1000, "duration": 60000}
+        stopped = {"status": 0, "volume": 10, "position": 0, "duration": 0}
+        plugin, client = self._plugin(status=playing)
+        plugin._set_queue_state(self.tracks, 0, "D1")
+        plugin._tick()
+        plugin._control("pause")
+        client._status = stopped
+        plugin._tick()
+        client._status = playing
+        plugin._tick()
+        self.assertNotIn("paused_token", plugin._queue_state(),
+                         "设备已经自己播起来了，标记得擦掉")
+        client._status = stopped
+        plugin.save_data("last", {"device_id": "D1", "started_at": time.time() - 600})
+        before = len([c for c in client.calls if c[0] == "play"])
+        plugin._tick()
+        plugin._tick()
+        self.assertEqual(len([c for c in client.calls if c[0] == "play"]), before + 1,
+                         "按键恢复后播完，照样该连播")
+
+    def test_plugin_stop_marks_queue(self) -> None:
+        playing = {"status": 1, "volume": 10, "position": 1000, "duration": 60000}
+        plugin, _ = self._plugin(status=playing)
+        plugin._set_queue_state(self.tracks, 1, "D1")
+        token = plugin._queue_token(plugin._queue_state())
+        self.assertTrue(plugin._control("stop").ok)
+        self.assertEqual(plugin._queue_state().get("paused_token"), token)
 
     def test_tick_does_nothing_while_playing(self) -> None:
         plugin, client = self._plugin(status={"status": 1, "volume": 10,
@@ -1716,12 +1794,14 @@ class PluginVoiceTest(unittest.TestCase):
         self.assertFalse(plugin._timer_state_out()["active"])
 
     def test_sleep_timer_by_songs_stops_on_finish(self) -> None:
-        plugin, client = self._plugin(status={"status": 0, "volume": 10,
-                                              "position": 0, "duration": 1})
+        playing = {"status": 1, "volume": 10, "position": 1000, "duration": 60000}
+        plugin, client = self._plugin(status=playing)
         plugin._set_queue_state(self.tracks, 0, "D1")
         plugin.save_data("sleep_timer", {"stop_after_songs": 1, "device_id": "D1"})
         plugin.save_data("last", {"device_id": "D1", "path": self.tracks[0],
                                   "started_at": time.time() - 60})
+        plugin._tick()
+        client._status = {"status": 0, "volume": 10, "position": 0, "duration": 1}
         plugin._tick()
         plugin._tick()
         self.assertIn(("play_operation", "D1", "stop"), client.calls, "播完一首就该停")

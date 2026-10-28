@@ -16,6 +16,8 @@ xiaoaispeaker — MoviePilot v3 插件（插件名：小爱音箱）
 - 定时任务按星期/几号触发，不做法定节假日调休：上游把 holiday-cn 数据集编进插件产物，宿主
   容器里的插件既没有那份数据也没有更新渠道。
 - 队列连播靠轮询 player_get_play_status 判「播完」，不是音箱侧的真实播放列表。
+  接口只有 0/1、分不清暂停与播完，所以本进程没亲眼见过这一首在播就不推进
+  （重启后保持安静），插件自己发出的暂停/停止也落标记、见标记不推进。
 - /stream 必须匿名可达（音箱不会带上 MP 的登录态），因此用「路径 + 过期时间」的 HMAC 签名
   收敛成「只能取配置目录内、在有效期内的音频文件」，签名不匹配或路径越库一律 403。
 - AI 兜底与自由对话不自备第二份密钥与端点：借主程序「设定 → AI 大模型」配好的那个助手，
@@ -261,7 +263,7 @@ class XiaoaiSpeaker(_PluginBase):
         "库内目录浏览与搜索、远程命令；播放直链由插件签名限时，不依赖媒体服务器。"
     )
     plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/xiaoai.svg"
-    plugin_version = "0.6.3"
+    plugin_version = "0.6.4"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "xiaoaispeaker_"
@@ -1022,6 +1024,22 @@ class XiaoaiSpeaker(_PluginBase):
             data["index"] = -1
         return data
 
+    @staticmethod
+    def _queue_token(state: Dict[str, Any]) -> str:
+        """当前队列位置的标识：序号 + 路径，同一串就是同一首。
+
+        只记序号不稳：「点歌」会把整本队列换掉，序号却可能还是 0，旧位置留下的
+        暂停标记会盖到新队列上；带上路径就没这个问题。
+        """
+        items = state.get("items") or []
+        try:
+            index = int(state.get("index") or 0)
+        except (TypeError, ValueError):
+            return ""
+        if index < 0 or index >= len(items):
+            return ""
+        return f"{index}:{items[index].get('path')}"
+
     def _queue_out(self, state: Optional[Dict[str, Any]] = None) -> QueueOut:
         state = state or self._queue_state()
         items = state.get("items") or []
@@ -1062,6 +1080,8 @@ class XiaoaiSpeaker(_PluginBase):
         result = self._play_file(path, device_id=state.get("device_id") or None)
         if result.ok:
             state["index"] = target
+            # 手动切歌推流成功说明设备在听指令，旧位置的暂停标记不能再挡连播
+            state.pop("paused_token", None)
             self._note_played(state, target)
             self.save_data(_KEY_QUEUE, state)
             result.queue = self._queue_out(state)
@@ -1139,6 +1159,19 @@ class XiaoaiSpeaker(_PluginBase):
         label = {"play": "继续播放", "pause": "已暂停", "stop": "已停止"}[action]
         if action == "stop":
             self.__dict__["_idle_ticks"] = 0
+        if result.get("ok"):
+            # 插件自己发的暂停/停止是人的意图，落标记后巡检见标记就不推进；
+            # 意图是播放就擦掉，靠设备侧直接按暂停键的场景由巡检见到 status=1 时擦
+            state = self._queue_state()
+            token = self._queue_token(state)
+            if token:
+                if action in ("pause", "stop"):
+                    if state.get("paused_token") != token:
+                        state["paused_token"] = token
+                        self.save_data(_KEY_QUEUE, state)
+                elif state.get("paused_token"):
+                    state.pop("paused_token", None)
+                    self.save_data(_KEY_QUEUE, state)
 
         def follow(target: Dict[str, Any]) -> Tuple[bool, str]:
             outcome = client.play_operation(str(target.get("device_id") or ""), action)
@@ -1761,6 +1794,7 @@ class XiaoaiSpeaker(_PluginBase):
         index = int(state.get("index") or 0)
         if not items or index < 0 or index >= len(items):
             return
+        token = self._queue_token(state)
         device_id = str(state.get("device_id") or "")
         if not device_id:
             fallback = self._target_device()[0] or {}
@@ -1773,6 +1807,21 @@ class XiaoaiSpeaker(_PluginBase):
         if status.get("error"):
             return
         if int(status.get("status") or 0) != 0:
+            # 亲眼见过这一位置在播，才允许后面按「停止」判播完；
+            # 设备侧按键恢复播放时也顺手擦掉旧暂停标记
+            self.__dict__["_advance_seen"] = token
+            self.__dict__["_idle_ticks"] = 0
+            if state.get("paused_token"):
+                state.pop("paused_token", None)
+                self.save_data(_KEY_QUEUE, state)
+            return
+        if self.__dict__.get("_advance_seen") != token:
+            # 这个 0 是重启前落盘的陈旧状态、或推流根本没被受理，本进程没见过它在播：
+            # 不亲眼见播过就推进，正是「MP 一重启音箱自己唱起来」的根源
+            self.__dict__["_idle_ticks"] = 0
+            return
+        if state.get("paused_token") == token:
+            # 插件自己发出的暂停/停止：这个 0 是人的意图，不是播完
             self.__dict__["_idle_ticks"] = 0
             return
         elapsed = time.time() - float(last.get("started_at") or 0)
