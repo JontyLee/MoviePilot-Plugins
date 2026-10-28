@@ -7,6 +7,7 @@ ANi-Strm 自用迭代（内置 CF 透传中转）。
 致谢：原作者 honue 及上游 #147/#142 的失效排查讨论；源站与 Alist 风格目录接口由
 open ANi 字幕组提供。
 """
+import re
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -35,6 +36,10 @@ DEFAULT_CF_UA = (
 )
 # cf_clearance 保活心跳间隔（分钟），需明显小于 CF 凭证约30分钟的有效期
 RELAY_HEARTBEAT_MINUTES = 12
+# 保活连续失败容忍：单次心跳失败先按短间隔补试，连续达到该次数才判定凭证死亡并停机
+RELAY_HEARTBEAT_MAX_MISSES = 2
+# 保活失败后的补试间隔（分钟），覆盖 CF 短暂排队/网络抖动，远小于凭证有效期
+RELAY_HEARTBEAT_RETRY_MINUTES = 3
 # 定时更新（strm补齐）默认周期：每天 04:00，避开观看高峰；置空则禁用
 DEFAULT_CRON = "0 4 * * *"
 # CF 挑战页特征标记
@@ -57,6 +62,22 @@ FOLDER_REQUEST_INTERVAL_SECONDS = 1.0
 # curl HTTP/2 指纹同级；连接池常驻复用，插件重载不关闭以避免跨事件循环竞态）
 _RELAY_CLIENT: Optional[httpx.AsyncClient] = None
 
+# 进程级滚动凭证记忆：保存本插件捕获到的最新 cf_clearance 及其签发时间。
+# 插件配置为整对象替换语义，外部以旧快照更新配置会把刚捕获的滚动凭证顶回死 token；
+# 该记忆跨插件重载存活，init 时与配置值按签发时间戳择优，防止滚动续命被写回抹除
+_CLEARANCE_MEMORY: Dict[str, Any] = {"token": "", "issued_ts": 0}
+
+
+def _clearance_issued_ts(token: str) -> int:
+    """
+    解析 cf_clearance 内嵌的签发时间戳（形如 xxx-1793150056-1.2.1.1-xxx 的十进制段）。
+
+    :param token: cf_clearance 裸值
+    :return: unix 秒级时间戳，解析不到返回 0
+    """
+    match = re.search(r"-(\d{10})-", token or "")
+    return int(match.group(1)) if match else 0
+
 
 def _relay_client() -> httpx.AsyncClient:
     """
@@ -78,7 +99,7 @@ class ANiStrmRelay(_PluginBase):
     plugin_name = "ANi Strm 自用版（CF中转）"
     plugin_desc = "自动获取当季所有番剧生成strm；内置CF中转代理携带cf_clearance直连openani，解决源站人机挑战后strm无法播放的问题（基于 honue 版 ANi-Strm 迭代）"
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/anistrm.png"
-    plugin_version = "0.1.8"
+    plugin_version = "0.1.9"
     plugin_author = "JontyLee（基于 honue ANi-Strm）"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "anistrm_"
@@ -102,6 +123,8 @@ class ANiStrmRelay(_PluginBase):
     _rewrite_existing = False
     # 内置中转实际转发的上游源站（即原始 proxy_base 配置值）
     _relay_upstream = ""
+    # 本轮保活连续失败次数（成功后清零，达到阈值才停机）
+    _heartbeat_misses = 0
 
     def __init__(self):
         super().__init__()
@@ -132,6 +155,16 @@ class ANiStrmRelay(_PluginBase):
         self._relay_enabled = bool(config.get("relay_enabled"))
         raw_clearance = (config.get("cf_clearance") or "").strip()
         self._cf_clearance = self._normalize_clearance(raw_clearance)
+        # 进程级记忆里有更新的滚动凭证时优先采用：防止整对象替换的配置写回
+        # 把心跳刚捕获的新 token 顶成旧快照里的死 token（顶号即全灭）
+        if (_CLEARANCE_MEMORY["token"]
+                and _CLEARANCE_MEMORY["issued_ts"] > _clearance_issued_ts(self._cf_clearance)):
+            logger.info(
+                f"ANi-Strm采用进程级滚动凭证（签发于"
+                f"{datetime.fromtimestamp(_CLEARANCE_MEMORY['issued_ts'])}），"
+                f"忽略配置快照中更旧的cf_clearance"
+            )
+            self._cf_clearance = _CLEARANCE_MEMORY["token"]
         if raw_clearance and self._cf_clearance != raw_clearance:
             logger.info(
                 "ANi-Strm检测到cf_clearance配置项粘贴了整串浏览器Cookie，"
@@ -202,13 +235,17 @@ class ANiStrmRelay(_PluginBase):
             self._onlyonce = False
 
         if self._relay_enabled:
+            self._heartbeat_misses = 0
             self._scheduler.add_job(
                 func=self.__relay_heartbeat,
                 trigger=IntervalTrigger(minutes=RELAY_HEARTBEAT_MINUTES),
                 name="ANiStrmRelay中转保活",
                 id="anistrm_relay_heartbeat",
+                # 保存配置约1分钟后先验一次：粘贴超过18分钟的token大概率已过期，
+                # 尽早定性并捕获滚动凭证，而不是干等首个完整间隔后一击毙命
+                next_run_time=datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(minutes=1),
             )
-            logger.info(f"ANi-Strm中转cf_clearance保活任务已注册（每{RELAY_HEARTBEAT_MINUTES}分钟）")
+            logger.info(f"ANi-Strm中转cf_clearance保活任务已注册（首拍1分钟后，此后每{RELAY_HEARTBEAT_MINUTES}分钟）")
 
         self.__update_config()
 
@@ -395,6 +432,8 @@ class ANiStrmRelay(_PluginBase):
         if not new_value or new_value.upper() == "DELETED" or new_value == self._cf_clearance:
             return
         self._cf_clearance = new_value
+        _CLEARANCE_MEMORY["token"] = new_value
+        _CLEARANCE_MEMORY["issued_ts"] = _clearance_issued_ts(new_value)
         logger.info("ANi-Strm中转已捕获滚动刷新的cf_clearance（热生效并已持久化）")
         self.__update_config()
 
@@ -419,12 +458,34 @@ class ANiStrmRelay(_PluginBase):
             if challenged:
                 raise RuntimeError("上游返回CF人机挑战页，cf_clearance已失效（或出口IP/UA变更）")
             self._rotate_clearance(resp)
+            self._heartbeat_misses = 0
             logger.info(
                 f"ANi-Strm中转保活心跳正常（上游HTTP {resp.status_code}，"
                 f"cf_clearance有效期至下次心跳）"
             )
         except Exception as err:
-            logger.warning(f"ANi-Strm中转保活失败，自动停用内置中转：{err}")
+            self._heartbeat_misses += 1
+            if self._heartbeat_misses < RELAY_HEARTBEAT_MAX_MISSES:
+                # 单次失败先短间隔补试，覆盖CF排队抖动/瞬时网络异常，不立即停机
+                next_run = datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(minutes=RELAY_HEARTBEAT_RETRY_MINUTES)
+                try:
+                    if self._scheduler and self._scheduler.get_job("anistrm_relay_heartbeat"):
+                        self._scheduler.add_job(
+                            func=self.__relay_heartbeat,
+                            trigger=IntervalTrigger(minutes=RELAY_HEARTBEAT_MINUTES),
+                            name="ANiStrmRelay中转保活",
+                            id="anistrm_relay_heartbeat",
+                            next_run_time=next_run,
+                            replace_existing=True,
+                        )
+                except Exception as reschedule_err:
+                    logger.warning(f"ANi-Strm保活补试任务重排失败：{reschedule_err}")
+                logger.warning(
+                    f"ANi-Strm中转保活第{self._heartbeat_misses}次失败（{err}），"
+                    f"{RELAY_HEARTBEAT_RETRY_MINUTES}分钟后补试，连续{RELAY_HEARTBEAT_MAX_MISSES}次才停机"
+                )
+                return
+            logger.warning(f"ANi-Strm中转保活连续{self._heartbeat_misses}次失败，自动停用内置中转：{err}")
             self._relay_enabled = False
             self.__update_config()
             for job_id in ("anistrm_relay_heartbeat", "anistrm_relay_update"):
