@@ -35,7 +35,7 @@ DEFAULT_CF_UA = (
     "(KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36 Edg/155.0.0.0"
 )
 # cf_clearance 保活心跳间隔（分钟），需明显小于 CF 凭证约30分钟的有效期
-RELAY_HEARTBEAT_MINUTES = 12
+RELAY_HEARTBEAT_MINUTES = 5
 # 保活连续失败容忍：单次心跳失败先按短间隔补试，连续达到该次数才判定凭证死亡并停机
 RELAY_HEARTBEAT_MAX_MISSES = 2
 # 保活失败后的补试间隔（分钟），覆盖 CF 短暂排队/网络抖动，远小于凭证有效期
@@ -99,7 +99,7 @@ class ANiStrmRelay(_PluginBase):
     plugin_name = "ANi Strm 自用版（CF中转）"
     plugin_desc = "自动获取当季所有番剧生成strm；内置CF中转代理携带cf_clearance直连openani，解决源站人机挑战后strm无法播放的问题（基于 honue 版 ANi-Strm 迭代）"
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/anistrm.png"
-    plugin_version = "0.2.0"
+    plugin_version = "0.2.1"
     plugin_author = "JontyLee（基于 honue ANi-Strm）"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "anistrm_"
@@ -225,7 +225,7 @@ class ANiStrmRelay(_PluginBase):
         if self._relay_enabled:
             self._heartbeat_misses = 0
             # 保存/插件重载/MP重启后都会重走本初始化：约15秒即打第一拍探活，
-            # 尽早定性cf_clearance并捕获滚动凭证，不等完整12分钟间隔
+            # 尽早定性cf_clearance并捕获滚动凭证，不等完整心跳间隔
             self._scheduler.add_job(
                 func=self.__relay_heartbeat,
                 trigger=IntervalTrigger(minutes=RELAY_HEARTBEAT_MINUTES),
