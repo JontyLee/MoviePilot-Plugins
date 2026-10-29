@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
+import json
 import re
 import sys
 import tempfile
@@ -997,7 +998,8 @@ class ContractTest(unittest.TestCase):
         self.assertIn(':active="view === item.key"', page)
         self.assertIn('@click="selectView(item.key)"', page)
         self.assertNotIn('@click="switchTab', page)
-        self.assertEqual(page.count("已提交重试"), 1)
+        # 成功文案只有一处（v0.14 起动词按桶走，两处各拼一遍就会有两个说法）
+        self.assertEqual(page.count("已提交${verb}"), 1)
         self.assertIn("retryResult(res, '失败项')", page)
         # 定向重试不再覆盖 runs，界面要另起一行显示，否则看着像三天没扫
         self.assertIn("last_targeted", page)
@@ -1079,6 +1081,83 @@ class ContractTest(unittest.TestCase):
         # 表里的详情按钮只有一个来源：整行点击。openDetail 不该再出现在操作列
         self.assertEqual(page.count("openDetail(item)"), 1)
         self.assertIn("if (item?.path) openDetail(item)", page)
+
+    def test_data_page_columns_have_explicit_widths(self):
+        """列宽要写死：默认按内容摊时，文件名列那条不换行的完整路径会把本列撑到最舒服，
+
+        中间的「写入来源 / 还缺哪几项」被压成窄窄一条竖排 —— 最该看的内容反而最窄。
+        所以每一列都得给宽度，配合 table-layout: fixed 让宽度由表头说了算。
+        """
+        page = (Path(mls.__file__).parent / "frontend" / "src" / "components" / "Page.vue"
+                ).read_text(encoding="utf-8")
+        block = page.split("const tableHeaders = computed", 1)[1].split("\n})", 1)[0]
+        cols = re.findall(r"\{ title: [^\n]+\}", block)
+        self.assertGreaterEqual(len(cols), 5)
+        for col in cols:
+            self.assertIn("width:", col, col)
+        self.assertIn(".mls-table :deep(table) { table-layout: fixed; }",
+                      " ".join(page.split()))
+        # 路径不再自带 480px 的兜底宽度：那一档在 fixed 版式里反而把列顶宽
+        self.assertNotIn("max-width: 480px", page)
+
+    def test_data_page_actions_follow_the_bucket(self):
+        """待处理不给编辑：那一桶是"还没轮到"，不是"写坏了要修"。
+
+        文件里现在写着什么，插件一个字都还没判过，手工填进去等于把没核对过的现值固化成
+        结论；这一桶的正确动作是让插件现在就问一轮（立即刮削），或者直接等下一轮。
+        编辑留给已处理 / 失败 / 有缺项，重试只在失败桶。
+        """
+        page = (Path(mls.__file__).parent / "frontend" / "src" / "components" / "Page.vue"
+                ).read_text(encoding="utf-8")
+        actions = page.split('<template #item.actions', 1)[1].split("</template>", 1)[0]
+        self.assertIn('v-if="bucket !== \'pending\'"', actions)
+        self.assertIn('v-if="bucket === \'failed\'"', actions)
+        self.assertIn('v-if="bucket === \'pending\'"', actions)
+        self.assertIn(">编辑</v-btn>", actions)
+        self.assertIn(">重试</v-btn>", actions)
+        self.assertIn(">立即刮削</v-btn>", actions)
+        # 待处理那一行的按钮走的是同一个 /retry，只是说法不同：动词按桶取
+        self.assertIn("bucket.value === 'pending' ? '立即刮削' : '重试'", page)
+        self.assertIn("已提交${verb}", page)
+        # 桶的说法要在表头副标题里说得出来，否则「立即刮削」像凭空多出来的按钮
+        self.assertIn("急着要就点行上的「立即刮削」", page)
+
+    def test_data_page_only_credits_a_source_when_it_wrote(self):
+        """「写入来源」列在改写 0 条的账上印出「网易云」，是界面自己打自己的脸。
+
+        done 账对每条都记着本轮扫描来源，判定已齐跳过的、值由宿主自己写的那些 set 是空的。
+        没写过字就没有「写入来源」可说，只能老实说未改写。
+        """
+        page = (Path(mls.__file__).parent / "frontend" / "src" / "components" / "Page.vue"
+                ).read_text(encoding="utf-8")
+        reason = page.split('<template #item.reason', 1)[1].split("</template>", 1)[0]
+        self.assertIn("item.source && rewrittenCount(item)", reason)
+        self.assertNotIn('v-else-if="item.source"', reason)
+        self.assertIn("未改写", page)
+        # 行上的「改写 N 项」与列判据同一个口径，别一处数 dict 一处数键
+        self.assertIn('v-if="rewrittenCount(item)"', page)
+
+    def test_release_version_fields_agree(self):
+        """版本号几处得一样。市场「更新插件」失败过一回，索引写着 0.11.0、仓库里的文件还是
+        0.10.0 —— 装到一半对不上，报错却不告诉你是这两处中的哪一处；补 release 时又要翻
+        history 找这一版的说明。改版本就是改这几处，漏哪个都只是"看起来更新了"。
+        """
+        root = Path(mls.__file__).resolve().parents[2]
+        entry = json.loads((root / "package.v3.json").read_text(encoding="utf-8"))["TagFlow"]
+        version = mls.TagFlow.plugin_version
+        self.assertEqual(entry["version"], version)
+        self.assertIn(f"v{version}", entry["history"])
+        self.assertTrue(entry["history"][f"v{version}"].strip())
+        self.assertIn(f"| 版本 | {version} |", (root / "README.md").read_text(encoding="utf-8"))
+
+    def test_docs_record_the_bucket_rules(self):
+        """列与操作的判据要落在使用说明里：这一版把待处理从「编辑」改回「立即刮削」，
+        只改界面不改文档，下一个人读到"四个桶都能编辑"就会照着已经不存在的行为提需求。
+        """
+        doc = (Path(mls.__file__).resolve().parents[2] / "docs" / "tagflow.md"
+               ).read_text(encoding="utf-8")
+        for phrase in ("待处理桶不给编辑", "立即刮削", "未改写", "table-layout: fixed"):
+            self.assertIn(phrase, doc)
 
     def test_config_page_explains_choices(self):
         """判据自足在原生表单，Vue 配置页只留最短提示 + 指向 docs —— 两边各有各的活。
@@ -3248,8 +3327,8 @@ class V010LedgerTest(unittest.TestCase):
         self.assertIn("openCandidate(cand)", page)
         self.assertIn("applyCandidatePicked", page)
         self.assertIn("candPicked", page)
-        # 编辑对所有桶开放（曾经只有缺项行有按钮，done/pending 想改一个字段的没处下手）
-        self.assertIn('<v-btn size="x-small" variant="text" color="primary" :loading="busy" @click="openEdit(item)">编辑</v-btn>', page)
+        # 编辑对已处理/失败/有缺项开放（待处理不给，见 test_data_page_actions_follow_the_bucket）
+        self.assertIn('@click="openEdit(item)">编辑</v-btn>', page)
 
 
 class SourcePacingTest(unittest.TestCase):

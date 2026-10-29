@@ -46,7 +46,7 @@ let searchTimer: ReturnType<typeof setTimeout> | null = null
 const buckets: { key: Bucket; label: string; icon: string; hint: string }[] = [
   { key: 'done', label: '已处理', icon: 'mdi-check-circle-outline', hint: '已经写好标签的文件（本轮与往轮累计）' },
   { key: 'failed', label: '失败待重试', icon: 'mdi-alert-circle-outline', hint: '没查到或没达阈值，下一轮还会再试' },
-  { key: 'pending', label: '待处理', icon: 'mdi-progress-clock', hint: '账本里没有、下一轮要问的文件' },
+  { key: 'pending', label: '待处理', icon: 'mdi-progress-clock', hint: '账本里没有、下一轮要问的文件；等自动处理就行，急着要就点行上的「立即刮削」' },
   { key: 'deficient', label: '有缺项', icon: 'mdi-file-document-alert-outline', hint: '已处理但封面/歌词等仍缺失，可单项编辑补齐' }
 ]
 
@@ -197,36 +197,37 @@ function selectView(key: View) {
 
 // /retry 的三种拒绝要分开说：全部路径在库外（out_of_library）和被扫描占着（busy）
 // 是完全不同的原因，混成"稍后再试"会让人反复点。label 只用于成功文案，
-// 失败提示带上文件名反而读不通。
-function retryResult(res: any, label = '') {
+// 失败提示带上文件名反而读不通。verb 是同一接口在两个桶里的不同叫法：失败桶是
+// 重试一次，待处理桶是提前刮一轮。
+function retryResult(res: any, label = '', verb = '重试') {
   if (res?.accepted) {
     const rejected = res?.rejected ? `，忽略 ${res.rejected} 个库外路径` : ''
-    notify(`已提交重试 ${res.count} 个${label}${rejected}`)
+    notify(`已提交${verb} ${res.count} 个${label}${rejected}`)
   } else if (res?.reason === 'out_of_library') {
     notify('这些路径不在配置的音乐库范围内，已拒绝', 'warning')
   } else if (res?.reason === 'no_paths') {
-    notify('没有可重试的路径', 'warning')
+    notify(`没有可${verb}的路径`, 'warning')
   } else {
     notify('已有扫描在运行，请稍后再试', 'warning')
   }
 }
 
-async function retryPaths(paths: string[], label: string) {
+async function retryPaths(paths: string[], label: string, verb = '重试') {
   if (!paths.length) return
   busy.value = true
   try {
     const res = await (props.api as MoviePilotApi).post(`${base.value}/retry`, { paths })
-    retryResult(res, label)
+    retryResult(res, label, verb)
     await refresh()
   } catch (e: any) {
-    notify(`重试失败：${e?.message || e}`, 'error')
+    notify(`${verb}失败：${e?.message || e}`, 'error')
   } finally {
     busy.value = false
   }
 }
 
 function retryRow(row: any) {
-  retryPaths([row.path], `（${row.name}）`)
+  retryPaths([row.path], `（${row.name}）`, bucket.value === 'pending' ? '立即刮削' : '重试')
 }
 
 function retryAllFailed() {
@@ -645,19 +646,27 @@ const REASON_TITLE: Record<Bucket, string> = {
   deficient: '还缺哪几项'
 }
 
+// 每列都给宽度，配合 .mls-table 的 table-layout: fixed：不给宽度的话表格按内容摊，
+// 文件名列里那条不换行的完整路径会把宽度撑到自己满意为止，中间的「写入来源 /
+// 还缺哪几项」被挤成一列竖排，反而是要看的内容最窄。
 const tableHeaders = computed(() => {
-  const cols: any[] = [{ title: '文件名', key: 'name', sortable: false }]
+  const cols: any[] = [{ title: '文件名', key: 'name', width: '36%', sortable: false }]
   if (REASON_TITLE[bucket.value]) {
-    cols.push({ title: REASON_TITLE[bucket.value], key: 'reason', sortable: false })
+    cols.push({ title: REASON_TITLE[bucket.value], key: 'reason', width: '28%', sortable: false })
   }
   if (bucket.value === 'failed') {
-    cols.push({ title: '重试', key: 'retries', width: 90, sortable: false })
+    cols.push({ title: '重试', key: 'retries', width: 76, sortable: false })
   }
-  cols.push({ title: '大小', key: 'size', width: 90, sortable: false })
-  cols.push({ title: '修改时间', key: 'mtime', width: 180, sortable: false })
-  cols.push({ title: '操作', key: 'actions', sortable: false, width: 120 })
+  cols.push({ title: '大小', key: 'size', width: 76, sortable: false })
+  cols.push({ title: '修改时间', key: 'mtime', width: 145, sortable: false })
+  cols.push({ title: '操作', key: 'actions', width: bucket.value === 'pending' ? 100 : 150, sortable: false })
   return cols
 })
+
+// 改写项数：账本里的 set 是插件真往文件里写过的字段差集，空的就是这条没动过手
+function rewrittenCount(item: any) {
+  return Object.keys(item?.set || {}).length
+}
 
 onMounted(() => {
   // 侧栏版式比宿主默认的 60rem 宽得多，宽度由宿主的数据框按这个事件设置
@@ -887,12 +896,12 @@ onMounted(() => {
             @update:items-per-page="onItemsPerPage"
           >
             <template #item.name="{ item }">
-              <div :title="item.path">{{ item.name }}</div>
-              <div class="text-caption text-grey text-truncate" style="max-width: 480px">{{ item.path }}</div>
+              <div class="text-truncate" :title="item.name">{{ item.name }}</div>
+              <div class="text-caption text-grey text-truncate" :title="item.path">{{ item.path }}</div>
               <!-- 改写了哪几项直接摊在行上：这一桶要一眼看出插件动了谁，点开详情才知道就没人点 -->
-              <div v-if="item.set" class="mt-1">
+              <div v-if="rewrittenCount(item)" class="mt-1">
                 <v-chip size="x-small" variant="tonal" color="primary" prepend-icon="mdi-pen-plus">
-                  改写 {{ Object.keys(item.set).length }} 项
+                  改写 {{ rewrittenCount(item) }} 项
                 </v-chip>
                 <span class="text-caption text-primary ml-1">{{ changedFieldNames(item.set) }}</span>
               </div>
@@ -910,17 +919,29 @@ onMounted(() => {
               </span>
               <span v-else-if="item.reason" class="text-caption">{{ item.reason }}</span>
               <span v-if="item.score != null" class="text-caption text-grey"> · 分数 {{ item.score }}</span>
-              <span v-else-if="item.source" class="text-caption text-grey"> · {{ sourceText(item.source) }}</span>
+              <!-- 「写入来源」只在插件真往文件里写过字时才成立。账本对每条已处理都记着本轮的
+                   扫描来源，判定已齐跳过的、值是宿主自己写的那几条 set 是空的 —— 照印来源就成了
+                   「本插件改写 0 条」的徽标旁边一排网易云，自己打自己的脸。 -->
+              <span v-else-if="item.source && rewrittenCount(item)" class="text-caption text-grey">
+                · {{ sourceText(item.source) }}
+              </span>
+              <span v-else-if="bucket === 'done'" class="text-caption text-grey">未改写</span>
               <span v-else-if="!item.reason && !item.missing?.length">-</span>
             </template>
             <template #item.mtime="{ item }">{{ fmtTime(item.mtime) }}</template>
             <template #item.size="{ item }">{{ fmtSize(item.size) }}</template>
             <template #item.actions="{ item }">
-              <!-- 编辑对所有桶开放：done/pending 的行也可能藏着要手工改的字段的现值，
-                   只有缺项能点开就成了"界面上看得见、动手没处动"。
+              <!-- 待处理不给编辑：那一桶是"还没轮到"，不是"写坏了要修"，文件里现在写着什么
+                   插件根本还没判过，手工填进去等于把没核对过的现值固化成结论。要动手早晚，
+                   正确动作是让插件现在就问一轮 —— 所以这一桶只给「立即刮削」。
+                   编辑对已处理/失败/有缺项开放；重试只在失败桶（这一列本来也只在那儿出现）。
                    详情不给按钮：整行本来就是点开详情的入口（@click:row），按钮留着只是占宽 -->
-              <v-btn size="x-small" variant="text" color="primary" :loading="busy" @click="openEdit(item)">编辑</v-btn>
-              <v-btn v-if="item.status !== 'deficient'" size="x-small" variant="text" color="primary" :loading="busy" @click="retryRow(item)">重试</v-btn>
+              <v-btn v-if="bucket !== 'pending'" size="x-small" variant="text" color="primary"
+                     :loading="busy" @click="openEdit(item)">编辑</v-btn>
+              <v-btn v-if="bucket === 'failed'" size="x-small" variant="text" color="primary"
+                     :loading="busy" @click="retryRow(item)">重试</v-btn>
+              <v-btn v-if="bucket === 'pending'" size="x-small" variant="text" color="primary"
+                     :loading="busy" @click="retryRow(item)">立即刮削</v-btn>
             </template>
             <template #no-data>
               <div class="text-center pa-6 text-grey">该桶暂无数据</div>
@@ -1281,6 +1302,12 @@ onMounted(() => {
 }
 /* 整行点开详情，指针形状要跟着变；表头不在 tbody 里，不受影响 */
 .mls-table :deep(tbody tr) { cursor: pointer; }
+/* 列宽按表头给的百分比和像素摊死。默认是按内容摊，文件名列里那条不换行的完整路径
+   会把这一列撑到自己满意为止，中间的「写入来源 / 还缺哪几项」被压成窄窄一条竖排 ——
+   最该看的内容反而最窄。fixed 之后溢出交给单元格裁，行内元素自己截断。 */
+.mls-table :deep(table) { table-layout: fixed; }
+.mls-table :deep(th),
+.mls-table :deep(td) { overflow: hidden; }
 .mls-dlg-head { display: flex; align-items: center; gap: 8px; padding: 14px 18px; min-width: 0; }
 .mls-dlg-head-text { min-width: 0; flex: 1 1 auto; }
 .mls-chips { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
