@@ -160,7 +160,7 @@ class ANiStrmRelay(_PluginBase):
     plugin_name = "ANi Strm 自用版（CF中转）"
     plugin_desc = "自动获取当季所有番剧生成strm；内置CF中转代理携带cf_clearance直连openani，凭证由FlareSolverr全自动解题续期（插件设置或MP系统设置提供地址，未配置则不启用），无需粘贴cookie（基于 honue 版 ANi-Strm 迭代）"
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/anistrm.png"
-    plugin_version = "0.3.3"
+    plugin_version = "0.3.4"
     plugin_author = "JontyLee（基于 honue ANi-Strm）"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "anistrm_"
@@ -1528,9 +1528,18 @@ class AniStrmClient:
         if response is None:
             raise ValueError(f"目录请求失败：{url}")
         try:
-            return response.json()
+            if response.status_code != 200:
+                # 中转命中CF挑战时回的是 502 JSON（{"success": false, ...}），它没有 files 字段，
+                # 照原样认下来就成了「这个目录是空的」：整季秒回文件数=0且一条告警都不打
+                raise ValueError(
+                    f"目录响应异常：HTTP {response.status_code} {str(response.text)[:120]}"
+                )
+            payload = response.json()
         finally:
             response.close()
+        if not isinstance(payload, dict) or "files" not in payload:
+            raise ValueError(f"目录响应缺少files字段：{str(payload)[:120]}")
+        return payload
 
     def _build_request_utils(self) -> RequestUtils:
         return RequestUtils(
