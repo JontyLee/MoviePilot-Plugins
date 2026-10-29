@@ -42,8 +42,10 @@ RELAY_HEARTBEAT_MAX_MISSES = 2
 # 保活失败后的补试间隔（分钟），覆盖 CF 短暂排队/网络抖动，远小于凭证有效期
 RELAY_HEARTBEAT_RETRY_MINUTES = 3
 # FlareSolverr 凭证自动续期间隔（分钟）：cf_clearance 绝对有效期约30分钟且本域
-# 不滚动续发，必须赶在到期前用 FlareSolverr 重新解题取新凭证
-FLARESOLVER_REFRESH_MINUTES = 14
+# 不滚动续发，必须赶在到期前用 FlareSolverr 重新解题取新凭证。到点检查只发生在
+# 5分钟一拍的心跳上且实测会被探活阻塞推迟（14分钟配置下实际出现过29分钟间隔），
+# 按12分钟留出一拍余量，最坏间隔仍在有效期内
+FLARESOLVER_REFRESH_MINUTES = 12
 # 定时更新（strm补齐）默认周期：每天 04:00，避开观看高峰；置空则禁用
 DEFAULT_CRON = "0 4 * * *"
 # CF 挑战页特征标记
@@ -63,8 +65,11 @@ RELAY_CHUNK_SIZE = 64 * 1024
 FOLDER_REQUEST_INTERVAL_SECONDS = 1.0
 
 # 全进程共享的 httpx 异步客户端（HTTP/2 出站，与已验证可通过 cf_clearance 重放的
-# curl HTTP/2 指纹同级；连接池常驻复用，插件重载不关闭以避免跨事件循环竞态）
+# curl HTTP/2 指纹同级；连接池常驻复用，插件重载不关闭以避免跨事件循环竞态）。
+# 媒体文件流与控制面（目录列举/自检）分池：播放器快进、停止会中断媒体流并可能触发
+# Cloudflare 连接级重置，同池的目录列举会被连带打挂（整季回填表现为全线文件数=0）
 _RELAY_CLIENT: Optional[httpx.AsyncClient] = None
+_RELAY_CONTROL_CLIENT: Optional[httpx.AsyncClient] = None
 
 # 进程级滚动凭证记忆：保存本插件捕获到的最新 cf_clearance 及其签发时间。
 # 插件配置为整对象替换语义，外部以旧快照更新配置会把刚捕获的滚动凭证顶回死 token；
@@ -74,36 +79,72 @@ _CLEARANCE_MEMORY: Dict[str, Any] = {"token": "", "issued_ts": 0}
 
 def _clearance_issued_ts(token: str) -> int:
     """
-    解析 cf_clearance 内嵌的签发时间戳（形如 xxx-1793150056-1.2.1.1-xxx 的十进制段）。
+    解析 cf_clearance 内嵌的签发时间戳。
+
+    CF 常见写法是 xxx-1793150056-1.2.1.1-xxx（夹在两个连字符间的十位 unix 秒）；
+    实测凭证位数/分隔会随 CF 版本变化，解析不到就退化到整串里任一段落在
+    2023~2033 年范围内的十位数字，再退不到才返回 0。
 
     :param token: cf_clearance 裸值
     :return: unix 秒级时间戳，解析不到返回 0
     """
-    match = re.search(r"-(\d{10})-", token or "")
+    token = token or ""
+    match = re.search(r"-(\d{10})-", token) or re.search(r"(?<!\d)(1[7-9]\d{8})(?!\d)", token)
     return int(match.group(1)) if match else 0
 
 
-def _relay_client() -> httpx.AsyncClient:
+def _new_relay_client() -> httpx.AsyncClient:
+    """
+    新建一个中转出站异步客户端（HTTP/2、跟随重定向、读超时放宽到可容纳大文件流）。
+
+    :return: httpx.AsyncClient 实例
+    """
+    return httpx.AsyncClient(
+        http2=True,
+        follow_redirects=True,
+        timeout=httpx.Timeout(15.0, read=300.0, write=60.0, pool=15.0),
+    )
+
+
+def _relay_client(control: bool = False) -> httpx.AsyncClient:
     """
     获取（必要时创建）中转专用的共享异步 HTTP 客户端。
 
+    :param control: True 取目录列举/自检等控制面请求池，False 取媒体文件流池
     :return: 启用 HTTP/2、自动跟随重定向的 httpx.AsyncClient 单例
     """
-    global _RELAY_CLIENT
+    global _RELAY_CLIENT, _RELAY_CONTROL_CLIENT
+    if control:
+        if _RELAY_CONTROL_CLIENT is None or _RELAY_CONTROL_CLIENT.is_closed:
+            _RELAY_CONTROL_CLIENT = _new_relay_client()
+        return _RELAY_CONTROL_CLIENT
     if _RELAY_CLIENT is None or _RELAY_CLIENT.is_closed:
-        _RELAY_CLIENT = httpx.AsyncClient(
-            http2=True,
-            follow_redirects=True,
-            timeout=httpx.Timeout(15.0, read=300.0, write=60.0, pool=15.0),
-        )
+        _RELAY_CLIENT = _new_relay_client()
     return _RELAY_CLIENT
+
+
+def _drop_relay_client(control: bool = False) -> None:
+    """
+    摘除中转出站客户端引用，让下一次请求在全新连接上重开。
+
+    Cloudflare 以 RST_STREAM 拆连接后，同一条 HTTP/2 连接上后续所有流都会被连带
+    重置；摘掉引用即可自愈。不主动 aclose：那会打断同一请求池上其它正在播放的
+    媒体流，旧客户端由其上的流自然结束后回收。
+
+    :param control: True 摘控制面请求池，False 摘媒体文件流池
+    """
+    global _RELAY_CLIENT, _RELAY_CONTROL_CLIENT
+    if control:
+        _RELAY_CONTROL_CLIENT = None
+    else:
+        _RELAY_CLIENT = None
 
 
 class ANiStrmRelay(_PluginBase):
     plugin_name = "ANi Strm 自用版（CF中转）"
-    plugin_desc = "自动获取当季所有番剧生成strm；内置CF中转代理携带cf_clearance直连openani，解决源站人机挑战后strm无法播放的问题（基于 honue 版 ANi-Strm 迭代）"
+    plugin_desc = "自动获取当季所有番剧生成strm；内置CF中转代理携带cf_clearance直连openani，配合FlareSolverr自动续期凭证，解决源站人机挑战后strm无法播放的问题（基于 honue 版 ANi-Strm 迭代）"
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/anistrm.png"
-    plugin_version = "0.3.0"
+    plugin_version = "0.3.1"
     plugin_author = "JontyLee（基于 honue ANi-Strm）"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "anistrm_"
@@ -127,6 +168,9 @@ class ANiStrmRelay(_PluginBase):
     # FlareSolverr 服务地址（如 http://<地址>:8191）：配置后 cf_clearance 到期前
     # 由它自动重新解题续发新证与配套UA，cookie 设置项可留空
     _fs_url = ""
+    # 用户在插件设置里显式填写的 FlareSolverr 地址：回写配置只写这个原始值，
+    # 免得自动采用的系统值被固化进插件配置、此后系统改地址也跟不动
+    _fs_url_explicit = ""
     # 上次 FlareSolverr 续期成功时间戳（心跳线程据此判断周期到点）
     _fs_last_ts = 0.0
     # 内置中转实际转发的上游源站（即原始 proxy_base 配置值）
@@ -179,16 +223,24 @@ class ANiStrmRelay(_PluginBase):
                 "ANi-Strm检测到cf_clearance配置项粘贴了整串浏览器Cookie，"
                 "已自动提取其中的cf_clearance生效；建议保存后仅保留该值"
             )
+        # FlareSolverr 地址：插件设置优先，留空则自动采用 MP 系统设置里的服务地址，
+        # 有自动续期来源时 cookie/UA 两个设置项都可以不填
+        self._fs_url_explicit = (config.get("fs_url") or "").strip()
+        self._fs_url = self._fs_url_explicit or self.__system_flaresolverr_url()
         self._cf_user_agent = (config.get("cf_user_agent") or "").strip() or DEFAULT_CF_UA
-        if self._cf_clearance and not (config.get("cf_user_agent") or "").strip():
+        if (
+            self._cf_clearance
+            and not (config.get("cf_user_agent") or "").strip()
+            and not self._fs_url
+        ):
             logger.warning(
                 "ANi-Strm已配置cf_clearance但未填写验证时的浏览器UA，中转将按内置默认UA发送；"
-                "cf_clearance与UA绑定，两者必须成对来自同一解题浏览器，否则会继续触发挑战"
+                "cf_clearance与UA绑定，两者必须成对来自同一解题浏览器，否则会继续触发挑战；"
+                "配置FlareSolverr地址（或在MP系统设置中配置）即可免手工粘贴"
             )
         self._relay_token = (config.get("relay_token") or "").strip()
         self._relay_public_base = (config.get("relay_public_base") or "").strip().rstrip("/")
         self._rewrite_existing = bool(config.get("rewrite_existing"))
-        self._fs_url = (config.get("fs_url") or "").strip()
 
         # 中转转发目标始终是原始反代/源站地址
         self._relay_upstream = self._proxy_base
@@ -212,7 +264,8 @@ class ANiStrmRelay(_PluginBase):
             f"ANi-Strm配置加载：enabled={self._enabled}, "
             f"use_proxy={self._use_proxy}, base={effective_base}, "
             f"relay={self._relay_enabled}(upstream={self._relay_upstream}, "
-            f"cookie={'已配置' if self._cf_clearance else '未配置'}), "
+            f"cookie={'已配置' if self._cf_clearance else '未配置'}, "
+            f"flaresolverr={self._fs_url or '未配置'}), "
             f"seasons={self._selected_seasons or []}, storage={self._storageplace}"
         )
 
@@ -241,8 +294,10 @@ class ANiStrmRelay(_PluginBase):
                 # 挑战页急换都在同一线程串行，避免与独立续期任务重复解题
                 self._fs_last_ts = 0.0
                 logger.info(
-                    f"ANi-Strm已启用FlareSolverr凭证自动续期（{self._fs_url}），"
-                    f"首拍换证后每{FLARESOLVER_REFRESH_MINUTES}分钟换证"
+                    f"ANi-Strm已启用FlareSolverr凭证自动续期（{self._fs_url}，"
+                    f"来源：{'插件设置' if self._fs_url_explicit else '系统设置'}），"
+                    f"cf_clearance与UA无需手工粘贴，首拍换证后每"
+                    f"{FLARESOLVER_REFRESH_MINUTES}分钟换证"
                 )
             # 保存/插件重载/MP重启后都会重走本初始化：约15秒即打第一拍探活，
             # 尽早定性cf_clearance并捕获滚动凭证，不等完整心跳间隔
@@ -413,6 +468,18 @@ class ANiStrmRelay(_PluginBase):
         ]
 
     @staticmethod
+    def __system_flaresolverr_url() -> str:
+        """
+        读取 MP 系统设置中的 FlareSolverr 地址，作为插件未单独填写时的默认来源。
+
+        系统设置项由 Settings.update_setting 同时写 app.env 与内存实例，插件在加载
+        时读到的就是当前生效值；在系统设置的站点分组里配过 FlareSolverr 就不必再填本项。
+
+        :return: 系统配置的 FlareSolverr 地址，未配置返回空串
+        """
+        return (getattr(settings, "FLARESOLVERR_URL", None) or "").strip()
+
+    @staticmethod
     def _normalize_clearance(raw: str) -> str:
         """
         容错解析用户粘贴的凭证：只接受整串浏览器 Cookie 误粘的场景。
@@ -457,7 +524,9 @@ class ANiStrmRelay(_PluginBase):
             return
         self._cf_clearance = new_value
         _CLEARANCE_MEMORY["token"] = new_value
-        _CLEARANCE_MEMORY["issued_ts"] = _clearance_issued_ts(new_value)
+        # 解析不到签发时间时按本次捕获时刻记：内存里的证是刚从活跃响应上摘下来的，
+        # 优于任何配置快照，不能让时间戳退化成 0 后被旧快照顶掉
+        _CLEARANCE_MEMORY["issued_ts"] = _clearance_issued_ts(new_value) or int(time.time())
         logger.info("ANi-Strm中转已捕获滚动刷新的cf_clearance（热生效并已持久化）")
         self.__update_config()
 
@@ -532,7 +601,8 @@ class ANiStrmRelay(_PluginBase):
         self._cf_clearance = clearance
         self._cf_user_agent = ua
         _CLEARANCE_MEMORY["token"] = clearance
-        _CLEARANCE_MEMORY["issued_ts"] = _clearance_issued_ts(clearance)
+        # 同 _rotate_clearance：时间戳解析不到就按捕获时刻记，避免退化成 0 被顶号
+        _CLEARANCE_MEMORY["issued_ts"] = _clearance_issued_ts(clearance) or int(time.time())
         self._fs_last_ts = time.time()
         logger.info(
             f"ANi-Strm已从FlareSolverr取得新的cf_clearance（签发于"
@@ -722,6 +792,16 @@ class ANiStrmRelay(_PluginBase):
                 status_code=403,
             )
         if not self._cf_clearance:
+            if self._fs_url:
+                # 自动续期尚未产出首张凭证：催一拍换证，让调用方稍后重试而不是死等
+                self._urgent_refresh.set()
+                return JSONResponse(
+                    {
+                        "success": False,
+                        "message": "cf_clearance正在由FlareSolverr自动获取，请稍后重试",
+                    },
+                    status_code=503,
+                )
             logger.warning("ANi-Strm中转未配置cf_clearance，请求已拒绝；请过完人机验证后在插件设置填入")
             return JSONResponse(
                 {"success": False, "message": "未配置cf_clearance：请先在浏览器过人机验证后填入"},
@@ -743,34 +823,52 @@ class ANiStrmRelay(_PluginBase):
         ]
         body = await request.body()
 
-        client = _relay_client()
-        try:
-            upstream_request = client.build_request(
-                method=request.method,
-                url=upstream_url,
-                headers=headers,
-                data=body if body else None,
-                params=query if query else None,
-            )
-            resp = await client.send(upstream_request, stream=True)
-        except httpx.HTTPError as err:
-            logger.error(f"ANi-Strm中转上游请求失败：{request.method} {upstream_url} - {err}")
-            return JSONResponse(
-                {"success": False, "message": f"上游请求失败：{err}"},
-                status_code=502,
-            )
+        # POST 是目录列举、GET/HEAD 是媒体文件流：分池出站，被拆掉的连接不殃及另一类请求
+        is_listing = request.method.upper() not in ("GET", "HEAD")
+        # 列举请求体量小、重放安全，被远端拆流后换新连接再来一次；文件流不重放
+        attempts = 2 if is_listing else 1
+        last_err: Optional[Exception] = None
+        for attempt in range(1, attempts + 1):
+            client = _relay_client(control=is_listing)
+            try:
+                upstream_request = client.build_request(
+                    method=request.method,
+                    url=upstream_url,
+                    headers=headers,
+                    data=body if body else None,
+                    params=query if query else None,
+                )
+                resp = await client.send(upstream_request, stream=True)
+            except httpx.HTTPError as err:
+                last_err = err
+                _drop_relay_client(control=is_listing)
+                logger.warning(
+                    f"ANi-Strm中转上游请求失败（第{attempt}次）："
+                    f"{request.method} {upstream_url} - {err}"
+                )
+                continue
 
-        self._rotate_clearance(resp)
-        resp_headers = {
-            key.lower(): value
-            for key, value in resp.headers.items()
-            if key.lower() in RELAY_PASSTHROUGH_RESP_HEADERS
-        }
-        ctype = resp_headers.get("content-type", "")
+            self._rotate_clearance(resp)
+            resp_headers = {
+                key.lower(): value
+                for key, value in resp.headers.items()
+                if key.lower() in RELAY_PASSTHROUGH_RESP_HEADERS
+            }
+            ctype = resp_headers.get("content-type", "")
 
-        try:
             if ctype.startswith(("text/", "application/json")):
-                await resp.aread()
+                try:
+                    await resp.aread()
+                except httpx.HTTPError as err:
+                    # 响应头已到手、正文被 RST_STREAM 半路拆断：这条连接已被远端拆掉，
+                    # 换新连接重放，避免整轮回填跟着一起挂
+                    await resp.aclose()
+                    last_err = err
+                    _drop_relay_client(control=is_listing)
+                    logger.warning(
+                        f"ANi-Strm中转响应被远端拆流（第{attempt}次）：{upstream_url} - {err}"
+                    )
+                    continue
                 head = resp.content[:4096]
                 challenged = any(mark in head for mark in CHALLENGE_MARKS) or (
                     resp.status_code in (403, 429, 503)
@@ -804,26 +902,37 @@ class ANiStrmRelay(_PluginBase):
                     content=resp.content,
                 )
 
-            async def _chunks():
+            async def _chunks(response: httpx.Response = resp, url: str = upstream_url):
                 """
                 按块透传上游字节流；播放器快进/停止提前断开属正常情况。
                 """
                 try:
-                    async for chunk in resp.aiter_raw():
+                    async for chunk in response.aiter_raw():
                         yield chunk
+                except httpx.HTTPError as err:
+                    # 上游中途拆流：记下并摘掉该连接池，后续请求在新连接上重开
+                    logger.warning(f"ANi-Strm中转流式传输中断：{url} - {err}")
+                    _drop_relay_client(control=False)
                 finally:
-                    await resp.aclose()
+                    await response.aclose()
 
             return StreamingResponse(
                 _chunks(), status_code=resp.status_code, headers=resp_headers
             )
-        except httpx.HTTPError as err:
-            await resp.aclose()
-            logger.warning(f"ANi-Strm中转流式传输中断：{upstream_url} - {err}")
-            return JSONResponse(
-                {"success": False, "message": f"流式传输中断：{err}"},
-                status_code=502,
-            )
+
+        logger.error(
+            f"ANi-Strm中转上游回源失败（已重试{attempts}次）："
+            f"{request.method} {upstream_url} - {last_err}"
+        )
+        return JSONResponse(
+            {
+                "success": False,
+                "message": (
+                    f"目录请求失败：{last_err}" if is_listing else f"上游请求失败：{last_err}"
+                ),
+            },
+            status_code=502,
+        )
 
     async def api_relay_selfcheck(self, request: Request):
         """
@@ -842,11 +951,14 @@ class ANiStrmRelay(_PluginBase):
             "cookie_configured": bool(self._cf_clearance),
             "user_agent": self._cf_user_agent,
             "token_configured": bool(self._relay_token),
+            "flaresolverr": self._fs_url,
             "suggested_public_base": suggested_base,
         }
         probe_url = f"{(self._relay_upstream or DEFAULT_UPSTREAM).rstrip('/')}/"
         try:
-            egress_resp = await _relay_client().get("https://ifconfig.co/ip", timeout=10.0)
+            egress_resp = await _relay_client(control=True).get(
+                "https://ifconfig.co/ip", timeout=10.0
+            )
             result["mp_egress_ip"] = egress_resp.text.strip()
         except httpx.HTTPError as err:
             result["mp_egress_ip"] = f"探测失败：{err}"
@@ -1033,8 +1145,8 @@ class ANiStrmRelay(_PluginBase):
                                             "model": "cf_clearance",
                                             "label": "cf_clearance Cookie",
                                             "rows": 2,
-                                            "placeholder": "浏览器过一次人机验证后复制 cf_clearance 的值（不含其它cookie）；配置了下方FlareSolverr后可留空，由续期自动写入",
-                                            "hint": "cf_clearance 与出口IP+User-Agent绑定，绝对有效期约30分钟且不滚动续期；配置 FlareSolverr 地址后由插件自动重新解题续发（含配套UA），无需手工粘贴",
+                                            "placeholder": "可留空：有 FlareSolverr（本插件或系统设置）时由续期自动写入；手工模式则粘贴浏览器过完人机验证后的 cf_clearance 值",
+                                            "hint": "cf_clearance 与出口IP+User-Agent绑定，绝对有效期约30分钟且不滚动续期；有 FlareSolverr 来源时由插件自动重新解题续发（含配套UA），本项可留空",
                                             "persistent-hint": True,
                                         },
                                     }
@@ -1056,8 +1168,8 @@ class ANiStrmRelay(_PluginBase):
                                         "props": {
                                             "model": "fs_url",
                                             "label": "FlareSolverr 地址",
-                                            "placeholder": "http://<FlareSolverr地址>:8191",
-                                            "hint": "填写后 cf_clearance 到期前自动重新解题换新证（约14分钟一次），并同步其浏览器UA；留空则维持手工粘贴+保活模式",
+                                            "placeholder": "留空则自动使用系统设置（站点分组）中的 FlareSolverr",
+                                            "hint": "填写后 cf_clearance 到期前自动重新解题换新证（约12分钟一次），并同步其浏览器UA；本项与系统设置中的 FlareSolverr 地址都留空时，才维持手工粘贴+保活模式",
                                             "persistent-hint": True,
                                         },
                                     }
@@ -1175,8 +1287,8 @@ class ANiStrmRelay(_PluginBase):
                                             "type": "warning",
                                             "variant": "tonal",
                                             "text": "内置CF中转用法：\n"
-                                            "推荐：填好「FlareSolverr 地址」后开启内置CF中转并保存，"
-                                            "cookie 与配套UA由插件自动重新解题续发（约14分钟一换），无需手工粘贴\n"
+                                            "推荐：在MP系统设置中配好 FlareSolverr（本插件「FlareSolverr 地址」留空即自动沿用），"
+                                            "开启内置CF中转并保存，cookie 与配套UA由插件自动重新解题续发（约12分钟一换），全程零粘贴\n"
                                             "手工模式：浏览器（与MP同一出口IP）访问源站过人机验证，复制 cf_clearance 与该浏览器UA填入\n"
                                             "旧 strm 是直链的，勾选「改写已存在strm」保存一次换成中转地址，之后取消勾选\n"
                                             "cookie过期时播放会返回502提示；配置了FlareSolverr会自动换证自愈，未配置时仅需更新cookie，strm文件无需重新生成\n"
@@ -1237,7 +1349,7 @@ class ANiStrmRelay(_PluginBase):
                 "relay_token": self._relay_token,
                 "relay_public_base": self._relay_public_base,
                 "rewrite_existing": self._rewrite_existing,
-                "fs_url": self._fs_url,
+                "fs_url": self._fs_url_explicit,
             }
         )
 

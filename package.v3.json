@@ -1,9 +1,9 @@
 {
   "ANiStrmRelay": {
     "name": "ANi Strm 自用版（CF中转）",
-    "description": "在 honue 版 ANi-Strm 2.5.1 基础上迭代的自用插件：内置 CF 透传中转接口，播放与目录列表统一走插件自身的 API 端点，携带 cf_clearance 与验证时浏览器的 UA 以 HTTP/2 直连 openani 源站，解决源站加人机验证后 strm 无法播放的问题；支持配置 FlareSolverr 自动重新解题续发 cookie（免手贴），已生成的 strm 文件无需重新生成，另支持一键改写存量旧直链。致谢原作者 honue 与 open ANi 字幕组。",
+    "description": "在 honue 版 ANi-Strm 2.5.1 基础上迭代的自用插件：内置 CF 透传中转接口，播放与目录列表统一走插件自身的 API 端点，携带 cf_clearance 与验证时浏览器的 UA 以 HTTP/2 直连 openani 源站，解决源站加人机验证后 strm 无法播放的问题；FlareSolverr 地址自动沿用 MP 系统设置，cookie 与 UA 由插件自动重新解题续发（零粘贴，已生成的 strm 文件无需重新生成），另支持一键改写存量旧直链。致谢原作者 honue 与 open ANi 字幕组。",
     "labels": "媒体库,动漫",
-    "version": "0.3.0",
+    "version": "0.3.1",
     "icon": "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/anistrm.png",
     "author": "JontyLee",
     "repo_url": "https://github.com/JontyLee/MoviePilot-Plugins",
@@ -11,6 +11,7 @@
     "release": true,
     "system_version": ">=3.1.6",
     "history": {
+      "v0.3.1": "零粘贴配置 + 修复中转被 Cloudflare 拆流连带打挂整轮回填。1）「FlareSolverr 地址」留空时自动沿用 MP 系统设置（站点分组 FLARESOLVERR_URL）里的服务地址，配过系统设置就一处不必再填；有自动续期来源时 cf_clearance 与 UA 两个设置项都可留空，不再提示「已贴cookie未填UA」，配置回写只保存你显式填写的地址（系统改地址跟得住，不会被固化值粘住）。2）诊断日志里大量 <StreamReset error_code:1, remote_reset:True>：这是 CF 边缘对复用的 HTTP/2 连接下发 RST_STREAM 把响应正文半路拆断（同一连接上的多条流在同一秒内成组失败，而心跳用的新建连接始终 200），媒体流被播放器快进/停止打断也会牵连同池的目录列举——10-29 凌晨全季回填 304 次里 248 次落在这状态，每个季度都是「文件数=0」。现媒体文件流与目录列举分池出站，控制面响应被拆流时摘掉该连接池并在新连接上重放一次，播放流中途被拆同样摘池，后续请求不再复用已被拆掉的连接；未取到凭证但存在 FlareSolverr 来源时中转返回 503「正在自动获取」并催一拍换证。3）续期节奏与凭证时间戳：到点检查只跑在5分钟一拍的心跳上且实测会被探活阻塞推迟（14分钟配置出现过29分钟实际间隔，逼近30分钟绝对有效期），周期收紧到12分钟留出一拍余量；cf_clearance 内嵌签发时间戳的位数/分隔会随 CF 版本变化，解析退化到任意一段落在 2023~2033 年范围内的十位数字，两处都解析不到时按本次捕获时刻记账，防止时间戳退化成 0 后被旧配置快照顶掉新证。4）关于系统里另一个浏览器仿真工具 CloakBrowser：本机实测 cloakbrowser 0.5.8（free tier，headless，humanize 开/关各跑 60~75 秒）停留在 Just a moment 403 且不下发 cf_clearance，无法作为凭证来源，故自动续期只对接 FlareSolverr（其常驻 profile 实测可过该域托管挑战）。",
       "v0.3.0": "FlareSolverr 自动续期（根治 cf_clearance 约30分钟绝对到期、本域不滚动续发导致的手贴疲劳）：实测 FlareSolverr 常驻浏览器可稳定通过该域托管挑战并回传新 cf_clearance，插件新增「FlareSolverr 地址」设置项，保活心跳线程兼任续期编排——加载首拍即换证、约14分钟周期主动换新证、中转回源命中挑战页立即急换，凭证与配套UA成对热替换并即时持久化（UA 会从你手贴的浏览器UA变成 FlareSolverr 浏览器UA，属正常）。配置了 FlareSolverr 时心跳失败不再直接停用中转，只有 FlareSolverr 也取不到证才停机通知；cookie 输入框可留空。未填 FlareSolverr 地址则维持 0.2.1 的手贴+保活行为不变。",
       "v0.2.1": "保活心跳间隔从12分钟收紧到5分钟：cf_clearance 绝对有效期约30分钟，12分钟节奏下两次心跳之间撞上 CF 会话到期窗口的概率偏高，5分钟可在过期前多刷两轮滚动续期。",
       "v0.2.0": "保存即自动运行：去掉「立即运行一次」开关，保存配置（或插件加载）后自动探活验活并补齐一次 strm，流程不再需要二次点击。加载后15秒即执行首次保活心跳（重启/重载后立即验活，不等整间隔）；enabled 且中转开启时启动补齐延迟45秒，避开首拍心跳。若进程内已持有比配置快照更新的滚动 cf_clearance（按 token 内时间戳判定），加载时优先采用内存凭证，重载不再被旧配置快照顶掉。",
