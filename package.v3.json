@@ -1,9 +1,9 @@
 {
   "ANiStrmRelay": {
     "name": "ANi Strm 自用版（CF中转）",
-    "description": "在 honue 版 ANi-Strm 2.5.1 基础上迭代的自用插件：内置 CF 透传中转接口，播放与目录列表统一走插件自身的 API 端点，携带 cf_clearance 与验证时浏览器的 UA 以 HTTP/2 直连 openani 源站，解决源站加人机验证后 strm 无法播放的问题；FlareSolverr 地址自动沿用 MP 系统设置，cookie 与 UA 由插件自动重新解题续发（零粘贴，已生成的 strm 文件无需重新生成），另支持一键改写存量旧直链。致谢原作者 honue 与 open ANi 字幕组。",
+    "description": "在 honue 版 ANi-Strm 2.5.1 基础上迭代的自用插件：内置 CF 透传中转接口，播放与目录列表统一走插件自身的 API 端点，携带 cf_clearance 与解题浏览器 UA 以 HTTP/2 直连 openani 源站，解决源站加人机验证后 strm 无法播放的问题；cf_clearance 与 UA 全部由 FlareSolverr 现场解题成对提供（手工填写项已移除，零粘贴），FlareSolverr 地址留空时自动沿用 MP 系统设置，两处都没地址时插件与中转都不启用。另支持一键改写存量旧直链。致谢原作者 honue 与 open ANi 字幕组。",
     "labels": "媒体库,动漫",
-    "version": "0.3.1",
+    "version": "0.3.2",
     "icon": "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/anistrm.png",
     "author": "JontyLee",
     "repo_url": "https://github.com/JontyLee/MoviePilot-Plugins",
@@ -11,6 +11,7 @@
     "release": true,
     "system_version": ">=3.1.6",
     "history": {
+      "v0.3.2": "配置面彻底零粘贴 + 把「新证被CF临时拦」与「换证失败」分开处理。1）移除「cf_clearance」与「验证时的浏览器UA」两个设置项：CF 凭证在本域约30分钟绝对到期且不滚动续发，手贴撑不住持续播放，插件不再有手工入口，所有提示也不再教你贴 cookie；凭证与配套UA只从 FlareSolverr 解题结果成对取值，UA 一并进进程级记忆，配置整对象替换丢掉 cf_user_agent 时沿用同一次解题的UA而不是退回内置默认UA（新证配旧UA会立刻被重新校验）。2）没有 FlareSolverr 来源（本插件「FlareSolverr 地址」与 MP 系统设置·站点分组的 FLARESOLVERR_URL 都为空）时，插件与内置中转一律不启用：不注册任何任务、把开关状态如实写回配置并在中转处返回原因——带着必然过期的死证上线只会把源站打成整轮人机挑战。3）10-30 00:38 实测：心跳开头刚取到新证、5秒后探活仍被判挑战页，同一时间窗内中转侧354次请求成片命中挑战页，随后 FlareSolverr 自己也 140 秒解题超时，而 00:46 用同一张证探活已恢复 200 —— 这是 CF 对该出口IP的短时风控升级（并发播放+目录列举的请求压力触发），不是刚换的证坏了；旧逻辑把它当成换证失败，会在同一拍里再烧一次140秒解题并把还能用的证顶掉，连续两次即停机。现改为同拍已换过证就不再二次解题、按3分钟间隔重探，连续6次（约18分钟）仍被拦才停用中转并通知；中转命中挑战页的告警1分钟内只打一条，不再被数百条重复日志淹没。4）插件注销时调度器 shutdown(wait=False)：FlareSolverr 解题线程最长阻塞3分钟，等待在跑任务会让插件重载/禁用一直卡到解题结束，这是「保存配置后长时间无响应」的一类成因。5）回源失败日志「已重试N次」改为「共尝试N次」，文件流不重放时不再谎称重试。",
       "v0.3.1": "零粘贴配置 + 修复中转被 Cloudflare 拆流连带打挂整轮回填。1）「FlareSolverr 地址」留空时自动沿用 MP 系统设置（站点分组 FLARESOLVERR_URL）里的服务地址，配过系统设置就一处不必再填；有自动续期来源时 cf_clearance 与 UA 两个设置项都可留空，不再提示「已贴cookie未填UA」，配置回写只保存你显式填写的地址（系统改地址跟得住，不会被固化值粘住）。2）诊断日志里大量 <StreamReset error_code:1, remote_reset:True>：这是 CF 边缘对复用的 HTTP/2 连接下发 RST_STREAM 把响应正文半路拆断（同一连接上的多条流在同一秒内成组失败，而心跳用的新建连接始终 200），媒体流被播放器快进/停止打断也会牵连同池的目录列举——10-29 凌晨全季回填 304 次里 248 次落在这状态，每个季度都是「文件数=0」。现媒体文件流与目录列举分池出站，控制面响应被拆流时摘掉该连接池并在新连接上重放一次，播放流中途被拆同样摘池，后续请求不再复用已被拆掉的连接；未取到凭证但存在 FlareSolverr 来源时中转返回 503「正在自动获取」并催一拍换证。3）续期节奏与凭证时间戳：到点检查只跑在5分钟一拍的心跳上且实测会被探活阻塞推迟（14分钟配置出现过29分钟实际间隔，逼近30分钟绝对有效期），周期收紧到12分钟留出一拍余量；cf_clearance 内嵌签发时间戳的位数/分隔会随 CF 版本变化，解析退化到任意一段落在 2023~2033 年范围内的十位数字，两处都解析不到时按本次捕获时刻记账，防止时间戳退化成 0 后被旧配置快照顶掉新证。4）关于系统里另一个浏览器仿真工具 CloakBrowser：本机实测 cloakbrowser 0.5.8（free tier，headless，humanize 开/关各跑 60~75 秒）停留在 Just a moment 403 且不下发 cf_clearance，无法作为凭证来源，故自动续期只对接 FlareSolverr（其常驻 profile 实测可过该域托管挑战）。",
       "v0.3.0": "FlareSolverr 自动续期（根治 cf_clearance 约30分钟绝对到期、本域不滚动续发导致的手贴疲劳）：实测 FlareSolverr 常驻浏览器可稳定通过该域托管挑战并回传新 cf_clearance，插件新增「FlareSolverr 地址」设置项，保活心跳线程兼任续期编排——加载首拍即换证、约14分钟周期主动换新证、中转回源命中挑战页立即急换，凭证与配套UA成对热替换并即时持久化（UA 会从你手贴的浏览器UA变成 FlareSolverr 浏览器UA，属正常）。配置了 FlareSolverr 时心跳失败不再直接停用中转，只有 FlareSolverr 也取不到证才停机通知；cookie 输入框可留空。未填 FlareSolverr 地址则维持 0.2.1 的手贴+保活行为不变。",
       "v0.2.1": "保活心跳间隔从12分钟收紧到5分钟：cf_clearance 绝对有效期约30分钟，12分钟节奏下两次心跳之间撞上 CF 会话到期窗口的概率偏高，5分钟可在过期前多刷两轮滚动续期。",
