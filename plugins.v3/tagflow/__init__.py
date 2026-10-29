@@ -24,6 +24,9 @@ MusicBrainz，构造与解析在 sources.py）：不需要额外部署服务，�
   在平台侧就是一台机器的手感，最先被风控掐的总是排在最前的那一个源。
 - 写标签不可回滚，所以 min_score 在服务端收敛到 1-3、路径必须落在库内、宁可不匹配也不猜身份
   （目录兜底猜不出来就留空，让它判「未达阈值」）。
+- 手工补封面与写文本是两条路：文本按字段走 mutagen，封面要「先取图、再按容器内嵌」。所以图
+  先取到手才动文件（取不到就一个字不写，别留「标签改了、封面没来」的半截状态），成功失败
+  单列一个键回报，地址也不混进 fields —— 那一层是文本标签名单。
 - 扫描只有一个入口：周期任务、/scan、/retry、「立即运行一次」都走带互斥的 guarded 入口。两本账
   并发读写，后写完的会把先写的整本盖掉。
 - 单个文件崩掉不能带走整轮：宿主 ScrapingChain 外面包了一层，异常既不记成功也不记失败，
@@ -616,6 +619,72 @@ def _edit_payload_fields(raw: Any) -> Tuple[Dict[str, str], bool]:
     return out, False
 
 
+# 手工补封面只接受平台图片地址：宿主那条下载会限尺寸、判是不是图，插件这一层只收形状。
+_COVER_URL_SCHEMES = ("http://", "https://")
+_COVER_URL_MAX = 1024
+
+
+def _edit_cover_url(raw: Any) -> Tuple[Optional[str], bool]:
+    """封面地址收口：空值按「这轮不动封面」，不合法整体拒收。
+
+    与文本字段同一条规矩：静默丢掉一项比拒收更容易把人误导到「点了保存就该好了」。
+    不接受 data: 之类内联字节 —— 那是把任意大小的载荷从接口塞进文件。
+    """
+    if raw is None:
+        return None, False
+    if not isinstance(raw, str):
+        return None, True
+    text = raw.strip()
+    if not text:
+        return None, False
+    if len(text) > _COVER_URL_MAX or not text.lower().startswith(_COVER_URL_SCHEMES):
+        return None, True
+    return text, False
+
+
+def _fetch_cover(url: str) -> Tuple[Optional[Tuple[bytes, str]], str]:
+    """取封面字节，交宿主的封面下载（它管限尺寸与判型）。
+
+    宿主没有这个方法时不另起一份下载：宁可回一句「这版宿主取不了图」，也不要在插件里
+    养第二套下载与判型口径 —— 两处口径不一样，界面上就会一处能补一处不能补。
+    """
+    fetch = getattr(_MusicScrapeChain, "_download_music_cover", None)
+    if not callable(fetch):
+        return None, "unsupported"
+    try:
+        data, mime = fetch(url)
+    except Exception as err:
+        logger.warning(f"[music-scraper] 取封面失败：{err}")
+        return None, "unavailable"
+    if not data:
+        return None, "unavailable"
+    return (data, str(mime or "image/jpeg")), ""
+
+
+def _embed_cover(path: Path, data: bytes, mime: str) -> bool:
+    """把封面内嵌进文件：走宿主那条写入链路，容器差异（APIC/covr/WM/Picture/pictures）归它管。
+
+    write_tags=False 让它只动图片不碰文本；cover_overwrite=True 是人的意图 ——
+    在这页填新地址就是要换掉现有封面，不是「已经有了就跳过」。
+    """
+    try:
+        from app.application.audio import AudioMetadataHelper
+    except Exception:  # pragma: no cover - 视宿主版本而定
+        return False
+    try:
+        return bool(AudioMetadataHelper.write(
+            path,
+            AudioMetadataHelper.read(path),
+            cover_data=data,
+            cover_mime=mime,
+            write_tags=False,
+            cover_overwrite=True,
+        ))
+    except Exception as err:
+        logger.warning(f"[music-scraper] 内嵌封面失败：{path.name} - {err}")
+        return False
+
+
 def _write_music_tags(path: Path, fields: Dict[str, str]) -> bool:
     """按用户明确给出的字段写 tag，只改传入的字段，绝不碰封面。
 
@@ -787,7 +856,7 @@ class TagFlow(_PluginBase):
         "侧栏「整理」下常驻数据页，失败与有缺项逐文件可查可补。"
     )
     plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/tagflow.svg"
-    plugin_version = "0.12.0"
+    plugin_version = "0.13.0"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "musiclibraryscraper_"
@@ -1268,7 +1337,11 @@ class TagFlow(_PluginBase):
         }
 
     async def api_edit(self, request: Request) -> Dict[str, Any]:
-        """POST /edit —— body {path:"...",fields:{...}} 单项编辑库内文件的元数据。"""
+        """POST /edit —— body {path:"...",fields:{...},cover_url?:"..."} 单项编辑库内文件的元数据。
+
+        封面是这条接口里唯一不是「写文本标签」的一项：文本走 mutagen，封面要先取图再按
+        容器内嵌，所以它单独立一个键，成功失败也单独回报，不混进 updated 里。
+        """
         try:
             body = await request.json()
         except Exception:
@@ -1281,12 +1354,23 @@ class TagFlow(_PluginBase):
         if not self._is_library_path(path):
             return {"accepted": False, "reason": "out_of_library"}
         fields, invalid = _edit_payload_fields(body.get("fields"))
-        if invalid or not fields:
+        cover_url, cover_invalid = _edit_cover_url(body.get("cover_url"))
+        if invalid or cover_invalid or (not fields and not cover_url):
             return {"accepted": False, "reason": "invalid_fields"}
         target = Path(path)
+        # 图先取到手再动文件：取不到就一个字都不写。反过来做会留下「标签改了、封面没来」
+        # 这种半截状态，而它在账本上和全成功长得一模一样。
+        cover: Optional[Tuple[bytes, str]] = None
+        if cover_url:
+            cover, why = _fetch_cover(cover_url)
+            if cover is None:
+                return {"accepted": False, "reason": f"cover_{why}"}
         before = _read_music_tags(target)
-        if not _write_music_tags(target, fields):
+        if fields and not _write_music_tags(target, fields):
             return {"accepted": False, "reason": "write_failed"}
+        cover_written = False
+        if cover:
+            cover_written = _embed_cover(target, cover[0], cover[1])
         # 手工补齐也算本插件改写：不记进 done 的话，在这页改过的文件和库里的其它文件
         # 混在一起，"我动过哪几个"就找不回来了。差集按文件现状算，宿主或别的程序同时
         # 改过的字段会一起显出来，比照抄提交上来的字段诚实。
@@ -1328,7 +1412,11 @@ class TagFlow(_PluginBase):
         # tag 刚被改过，两份缓存必须作废：否则缺陷清单还会按编辑前的状态报缺项。
         self.__dict__["_pending_cache"] = None
         self.__dict__["_deficient_cache"] = None
-        return {"accepted": True, "updated": sorted(fields)}
+        out: Dict[str, Any] = {"accepted": True, "updated": sorted(fields)}
+        if cover_url:
+            # 单独回报封面：文本写成功、内嵌失败是一半成功，不能说「已写入 N 项」就完事
+            out["cover"] = "ok" if cover_written else "failed"
+        return out
 
     def _candidates_lock(self) -> threading.Lock:
         """候选短存的锁：init_plugin 重跑不会换掉它（与扫描锁同一条路）。"""
@@ -1401,6 +1489,11 @@ class TagFlow(_PluginBase):
                     and _is_persistable_lyric(lyric_value):
                 full_fields["lyrics"] = lyric_value
             brief["fields"] = {key: value for key, value in full_fields.items() if value}
+            # 封面另给一条地址：它不是文本标签，不进 fields（进了就会被当字段写进标签），
+            # 由人在弹层里点名「采纳封面」，走 /edit 的下载内嵌那条路。
+            cover_url = _candidate_cover_url(c)
+            if cover_url:
+                brief["cover_url"] = cover_url[:600]
             source = brief["source"] or "unknown"
             current = grouped.get(source)
             if current is None or score > int(current.get("score") or 0):
@@ -2335,6 +2428,9 @@ class TagFlow(_PluginBase):
             "tracknumber": str(c.get("tracknumber") or "").strip()[:16],
             "hits": hits or {},
             "has_lyric": bool(_candidate_has_lyric(c)),
+            # 封面只记「这条有没有」：地址是几十到几百字的 URL，整本失败账是单行 JSON，
+            # 把它存进账本等于给每条失败都添一条长值。人工补封面用的是现问回来的候选。
+            "has_cover": bool(_candidate_cover_url(c)),
         }
 
     # ---------------- 查询辅助（供 status/files） ----------------

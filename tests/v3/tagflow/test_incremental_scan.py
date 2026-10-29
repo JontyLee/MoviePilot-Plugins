@@ -1042,17 +1042,43 @@ class ContractTest(unittest.TestCase):
         """
         page = (Path(mls.__file__).parent / "frontend" / "src" / "components" / "Page.vue"
                 ).read_text(encoding="utf-8")
-        headers = page.split(":headers=\"[", 1)[1].split("]\"", 1)[0]
-        cols = re.findall(r"\{[^{}]+\}", headers)
-        self.assertGreaterEqual(len(cols), 6)
+        # 表头是随桶走的 computed（tableHeaders），不再是一串写死的列 —— 断言改读那一段：
+        # 每一列都得显式 sortable: false，漏一列就是给眼前这一页装了个假排序箭头
+        block = page.split("const tableHeaders = computed", 1)[1].split("\n})", 1)[0]
+        cols = re.findall(r"\{ title: [^\n]+\}", block)
+        self.assertGreaterEqual(len(cols), 5)
         for col in cols:
             self.assertIn("sortable: false", col, col)
+        self.assertIn(':headers="tableHeaders"', page)
 
         # 服务端确实只有那两种固定顺序（done 改写优先、其余按路径）——改动这里时，
         # 上面那条要一起重看
         src = Path(mls.__file__).read_text(encoding="utf-8")
         self.assertIn('rows.sort(key=lambda r: r["path"])', src)
         self.assertIn('rows.sort(key=lambda r: 0 if r.get("set") else 1)', src)
+
+    def test_data_page_columns_match_the_bucket(self):
+        """列必须跟着桶走：写着「原因/分数」的那一栏在有缺项页印的是缺哪几项，就是骗人。
+
+        三条都被真实使用里挑出来过：
+        1) 分桶按状态分，一个桶里每行状态相同 —— 「状态」列是把桶名重印一遍；
+        2) retries 只在失败账里有值，其余三桶留着就是一列空白，看着像坏了的列；
+        3) 详情没有按钮是对的：整行本来就是入口，操作列再放一个只是占宽 —— 但要留一句
+           「点任意一行看详情」，否则这条操作方式从界面上消失了。
+        """
+        page = (Path(mls.__file__).parent / "frontend" / "src" / "components" / "Page.vue"
+                ).read_text(encoding="utf-8")
+        block = page.split("const tableHeaders = computed", 1)[1].split("\n})", 1)[0]
+        self.assertNotIn("'状态'", block)
+        self.assertIn("if (bucket.value === 'failed')", block)
+        # 中间那栏按桶换名，待处理桶没有可说的内容就不给这一列
+        titles = page.split("const REASON_TITLE", 1)[1].split("}\n", 1)[0]
+        for phrase in ("原因/分数", "还缺哪几项", "写入来源", "pending: ''"):
+            self.assertIn(phrase, titles)
+        self.assertIn("点任意一行看详情", page)
+        # 表里的详情按钮只有一个来源：整行点击。openDetail 不该再出现在操作列
+        self.assertEqual(page.count("openDetail(item)"), 1)
+        self.assertIn("if (item?.path) openDetail(item)", page)
 
     def test_config_page_explains_choices(self):
         """判据自足在原生表单，Vue 配置页只留最短提示 + 指向 docs —— 两边各有各的活。
@@ -2702,6 +2728,112 @@ class RewriteLedgerTest(unittest.TestCase):
         # 半写入状态不能说成"改过了"：账本一个字都不动
         self.assertIsNone(p.get_data("done"))
 
+    # ---------------- 手工补封面 ----------------
+
+    def _cover_target(self):
+        tmp = Path(tempfile.mkdtemp())
+        fp = tmp / "a.mp3"
+        fp.write_bytes(b"x" * 100)
+        p = mls.TagFlow()
+        p._is_library_path = lambda path: True
+        return p, fp
+
+    def test_manual_cover_fetches_before_touching_the_file(self):
+        """封面先取到手再动文件：顺序反了就会留下「标签写了、封面没来」的半截状态。"""
+        p, fp = self._cover_target()
+        calls = []
+
+        def fake_fetch(url):
+            calls.append(("fetch", url))
+            return (b"\xff\xd8jpeg", "image/jpeg"), ""
+
+        def fake_embed(path, data, mime):
+            calls.append(("embed", mime))
+            return True
+
+        reads = [self._tags(),
+                 self._tags(year="2003", has_cover=True),
+                 self._tags(year="2003", has_cover=True)]
+        with self._patched(
+                _read_music_tags=lambda path, with_lyrics_text=False: reads.pop(0),
+                _write_music_tags=lambda path, fields: calls.append(("tags",)) or True,
+                _fetch_cover=fake_fetch,
+                _embed_cover=fake_embed):
+            res = asyncio.run(p.api_edit(self._body({
+                "path": str(fp), "fields": {"year": "2003"},
+                "cover_url": "https://p1.music.126.net/x/1.jpg"})))
+        self.assertEqual([c[0] for c in calls], ["fetch", "tags", "embed"])
+        self.assertEqual(calls[0][1], "https://p1.music.126.net/x/1.jpg")
+        self.assertEqual(calls[2][1], "image/jpeg")
+        self.assertEqual(res["cover"], "ok")
+        entry = p.get_data("done")[str(fp)]
+        # 封面进差集：这一项是真被本插件动过的，数据页「改写 N 项」要数上它
+        self.assertEqual(entry["set"]["year"], ["", "2003"])
+        self.assertEqual(entry["set"]["cover"], ["无", "有"])
+        # 补上了就不该再留在缺项清单里 —— 「有缺项」桶与徽标都读这一笔
+        self.assertNotIn("cover", entry["missing"])
+
+    def test_cover_only_submission_is_valid(self):
+        """只填封面、一个文本字段都不改也是有效提交：以前这是「字段不合法或为空」。"""
+        p, fp = self._cover_target()
+        reads = [self._tags(), self._tags(has_cover=True), self._tags(has_cover=True)]
+        with self._patched(
+                _read_music_tags=lambda path, with_lyrics_text=False: reads.pop(0),
+                _fetch_cover=lambda url: ((b"\xff\xd8jpeg", "image/jpeg"), ""),
+                _embed_cover=lambda path, data, mime: True):
+            res = asyncio.run(p.api_edit(self._body({
+                "path": str(fp), "fields": {}, "cover_url": "https://x/1.jpg"})))
+        self.assertTrue(res["accepted"])
+        self.assertEqual(res["updated"], [])
+        self.assertEqual(res["cover"], "ok")
+        self.assertEqual(p.get_data("done")[str(fp)]["set"], {"cover": ["无", "有"]})
+
+    def test_unfetchable_cover_writes_nothing_at_all(self):
+        """取不到图（或被平台挡了）就整笔退回：不写标签、不落账，也不报「已写入」。"""
+        p, fp = self._cover_target()
+        writes = []
+        with self._patched(
+                _read_music_tags=lambda path, with_lyrics_text=False: self._tags(),
+                _write_music_tags=lambda path, fields: writes.append(fields) or True,
+                _fetch_cover=lambda url: (None, "unavailable")):
+            res = asyncio.run(p.api_edit(self._body({
+                "path": str(fp), "fields": {"year": "2003"},
+                "cover_url": "https://expired/1.jpg"})))
+        self.assertFalse(res["accepted"])
+        self.assertEqual(res["reason"], "cover_unavailable")
+        self.assertEqual(writes, [])
+        self.assertIsNone(p.get_data("done"))
+
+    def test_embed_failure_is_reported_separately(self):
+        """文本写成功、内嵌失败是半件事，要单列一个键说清，不能混进「已写入 N 项」。"""
+        p, fp = self._cover_target()
+        reads = [self._tags(album="The Line-Up"),
+                 self._tags(album="The Line-Up", year="2003"),
+                 self._tags(album="The Line-Up", year="2003")]
+        with self._patched(
+                _read_music_tags=lambda path, with_lyrics_text=False: reads.pop(0),
+                _write_music_tags=lambda path, fields: True,
+                _fetch_cover=lambda url: ((b"\xff\xd8jpeg", "image/jpeg"), ""),
+                _embed_cover=lambda path, data, mime: False):
+            res = asyncio.run(p.api_edit(self._body({
+                "path": str(fp), "fields": {"year": "2003"},
+                "cover_url": "https://x/1.jpg"})))
+        self.assertTrue(res["accepted"])
+        self.assertEqual(res["cover"], "failed")
+        self.assertEqual(p.get_data("done")[str(fp)]["missing"],
+                         ["tracknumber", "cover", "lyrics"])
+
+    def test_cover_url_shape(self):
+        """地址只认 http(s)、限长度：data: 内联是把任意载荷从接口塞进文件。"""
+        ok, bad = mls._edit_cover_url("  https://x/1.jpg ")
+        self.assertEqual(ok, "https://x/1.jpg")
+        self.assertFalse(bad)
+        self.assertEqual(mls._edit_cover_url(""), (None, False))
+        self.assertEqual(mls._edit_cover_url(None), (None, False))
+        for raw in ("ftp://x/1.jpg", "javascript:alert(1)", "data:image/png;base64,AA",
+                    "x" * 1200, ["https://x/1.jpg"]):
+            self.assertEqual(mls._edit_cover_url(raw), (None, True), raw)
+
     def test_data_page_wires_the_rewrite_ledger(self):
         """界面契约三条：改写优先能筛、点开看得见差集、编辑弹层先回填再只提交改动。
 
@@ -2965,6 +3097,56 @@ class V010LedgerTest(unittest.TestCase):
         self.assertEqual(fields["tracknumber"], "7/12")
         self.assertEqual(fields["lyrics"], "[00:01.00]完整歌词文本")
         self.assertEqual(fields["title"], "黑面")
+
+    def test_api_candidates_carry_their_cover_url(self) -> None:
+        """「采纳封面」要有东西可填：候选得把封面地址带回来。
+
+        地址刻意不进 fields —— 那一层是文本标签名单，URL 混进去就会被当成曲名那类值
+        写进标签；它单独立一个键，走 /edit 的下载内嵌那条路。
+        """
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "陈奕迅" / "The Line-Up (2003)").mkdir(parents=True)
+        fp = tmp / "陈奕迅" / "The Line-Up (2003)" / "01 - 黑面.flac"
+        fp.write_bytes(b"x" * 100)
+        p = mls.TagFlow()
+        p._min_score = 3
+        p._scraper_paths = str(tmp)
+        p._active_resources = ["netease", "musicbrainz"]
+        p._is_library_path = lambda path: True
+        cands = [
+            {"resource": "netease", "name": "黑面", "artist": "陈奕迅",
+             "album": "The Line-Up", "year": "2003",
+             "album_img": "https://p1.music.126.net/x/1.jpg"},
+            {"resource": "musicbrainz", "name": "黑面", "artist": "陈奕迅",
+             "album": "The Line-Up", "year": "2003"},
+        ]
+        orig_fetch = mls.TagFlow._fetch_candidates
+        mls.TagFlow._fetch_candidates = lambda self, path, identity=None, spread=None: (cands, None)
+        try:
+            res = p.api_candidates(self._req({"path": str(fp)}))
+        finally:
+            mls.TagFlow._fetch_candidates = orig_fetch
+        with_cover, without_cover = res["candidates"]
+        self.assertEqual(with_cover["cover_url"], "https://p1.music.126.net/x/1.jpg")
+        self.assertTrue(with_cover["has_cover"])
+        self.assertNotIn("cover", with_cover["fields"])
+        self.assertNotIn("cover_url", without_cover)
+        self.assertFalse(without_cover["has_cover"])
+
+    def test_data_page_wires_the_cover_editor(self):
+        """封面从「这里补不了」变成能动手的一栏：前后端任一段没接上，功能就等于没上。"""
+        page = (Path(mls.__file__).parent / "frontend" / "src" / "components" / "Page.vue"
+                ).read_text(encoding="utf-8")
+        self.assertNotIn("缺封面这里补不了", page)
+        for phrase in ("v-model=\"editCoverUrl\"", "cover_url: cover", "adoptCover",
+                       "candidateCover(cand)", "cover_unavailable", "cover_unsupported",
+                       "res.cover === 'failed'", "!editChanged.length && !editCoverUrl.trim()"):
+            self.assertIn(phrase, page)
+        # 封面不进文本字段名单：混进去的话一次保存会把图片地址写成一条标签
+        self.assertIn("ADOPT_FIELDS = ['title', 'artist', 'album', 'year', 'tracknumber', 'lyrics']",
+                      page)
+        # 地址只在真的填了时才发出去：空串会被后端判成「这轮不动封面」，但前端不该多带一个键
+        self.assertIn("...(cover ? { cover_url: cover } : {})", page)
 
     def test_candidates_are_asked_in_parallel_and_short_cached(self) -> None:
         """问源一条路：全部源并行发，墙钟≈最慢的那个源而不是四个圈之和。

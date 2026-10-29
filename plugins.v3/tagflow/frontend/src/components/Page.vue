@@ -62,23 +62,12 @@ const pageText = computed(() => {
   return `第 ${from}–${to} 条 / 共 ${total.value} 条`
 })
 
-const STATUS_TEXT: Record<string, string> = {
-  done: '已处理',
-  failed: '失败',
-  pending: '待处理',
-  deficient: '有缺项'
-}
-
 const SOURCE_TEXT: Record<string, string> = {
   netease: '网易云',
   qmusic: 'QQ 音乐',
   kugou: '酷狗',
   migu: '咪咕',
   musicbrainz: 'MusicBrainz'
-}
-
-function statusText(value: string) {
-  return STATUS_TEXT[value] || value
 }
 
 function sourceText(value: string) {
@@ -302,6 +291,9 @@ const editBase = ref<Record<string, string>>({})
 const editMissing = ref<string[]>([])
 const editHasCover = ref(true)
 const editLyricsFrom = ref('')
+// 封面不进 editForm：editForm 的每一项都会被当成文本标签提交，而封面是「取图 + 内嵌」，
+// 后端走的是另一个键。混在一起的话，粘贴一张图就等于往 TIT2 里写一条 URL。
+const editCoverUrl = ref('')
 
 // 只提交真正动过的项：把整表原样发回去会写一堆和文件里一模一样的值，看着像保存成功，
 // 实际是把人自己填的内容又盖了一遍（宿主还会因此认为这个文件被改过）。
@@ -319,6 +311,7 @@ async function openEdit(row: any) {
   editMissing.value = (row.missing || []) as string[]
   editHasCover.value = !editMissing.value.includes('cover')
   editLyricsFrom.value = ''
+  editCoverUrl.value = ''
   editCandidates.value = []
   editHistory.value = null
   editCandidateError.value = ''
@@ -404,6 +397,26 @@ function adoptCount(cand: any): number {
     .length
 }
 
+// 封面不进 ADOPT_FIELDS：那是文本标签的名单，采纳封面只是把一个地址填进表单，
+// 真把图嵌进文件要等点「保存」。历史最佳那条只有摘要、没有地址，所以它没有这个按钮。
+function candidateCover(cand: any): string {
+  return String(cand?.cover_url || '').trim()
+}
+
+function adoptCover(cand: any) {
+  const url = candidateCover(cand)
+  if (!url) {
+    notify('这条候选没给出封面地址', 'warning')
+    return
+  }
+  if (url === editCoverUrl.value) {
+    notify('封面地址已经填过了', 'warning')
+    return
+  }
+  editCoverUrl.value = url
+  notify('封面地址已填入，点「保存」才下载到文件里', 'success')
+}
+
 // keys 省略 = 全部非空项；候选详情弹窗按勾选传，写哪些由人点名，不自动决定
 function adoptCandidate(cand: any, keys?: string[]) {
   const fields = candidateFields(cand)
@@ -456,7 +469,8 @@ async function submitEdit() {
   for (const key of editChanged.value) {
     fields[key] = String((editForm.value as any)[key] ?? '').trim()
   }
-  if (!Object.keys(fields).length) {
+  const cover = String(editCoverUrl.value || '').trim()
+  if (!Object.keys(fields).length && !cover) {
     notify('没有需要写入的改动', 'warning')
     return
   }
@@ -464,10 +478,16 @@ async function submitEdit() {
   try {
     const res = await (props.api as MoviePilotApi).post(`${base.value}/edit`, {
       path: editRow.value.path,
-      fields
+      fields,
+      ...(cover ? { cover_url: cover } : {})
     })
     if (res?.accepted) {
-      notify(`已写入 ${Object.keys(fields).length} 项`, 'success')
+      const n = Object.keys(fields).length
+      // 封面单独说一句：文本写成功、图没嵌进去是半件事，混成「已写入 N 项」就是谎报
+      const coverText = res.cover === 'ok' ? '，封面已内嵌'
+          : res.cover === 'failed' ? '，但封面内嵌失败（检查文件是否可写，或换一个地址）' : ''
+      notify(`${n ? `已写入 ${n} 项` : '封面已提交'}${coverText}`,
+             res.cover === 'failed' ? 'warning' : 'success')
       editDialog.value = false
       await refresh()
     } else if (res?.reason === 'out_of_library') {
@@ -478,6 +498,10 @@ async function submitEdit() {
       notify('写标签失败，检查文件权限', 'error')
     } else if (res?.reason === 'no_path') {
       notify('缺少文件路径', 'warning')
+    } else if (res?.reason === 'cover_unavailable') {
+      notify('取不到这张图：地址可能失效，或被平台挡了 —— 什么都没写入', 'warning')
+    } else if (res?.reason === 'cover_unsupported') {
+      notify('当前主程序没有封面下载接口，补不了封面 —— 什么都没写入', 'warning')
     } else {
       notify('保存失败', 'error')
     }
@@ -608,6 +632,32 @@ const sourceNames = computed(() =>
 const stages = computed(() => stageCounts(runs.value))
 
 const activeBucket = computed(() => buckets.find(b => b.key === bucket.value))
+
+// 表头随桶走，三条理由各是一条踩过的坑：
+// 1) 分桶就是按状态分的，一个桶里每行的状态都相同 —— 「状态」列等于把桶名重印一遍；
+// 2) retries 只有失败账里有值，其余桶留着就是一列空白，看着像坏了的列；
+// 3) 中间那一栏在失败桶是失败原因加分数、在缺项桶是还缺哪几项、在已处理桶是写入来源，
+//    列名跟着内容改；一路叫「原因/分数」就是有缺项那页在骗人。
+const REASON_TITLE: Record<Bucket, string> = {
+  done: '写入来源',
+  failed: '原因/分数',
+  pending: '',
+  deficient: '还缺哪几项'
+}
+
+const tableHeaders = computed(() => {
+  const cols: any[] = [{ title: '文件名', key: 'name', sortable: false }]
+  if (REASON_TITLE[bucket.value]) {
+    cols.push({ title: REASON_TITLE[bucket.value], key: 'reason', sortable: false })
+  }
+  if (bucket.value === 'failed') {
+    cols.push({ title: '重试', key: 'retries', width: 90, sortable: false })
+  }
+  cols.push({ title: '大小', key: 'size', width: 90, sortable: false })
+  cols.push({ title: '修改时间', key: 'mtime', width: 180, sortable: false })
+  cols.push({ title: '操作', key: 'actions', sortable: false, width: 120 })
+  return cols
+})
 
 onMounted(() => {
   // 侧栏版式比宿主默认的 60rem 宽得多，宽度由宿主的数据框按这个事件设置
@@ -787,7 +837,7 @@ onMounted(() => {
           <div class="d-flex align-center flex-wrap gap-2 mb-2">
             <div>
               <div class="text-subtitle-2">{{ activeBucket?.label }}</div>
-              <div class="text-caption text-grey">{{ activeBucket?.hint }}</div>
+              <div class="text-caption text-grey">{{ activeBucket?.hint }}｜点任意一行看详情</div>
             </div>
             <v-spacer />
             <v-text-field
@@ -814,19 +864,14 @@ onMounted(() => {
 
           <!-- 数据表：items 是服务端分页好的一页，必须用 v-data-table-server 并把总条数交给
                items-length，否则 pageCount 按当前页条数算、翻页永远停在第一页。
-               列一律 sortable:false：顺序只有服务端那一种（done 按"本插件改写优先 + 最近
-               改动在上"，其余桶按路径），留着表头箭头会让人以为排的是整个桶，实际只重排了
-               眼前这一页 -->
+               列一律 sortable:false（见 tableHeaders）：顺序只有服务端那一种（done 按"本插件
+               改写优先 + 最近改动在上"，其余桶按路径），留着表头箭头会让人以为排的是整个桶，
+               实际只重排了眼前这一页。
+               表头随桶走：一个桶里每一行的状态都相同，留着「状态」列等于把桶名重印一遍；
+               「重试」次数只有失败桶有值（其余桶这个字段恒空）；缺项桶那一栏给的是还缺哪几项，
+               跟着失败桶叫「原因/分数」就是列名和内容各说各话。 -->
           <v-data-table-server
-            :headers="[
-              { title: '文件名', key: 'name', sortable: false },
-              { title: '状态', key: 'status', width: 130, sortable: false },
-              { title: '原因/分数', key: 'reason', sortable: false },
-              { title: '重试', key: 'retries', width: 70, sortable: false },
-              { title: '大小', key: 'size', width: 90, sortable: false },
-              { title: '修改时间', key: 'mtime', width: 180, sortable: false },
-              { title: '操作', key: 'actions', sortable: false, width: 170 }
-            ]"
+            :headers="tableHeaders"
             :items="rows"
             :items-length="total"
             :loading="loading"
@@ -852,12 +897,11 @@ onMounted(() => {
                 <span class="text-caption text-primary ml-1">{{ changedFieldNames(item.set) }}</span>
               </div>
             </template>
-            <template #item.status="{ item }">
-              <v-chip
-                size="x-small"
-                variant="tonal"
-                :color="item.status === 'done' ? 'success' : item.status === 'failed' ? 'error' : item.status === 'deficient' ? 'info' : 'grey'"
-              >{{ statusText(item.status) }}</v-chip>
+            <template #item.retries="{ item }">
+              <!-- retries 是「定时扫描已经为这个文件试过几轮」，满了上限就不再自动重试
+                   （只剩手动），所以这一列只在失败桶出现 -->
+              <span v-if="item.retries" class="text-caption">第 {{ item.retries }} 次</span>
+              <span v-else class="text-caption text-grey">还没重试</span>
             </template>
             <template #item.reason="{ item }">
               <!-- 缺项桶给的是字段名，直接印出来是 year,tracknumber,cover 这种半英文串 -->
@@ -873,10 +917,10 @@ onMounted(() => {
             <template #item.size="{ item }">{{ fmtSize(item.size) }}</template>
             <template #item.actions="{ item }">
               <!-- 编辑对所有桶开放：done/pending 的行也可能藏着要手工改的字段的现值，
-                   只有缺项能点开就成了"界面上看得见、动手没处动" -->
+                   只有缺项能点开就成了"界面上看得见、动手没处动"。
+                   详情不给按钮：整行本来就是点开详情的入口（@click:row），按钮留着只是占宽 -->
               <v-btn size="x-small" variant="text" color="primary" :loading="busy" @click="openEdit(item)">编辑</v-btn>
               <v-btn v-if="item.status !== 'deficient'" size="x-small" variant="text" color="primary" :loading="busy" @click="retryRow(item)">重试</v-btn>
-              <v-btn size="x-small" variant="text" @click="openDetail(item)">详情</v-btn>
             </template>
             <template #no-data>
               <div class="text-center pa-6 text-grey">该桶暂无数据</div>
@@ -1035,9 +1079,27 @@ onMounted(() => {
                           placeholder="留空则不改动" />
             </div>
 
-            <div v-if="!editHasCover" class="text-caption text-grey mt-3">
-              缺封面这里补不了：封面要下载后内嵌，用行上的「重试」让识别源再刮一次；
-              下面的候选里带封面的源可以先采纳文本，再重试补图
+            <div class="mls-lyrics mt-3">
+              <div class="d-flex align-center">
+                <div class="mls-section-title mb-0">封面</div>
+                <v-spacer />
+                <v-chip size="x-small" :variant="editHasCover ? 'text' : 'tonal'"
+                        :color="editHasCover ? 'grey' : 'warning'">
+                  {{ editHasCover ? '文件里已有' : '缺' }}
+                </v-chip>
+              </div>
+              <div class="d-flex align-center gap-2 mt-1">
+                <v-text-field v-model="editCoverUrl" density="compact" hide-details
+                              variant="outlined" clearable
+                              placeholder="图片地址 https://…，留空则不动封面" />
+                <v-avatar v-if="editCoverUrl" size="52" rounded="lg" variant="flat">
+                  <v-img :src="editCoverUrl" cover />
+                </v-avatar>
+              </div>
+              <div class="text-caption text-grey mt-1">
+                填了地址就会下载并内嵌这一张；文件里已有封面会被换掉。图取自地址由插件下载，
+                不是浏览器里那张预览 —— 预览打不开通常就意味着地址失效或被平台挡了
+              </div>
             </div>
           </v-form>
 
@@ -1085,12 +1147,15 @@ onMounted(() => {
                   {{ cand.score }} 分
                 </v-chip>
                 <v-chip v-if="cand.has_lyric" size="x-small" variant="text" color="grey">源上有歌词</v-chip>
+                <v-chip v-if="candidateCover(cand)" size="x-small" variant="text" color="grey">源上有封面</v-chip>
                 <v-spacer />
                 <v-chip v-for="(state, field) in (cand.hits || {})" :key="field" size="x-small" variant="text"
                         :color="state === 'hit' ? 'success' : state === 'no_local' ? 'grey' : 'warning'">
                   {{ fieldText(String(field)) }} {{ hitMark(state) }}
                 </v-chip>
                 <v-btn size="x-small" variant="text" color="primary" @click.stop="openCandidate(cand)">详情</v-btn>
+                <v-btn v-if="candidateCover(cand)" size="x-small" variant="text" color="primary"
+                       @click.stop="adoptCover(cand)">采纳封面</v-btn>
                 <v-btn size="x-small" variant="text" :color="adoptCount(cand) ? 'primary' : 'grey'"
                        :disabled="!adoptCount(cand)" @click.stop="adoptCandidate(cand)">
                   采纳{{ adoptCount(cand) ? `（${adoptCount(cand)} 项）` : '（无新内容）' }}
@@ -1106,7 +1171,7 @@ onMounted(() => {
             </div>
             <div v-else-if="editCandidates.length" class="text-caption text-grey mt-2">
               每个源只列分最高的一条；点「详情」逐字段勾选要覆盖什么，点「采纳」一把填全部非空项，
-              都要再点「保存」才写入文件
+              带封面的源另有「采纳封面」—— 都只填进表单，仍要点「保存」才写入文件
             </div>
           </div>
         </v-card-text>
@@ -1114,12 +1179,15 @@ onMounted(() => {
         <v-card-actions>
           <div class="text-caption text-grey">
             {{ editChanged.length ? `本次写入 ${editChanged.length} 项：${editChanged.map(fieldText).join('、')}`
-               : '没有改动可写入' }}
+               : (editCoverUrl.trim() ? '' : '没有改动可写入') }}
+            <template v-if="editCoverUrl.trim()">｜{{ editChanged.length ? '并且' : '' }}内嵌封面</template>
           </div>
           <v-spacer />
           <v-btn variant="text" class="text-none" @click="editDialog = false">取消</v-btn>
           <v-btn variant="flat" color="primary" class="text-none"
-                 :loading="busy" :disabled="editLoading || !editChanged.length" @click="submitEdit">
+                 :loading="busy"
+                 :disabled="editLoading || (!editChanged.length && !editCoverUrl.trim())"
+                 @click="submitEdit">
             保存
           </v-btn>
         </v-card-actions>
@@ -1149,6 +1217,19 @@ onMounted(() => {
                 </div>
               </template>
             </v-checkbox>
+          </div>
+          <div v-if="candidateCover(candDetail)" class="d-flex align-center gap-2 mt-2">
+            <v-avatar size="44" rounded="lg" variant="flat">
+              <v-img :src="candidateCover(candDetail)" cover />
+            </v-avatar>
+            <div class="text-caption" style="max-width: 330px; word-break: break-all">
+              <span class="text-grey">封面：</span>{{ candidateCover(candDetail) }}
+            </div>
+            <v-spacer />
+            <v-btn size="x-small" variant="text" color="primary" @click="adoptCover(candDetail)">填入封面地址</v-btn>
+          </div>
+          <div v-else-if="candDetail?.has_cover" class="text-caption text-grey mt-2">
+            这条候选带封面，但账本里的摘要没存地址 —— 要补封面就重新「获取全部源候选」
           </div>
           <div v-if="!Object.keys(candidateFields(candDetail)).length" class="text-caption text-grey">
             这条候选没有给出任何可采纳的值
