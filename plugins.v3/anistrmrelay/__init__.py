@@ -85,6 +85,13 @@ _RELAY_CONTROL_CLIENT: Optional[httpx.AsyncClient] = None
 # 必须沿用同一次解题的UA，否则新证配旧UA会直接被重新校验
 _CLEARANCE_MEMORY: Dict[str, Any] = {"token": "", "ua": "", "issued_ts": 0}
 
+# 进程级回填互斥记号：插件重载会先后出现两个实例，各自排一轮"保存后自动补齐"，
+# 两轮全季度目录列举同时在跑等于把请求速率翻倍打到CF（实测正是整季读超时的诱因），
+# 因此同一进程内只允许一轮回填在跑。holder 用实例id，超过时限视为上一轮已卡死可接管
+_BACKFILL_GUARD: Dict[str, Any] = {"holder": 0, "ts": 0.0}
+# 回填互斥记号的失活判定（秒）：单季最慢环节是目录重试链，远小于该值
+BACKFILL_GUARD_STALE_SECONDS = 600
+
 
 def _clearance_issued_ts(token: str) -> int:
     """
@@ -153,7 +160,7 @@ class ANiStrmRelay(_PluginBase):
     plugin_name = "ANi Strm 自用版（CF中转）"
     plugin_desc = "自动获取当季所有番剧生成strm；内置CF中转代理携带cf_clearance直连openani，凭证由FlareSolverr全自动解题续期（插件设置或MP系统设置提供地址，未配置则不启用），无需粘贴cookie（基于 honue 版 ANi-Strm 迭代）"
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/anistrm.png"
-    plugin_version = "0.3.2"
+    plugin_version = "0.3.3"
     plugin_author = "JontyLee（基于 honue ANi-Strm）"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "anistrm_"
@@ -197,6 +204,8 @@ class ANiStrmRelay(_PluginBase):
         self._strm_service = StrmFileService()
         # 待处理的凭证急换请求：中转回源命中挑战页时置位，由保活心跳线程消费
         self._urgent_refresh = threading.Event()
+        # 插件停止/重载标记：回填线程按季度检查此位，及时让位给新实例而不是继续打源站
+        self._task_should_stop = False
 
     def init_plugin(self, config: dict = None):
         """
@@ -205,6 +214,8 @@ class ANiStrmRelay(_PluginBase):
         :param config: 插件配置字典
         """
         self.stop_service()
+        # 同一实例被重新初始化（保存配置）时要重新允许它跑回填
+        self._task_should_stop = False
 
         config = config or {}
         self._enabled = config.get("enabled", False)
@@ -356,6 +367,33 @@ class ANiStrmRelay(_PluginBase):
     def __task(self):
         """
         拉取目标季度目录并补齐（或按配置改写）strm 文件。
+
+        同一进程内只允许一轮回填在跑：插件重载会先后存在两个实例，各自排一轮
+        「保存后自动补齐」，两轮目录列举并发跑等于把请求速率翻倍打到CF，实测正是
+        整季读超时（文件数=0）的诱因。
+        """
+        run_key = id(self)
+        holder = _BACKFILL_GUARD["holder"]
+        if holder not in (0, run_key) and (
+            time.time() - _BACKFILL_GUARD["ts"] < BACKFILL_GUARD_STALE_SECONDS
+        ):
+            logger.info(
+                f"ANi-Strm已有另一轮回填在跑（{int(time.time() - _BACKFILL_GUARD['ts'])}秒前开始），"
+                f"本实例本轮跳过，避免目录请求并发翻倍冲击CF"
+            )
+            return
+        _BACKFILL_GUARD["holder"] = run_key
+        _BACKFILL_GUARD["ts"] = time.time()
+        try:
+            self.__run_task()
+        finally:
+            if _BACKFILL_GUARD["holder"] == run_key:
+                _BACKFILL_GUARD["holder"] = 0
+                _BACKFILL_GUARD["ts"] = 0.0
+
+    def __run_task(self):
+        """
+        按季度回填 strm 的执行体，由 __task 串行调度。
         """
         seasons = self.__get_target_seasons()
         if not seasons:
@@ -372,10 +410,16 @@ class ANiStrmRelay(_PluginBase):
         total_exists = 0
         total_updated = 0
         total_failed = 0
+        total_missing_series = 0
 
         query_suffix = f"rt={self._relay_token}" if (self._relay_enabled and self._relay_token) else None
 
         for season in seasons:
+            # 插件被停止/重载时本线程还在跑：立即让位，别继续与新实例并发打源站
+            if self._task_should_stop:
+                logger.info("ANi-Strm插件已停止或重载，本轮回填提前结束")
+                return
+            _BACKFILL_GUARD["ts"] = time.time()
             file_entries = self._client.get_season_entries(season)
             season_total = len(file_entries)
             season_created = 0
@@ -383,6 +427,13 @@ class ANiStrmRelay(_PluginBase):
             season_updated = 0
             season_failed = 0
             logger.info(f"ANi-Strm开始处理季度：{season}，文件数={season_total}")
+            missing_series = self._client.pop_failed_series()
+            if missing_series:
+                total_missing_series += len(missing_series)
+                logger.warning(
+                    f"ANi-Strm季度 {season} 有{len(missing_series)}个番剧目录未取得，"
+                    f"本季按其余条目补齐：{missing_series[:5]}"
+                )
             for file_entry in file_entries:
                 status = self._strm_service.touch_strm_file(
                     storage_path=self._storageplace,
@@ -421,6 +472,11 @@ class ANiStrmRelay(_PluginBase):
             self._selected_seasons = ["latest"]
             self.__update_config()
             logger.info("ANi-Strm全季度回填完成，拉取季度已自动切回最新季")
+            if total_missing_series:
+                logger.warning(
+                    f"ANi-Strm本轮有{total_missing_series}个番剧目录未取得，"
+                    f"如需补齐请把拉取季度改回全部后保存一次"
+                )
 
     def __get_target_seasons(self) -> List[str]:
         """
@@ -1343,6 +1399,8 @@ class ANiStrmRelay(_PluginBase):
         """
         注销定时任务（共享HTTP客户端常驻，不随插件重载关闭）。
         """
+        # 正在跑的补档线程不是调度任务，shutdown 管不到它：置位让它跑完当前季度就收手
+        self._task_should_stop = True
         try:
             if self._scheduler:
                 self._scheduler.remove_all_jobs()
@@ -1369,6 +1427,18 @@ class AniStrmClient:
         self._query_suffix = ""
         # 上一次目录列举请求时间戳（配合最小间隔限速）
         self._last_folder_request_ts = 0.0
+        # 本轮季度列举中取不到条目的番剧目录名（逐个隔离，不再拖垮整季）
+        self._failed_series: List[str] = []
+
+    def pop_failed_series(self) -> List[str]:
+        """
+        取出并清空最近一次季度列举中未取得的上游目录名列表（整季重试可能重复记同一目录）。
+
+        :return: 失败的番剧目录名列表
+        """
+        failed = list(dict.fromkeys(self._failed_series))
+        self._failed_series = []
+        return failed
 
     def set_query_suffix(self, suffix: str):
         """
@@ -1406,6 +1476,8 @@ class AniStrmClient:
         return [entry["name"] for entry in entries if entry.get("name")]
 
     def get_season_entries(self, season: str) -> List[Dict[str, str]]:
+        self._failed_series = []
+
         def operation():
             return self._collect_folder_entries(f"{season}/")
 
@@ -1448,11 +1520,12 @@ class AniStrmClient:
         self._last_folder_request_ts = time.time()
         if self._query_suffix and "?" not in url:
             url = f"{url}?{self._query_suffix}"
-        response = self._request_factory().post(
+        response = self._request_factory().post_res(
             url=url,
             data='{"password":""}',
+            raise_exception=True,
         )
-        if not response:
+        if response is None:
             raise ValueError(f"目录请求失败：{url}")
         try:
             return response.json()
@@ -1466,6 +1539,16 @@ class AniStrmClient:
         )
 
     def _collect_folder_entries(self, folder_path: str, relative_dir: str = "") -> List[Dict[str, str]]:
+        """
+        递归列举目录条目；子目录单独重试并隔离失败。
+
+        一个番剧目录取不到就抛到最外层，会让整季在重试耗尽后返回空列表（日志里成片
+        的「文件数=0」），其余几百个本可正常补齐的条目跟着一起丢掉，故子目录失败只跳过该目录。
+
+        :param folder_path: 相对源站的目录路径
+        :param relative_dir: 写入 strm 的相对目录
+        :return: 该目录（含子目录）下的文件条目
+        """
         payload = self._fetch_folder_payload(f"{self._get_openani_base()}/{folder_path}")
         entries: List[Dict[str, str]] = []
         for file_info in payload.get("files") or []:
@@ -1476,7 +1559,17 @@ class AniStrmClient:
             if mime_type == self.FOLDER_MIME_TYPE:
                 child_relative_dir = f"{relative_dir}/{name}".strip("/")
                 child_folder_path = f"{folder_path.rstrip('/')}/{quote(name, safe='')}/"
-                entries.extend(self._collect_folder_entries(child_folder_path, child_relative_dir))
+                child_entries = self._with_retry(
+                    lambda path=child_folder_path, rel=child_relative_dir:
+                    self._collect_folder_entries(path, rel),
+                    default=None,
+                    tries=2,
+                    delay=3,
+                )
+                if child_entries is None:
+                    self._failed_series.append(child_relative_dir or name)
+                    continue
+                entries.extend(child_entries)
                 continue
 
             encoded_name = quote(name, safe="")
