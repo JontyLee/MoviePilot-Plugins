@@ -99,7 +99,7 @@ V3 新插件使用 `plugins.v3/<plugin_id_lower>/`、`tests/v3/<plugin_id_lower>
 | --- | --- |
 | 类名 / 目录 | `XiaoaiSpeaker` / `plugins.v3/xiaoaispeaker/` |
 | 配置前缀 | `xiaoaispeaker_` |
-| 版本 | 0.6.0 |
+| 版本 | 0.6.5 |
 | 元数据来源 | 无（不刮削，只播放）；设备与播放状态来自小米云端 Mina/ubus |
 | 图标 | `icons/xiaoai.svg`（仓库自绘，市场走 raw 地址） |
 | 使用说明 | [docs/xiaoaispeaker.md](./docs/xiaoaispeaker.md) |
@@ -116,7 +116,9 @@ V3 新插件使用 `plugins.v3/<plugin_id_lower>/`、`tests/v3/<plugin_id_lower>
 - 侧栏运行视图六栏：运行总览 / 播放台 / 音乐库 / 歌单与收藏 / 定时任务 / 语音控制；
   配置全部在独立的插件配置页里改。
 - 设备分组多房间同步、睡眠定时（按分钟或按首数）、五种播放方式、页面侧歌词。
-- 语音口令：读小爱对话记录把说的话变成命令，未命中时可选交给主程序已配好的智能助手判定。
+- 语音口令：读小爱对话记录把说的话变成命令，未命中时可选交给主程序已配好的智能助手判定；
+  启动后的第一轮只对齐时间基线、不重放历史口令，宿主重启不会让音箱把几小时前那句
+  「播放…」再唱一遍。
 - 远程命令五个：`/xiaoai_status`、`/xiaoai_play`、`/xiaoai_control`、`/xiaoai_volume`、
   `/xiaoai_tts`。
 

@@ -18,6 +18,9 @@ xiaoaispeaker — MoviePilot v3 插件（插件名：小爱音箱）
 - 队列连播靠轮询 player_get_play_status 判「播完」，不是音箱侧的真实播放列表。
   接口只有 0/1、分不清暂停与播完，所以本进程没亲眼见过这一首在播就不推进
   （重启后保持安静），插件自己发出的暂停/停止也落标记、见标记不推进。
+- 语音监听首轮那批对话整批只对齐时间基线、一条都不执行：小米回的是按时间**升序**的最近
+  若干条，只对齐第一条等于把几小时前说过的「播放…」当成刚说的新命令重放。同一分钟内
+  触发过的定时任务也落盘去重，宿主重启正好落在那一分钟不会把「播放歌单」补触发一次。
 - /stream 必须匿名可达（音箱不会带上 MP 的登录态），因此用「路径 + 过期时间」的 HMAC 签名
   收敛成「只能取配置目录内、在有效期内的音频文件」，签名不匹配或路径越库一律 403。
 - AI 兜底与自由对话不自备第二份密钥与端点：借主程序「设定 → AI 大模型」配好的那个助手，
@@ -155,6 +158,7 @@ _KEY_WORDS = "voice_words"
 _KEY_GROUPS = "device_groups"
 _KEY_TASKS = "scheduled_tasks"
 _KEY_TASK_LOGS = "schedule_logs"
+_KEY_TASK_FIRED = "schedule_fired"
 
 # 音箱状态是云端读来的，前端每几秒刷一次；给一个很短的缓存避免把小米接口打爆
 _STATUS_CACHE_SECONDS = 3.0
@@ -263,7 +267,7 @@ class XiaoaiSpeaker(_PluginBase):
         "库内目录浏览与搜索、远程命令；播放直链由插件签名限时，不依赖媒体服务器。"
     )
     plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/xiaoai.svg"
-    plugin_version = "0.6.4"
+    plugin_version = "0.6.5"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "xiaoaispeaker_"
@@ -2117,23 +2121,39 @@ class XiaoaiSpeaker(_PluginBase):
         return True, f"播放歌单「{playlist.name}」{note}{suffix}：{result.message}"
 
     def _tick_tasks(self) -> None:
-        """分钟级去重的到点执行：巡检 20 秒一次，同一分钟只认一次，任务不会双触发。"""
+        """分钟级去重的到点执行：巡检 20 秒一次，同一分钟只认一次，任务不会双触发。
+
+        去重表落盘而不是只记在进程里：只记内存的话，宿主重启正好落在某条任务的那一分钟里
+        就会把它补触发一次 —— 「播放歌单」被补触发，音箱就是在重启后自己唱了起来。
+        """
         now = datetime.now()
         minute = now.strftime("%Y-%m-%d %H:%M")
         if self.__dict__.get("_task_minute") == minute:
             return
         self.__dict__["_task_minute"] = minute
+        fired = self.get_data(_KEY_TASK_FIRED)
+        fired = dict(fired) if isinstance(fired, dict) else {}
+        # 只留今天的：表不该跟着任务增删一直长
+        fired = {key: value for key, value in fired.items()
+                 if str(value).startswith(now.strftime("%Y-%m-%d"))}
+        changed = False
         for task in self._tasks():
             if not task["enabled"]:
                 continue
             if not self._schedule_hit(task["schedule"], now):
                 continue
+            if fired.get(str(task["id"])) == minute:
+                continue
+            fired[str(task["id"])] = minute
+            changed = True
             logger.info(f"{_LOG} 定时任务触发：{task['name']}（{_TASK_ACTIONS.get(task['action'], task['action'])}）")
             try:
                 self._append_task_logs(self._run_task(task))
             except Exception as err:  # pragma: no cover - 单条任务异常不外溢
                 logger.warning(f"{_LOG} 定时任务 {task['name']} 执行异常: {err}")
                 self._append_task_logs([self._task_log(task, "", False, f"执行异常：{err}")])
+        if changed:
+            self.save_data(_KEY_TASK_FIRED, fired)
 
     def _stop_event(self) -> threading.Event:
         return self.__dict__.setdefault("_stop_flag", threading.Event())

@@ -163,32 +163,35 @@ class SpeechListener:
             self._primed.pop(device_id, None)
 
     def _consume(self, device_id: str, records: List[Dict[str, Any]]) -> int:
+        if not self._primed.get(device_id):
+            # 首轮整批只对齐基线，一条都不执行。小米回的是**按时间升序**的最近若干条：
+            # 把第一条（最旧的那条）当基线、剩下几条当新命令，等于让音箱在宿主一重启就把
+            # 几小时前说过的那句「播放…」重唱一遍 —— 界面看到的就是"重启后先播放、紧接着
+            # 又被下一句口令停掉"。基线取这批里最新的一条，后面只会执行真正新说的话。
+            newest = max((int(record.get("timestamp_ms") or 0) for record in records), default=0)
+            if not newest:
+                # 一批里全是拿不到时间戳的记录：没什么可对齐的，下一轮再看
+                return 0
+            self._baseline[device_id] = max(int(self._baseline.get(device_id) or 0), newest)
+            self._primed[device_id] = True
+            with self._lock:
+                for record in records:
+                    self._remember(device_id, record)
+            return 0
         handled = 0
         for record in records:
             timestamp = int(record.get("timestamp_ms") or 0)
             text = str(record.get("question") or "").strip()
             if not timestamp:
                 continue
-            if not self._primed.get(device_id):
-                # 首轮只对齐基线：把登录前几小时说的话当成新命令会让音箱突然唱歌
-                self._baseline[device_id] = timestamp
-                self._primed[device_id] = True
-                continue
             if timestamp <= int(self._baseline.get(device_id) or 0):
                 continue
             self._baseline[device_id] = max(int(self._baseline.get(device_id) or 0), timestamp)
             if not text:
                 continue
-            key = f"{device_id}:{record.get('request_id') or f'{timestamp}:{text}'}"
             with self._lock:
-                if key in self._seen:
+                if not self._remember(device_id, record):
                     continue
-                self._seen[key] = time.time()
-                while len(self._seen) > SEEN_LIMIT:
-                    self._seen.popitem(last=False)
-                self._records.append({"device_id": device_id, "at": _fmt(timestamp / 1000.0),
-                                      "text": text, "answer": str(record.get("answer") or "")})
-                self._records = self._records[-RECORD_BUFFER:]
             handled += 1
             self._handled += 1
             try:
@@ -199,6 +202,23 @@ class SpeechListener:
             if reply:
                 self._speak(device_id, reply)
         return handled
+
+    def _remember(self, device_id: str, record: Dict[str, Any]) -> bool:
+        """进「最近对话」与去重表；已在表里就返回 False。调用方持锁。"""
+        timestamp = int(record.get("timestamp_ms") or 0)
+        text = str(record.get("question") or "").strip()
+        if not timestamp or not text:
+            return False
+        key = f"{device_id}:{record.get('request_id') or f'{timestamp}:{text}'}"
+        if key in self._seen:
+            return False
+        self._seen[key] = time.time()
+        while len(self._seen) > SEEN_LIMIT:
+            self._seen.popitem(last=False)
+        self._records.append({"device_id": device_id, "at": _fmt(timestamp / 1000.0),
+                              "text": text, "answer": str(record.get("answer") or "")})
+        self._records = self._records[-RECORD_BUFFER:]
+        return True
 
     def _speak(self, device_id: str, text: str) -> None:
         try:

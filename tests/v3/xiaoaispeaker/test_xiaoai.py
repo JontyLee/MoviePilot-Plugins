@@ -1634,6 +1634,36 @@ class PluginVoiceTest(unittest.TestCase):
         handled = self._listener_tick(plugin, client, [old, newer])
         self.assertEqual(handled, 0, "同一条记录不能被反复执行")
 
+    def test_listener_primes_the_whole_first_batch(self) -> None:
+        """首轮那批要整批对齐，一条都不执行。
+
+        小米回的是按时间升序的最近若干条：旧写法只把第一条（最旧那条）当基线，剩下几条
+        全当成刚说的新命令 —— 宿主一重启，音箱就把最近那句「播放…」重唱一遍，紧接着又
+        被批里后面那句「暂停/停止」掐掉，界面上正是"重启后先播放、然后再停止"。
+        """
+        now = int(time.time() * 1000)
+        backlog = [
+            {"request_id": "b1", "timestamp_ms": now - 300000,
+             "question": "我想听稻香", "answer": "好的"},
+            {"request_id": "b2", "timestamp_ms": now - 240000,
+             "question": "音量调到50", "answer": "好"},
+            {"request_id": "b3", "timestamp_ms": now - 60000,
+             "question": "暂停播放", "answer": "已暂停"},
+        ]
+        plugin, client = self._plugin(asks=[])
+        self.assertEqual(self._listener_tick(plugin, client, backlog), 0,
+                         "首轮那批被执行了，重启后音箱会自己唱起来")
+        self.assertFalse([call for call in client.calls
+                          if call[0] in ("play", "play_url", "set_volume", "play_operation")],
+                         "对齐基线不该发出任何控制命令")
+        # 页面仍然看得见这批对话（只是没执行）：诊断时靠它确认监听是活的
+        self.assertEqual(len(plugin._listener().recent(20)), 3)
+        # 基线对齐到批里最新的一条：之后真说的一句话仍然要执行
+        fresher = dict(backlog[2], request_id="b4", timestamp_ms=now + 5000,
+                       question="停止播放")
+        self.assertEqual(self._listener_tick(plugin, client, backlog + [fresher]), 1)
+        self.assertIn(("play_operation", "D1", "stop"), client.calls)
+
     def test_slow_round_still_waits_a_full_interval(self) -> None:
         """一轮跑得比间隔还久时，下一轮要等满间隔 —— 从本轮**结束**起算，不是从开始。
 
@@ -2386,6 +2416,24 @@ class PluginTaskTest(unittest.TestCase):
         plugin._tick_tasks()
         self.assertEqual(len(plugin._task_logs()), 1, "停用的任务到点也不跑")
 
+    def test_tick_fired_marker_survives_a_restart(self) -> None:
+        """「这一分钟已经触发过」要落盘：只记在进程里的话，宿主重启正好落在某条任务的
+        那一分钟里就会把它补触发一次 —— 「播放歌单」被补触发，音箱就是在重启后自己唱起来。
+        """
+        plugin, _client = self._plugin()
+        now = datetime.now()
+        self._saved(plugin, action="stop",
+                    schedule={"type": "weekly", "time": now.strftime("%H:%M"),
+                              "weekdays": [now.isoweekday() % 7]})
+        plugin._tick_tasks()
+        self.assertEqual(len(plugin._task_logs()), 1)
+        # 清掉内存标记 = 换了一个新进程，同一分钟内再判一次
+        plugin.__dict__["_task_minute"] = ""
+        plugin._tick_tasks()
+        self.assertEqual(len(plugin._task_logs()), 1, "同一分钟重启不能把任务补触发一次")
+        fired = plugin.get_data(x._KEY_TASK_FIRED)
+        self.assertEqual(list(fired.values()), [now.strftime("%Y-%m-%d %H:%M")])
+
     def test_device_actions(self) -> None:
         plugin, client = self._plugin()
         logs = self._run(plugin, action="stop")
@@ -2929,6 +2977,23 @@ class LoginMethodTest(unittest.TestCase):
         plugin.save_data("token", {**_token(), "login_method": "qrcode"})
         plugin._client = lambda: (_FakeClient(devices=[_device()]), "")
         self.assertEqual(plugin._status(force_devices=True).login_method, "qrcode")
+
+
+class ReleaseFieldsTest(unittest.TestCase):
+    """版本号几处得一样：市场装的是索引里那一版，跑的是仓库里这一份代码。
+
+    两处对不上时用户看到的是「未找到可安装的 Release 版本」或「装上了却没变」，而报错
+    不会指出是这两处中的哪一处；README 那一行曾经停在 0.6.0 好几个版本，就是没人盯着。
+    """
+
+    def test_index_code_and_readme_agree(self) -> None:
+        root = Path(x.__file__).resolve().parents[2]
+        entry = json.loads((root / "package.v3.json").read_text(encoding="utf-8"))["XiaoaiSpeaker"]
+        version = x.XiaoaiSpeaker.plugin_version
+        self.assertEqual(entry["version"], version)
+        self.assertIn(f"v{version}", entry["history"])
+        self.assertTrue(entry["history"][f"v{version}"].strip())
+        self.assertIn(f"| 版本 | {version} |", (root / "README.md").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
