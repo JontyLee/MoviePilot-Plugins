@@ -1193,7 +1193,7 @@ class ANiStrmRelay(_PluginBase):
                                             "model": "cf_user_agent",
                                             "label": "验证时的浏览器UA",
                                             "placeholder": DEFAULT_CF_UA,
-                                            "hint": "必须与取得cookie的浏览器完全一致，否则会重新触发挑战",
+                                            "hint": "有 FlareSolverr（本插件或系统设置）时可留空：续期会自动写入解题浏览器的UA并与cookie成对生效；手工模式必须与取得cookie的浏览器完全一致，否则会重新触发挑战",
                                             "persistent-hint": True,
                                         },
                                     }
