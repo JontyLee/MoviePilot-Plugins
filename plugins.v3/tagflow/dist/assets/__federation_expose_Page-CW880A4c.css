@@ -1,0 +1,96 @@
+
+/* 仅插件内局部样式；不得写全局 v- 或 mdi- 类规则（构建有 postcss 门禁）。 */
+.mls-page[data-v-60716dca] { width: 100%;
+}
+.mls-head[data-v-60716dca] { display: flex; align-items: center; gap: 8px; padding: 12px 16px;
+}
+.mls-head-text[data-v-60716dca] { min-width: 0;
+}
+.mls-body[data-v-60716dca] { display: flex; min-height: 440px;
+}
+.mls-nav[data-v-60716dca] {
+  /* 208px：默认 176px 时"失败待重试"+图标+数字徽标三段挤在一行，Vuetify 的 nav 标题
+     是 nowrap+ellipsis，最长的两个桶名都被切成"失败待重…"。徽标只在部分桶出现，
+     按最长的一项给宽度。 */
+  flex: 0 0 208px;
+  border-right: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+  background: rgba(var(--v-theme-on-surface), .02);
+}
+.mls-nav-item[data-v-60716dca] { margin: 2px 8px;
+}
+.mls-content[data-v-60716dca] { flex: 1 1 auto; min-width: 0; overflow-y: auto;
+}
+.mls-pane[data-v-60716dca] { padding: 14px 16px;
+}
+.mls-section[data-v-60716dca] { margin-top: 14px;
+}
+.mls-section-title[data-v-60716dca] { font-size: 13px; font-weight: 600; margin-bottom: 6px; opacity: .75;
+}
+.mls-fill[data-v-60716dca] { height: 100%;
+}
+.mls-reason[data-v-60716dca] { padding: 6px 10px;
+}
+.mls-reason-row[data-v-60716dca] { display: flex; align-items: center; gap: 10px; padding: 3px 0;
+}
+.mls-reason-text[data-v-60716dca] { flex: 1 1 auto; min-width: 0; font-size: 13px;
+}
+.mls-flow-head[data-v-60716dca] { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px;
+}
+.mls-page .text-truncate[data-v-60716dca] {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 整行点开详情，指针形状要跟着变；表头不在 tbody 里，不受影响 */
+.mls-table[data-v-60716dca] tbody tr { cursor: pointer;
+}
+/* 列宽按表头给的百分比和像素摊死。默认是按内容摊，文件名列里那条不换行的完整路径
+   会把这一列撑到自己满意为止，中间的「写入来源 / 还缺哪几项」被压成窄窄一条竖排 ——
+   最该看的内容反而最窄。fixed 之后溢出交给单元格裁，行内元素自己截断。 */
+.mls-table[data-v-60716dca] table { table-layout: fixed;
+}
+.mls-table[data-v-60716dca] th,
+.mls-table[data-v-60716dca] td { overflow: hidden;
+}
+.mls-dlg-head[data-v-60716dca] { display: flex; align-items: center; gap: 8px; padding: 14px 18px; min-width: 0;
+}
+.mls-dlg-head-text[data-v-60716dca] { min-width: 0; flex: 1 1 auto;
+}
+.mls-chips[data-v-60716dca] { display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+}
+.mls-cand[data-v-60716dca] {
+  padding: 6px 10px;
+  border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+}
+.mls-cand-click[data-v-60716dca] { cursor: pointer;
+}
+.mls-cand-click[data-v-60716dca]:hover { background: rgba(var(--v-theme-on-surface), .04);
+}
+.mls-diff[data-v-60716dca] { border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+}
+.mls-diff-old[data-v-60716dca] { color: rgba(var(--v-theme-on-surface), .6); text-decoration: line-through;
+}
+.mls-diff-new[data-v-60716dca] { font-weight: 600;
+}
+.mls-kv[data-v-60716dca] {
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: rgba(var(--v-theme-on-surface), .04);
+  min-width: 0;
+}
+.mls-kv-value[data-v-60716dca] {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+  min-height: 18px;
+}
+.mls-lyrics[data-v-60716dca] textarea { font-family: inherit; font-size: 13px; line-height: 1.6;
+}
+@media (max-width: 760px) {
+.mls-body[data-v-60716dca] { flex-direction: column;
+}
+.mls-nav[data-v-60716dca] {
+    flex: 0 0 auto;
+    border-right: none;
+    border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+}
+}

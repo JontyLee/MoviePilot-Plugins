@@ -1,0 +1,47 @@
+{
+  "ANiStrmRelay": {
+    "name": "ANi Strm 自用版（CF中转）",
+    "description": "基于 honue 版 ANi-Strm 2.5.1：按上游季度与番剧目录生成STRM，内置CF透传中转，FlareSolverr自动取得cf_clearance与配套UA；解题浏览器、探活和回源共用HTTP代理，内网控制API独立直连。保存后等待凭证验证成功再补齐目录，支持按需改写STRM播放地址。致谢 honue 与 open ANi 字幕组。",
+    "labels": "媒体库,动漫",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/anistrm.png",
+    "author": "JontyLee",
+    "repo_url": "https://github.com/JontyLee/MoviePilot-Plugins",
+    "level": 2,
+    "release": true,
+    "system_version": ">=3.1.6",
+    "history": {
+      "v1.0.0": "首次发布：按季度生成STRM，内置Cloudflare中转、FlareSolverr凭证维护、统一出站代理与中转自检。"
+    }
+  },
+  "TagFlow": {
+    "name": "TagFlow音乐库刮削",
+    "description": "定时扫描音乐目录，元数据取自插件直连的各平台公开检索接口（网易云/QQ音乐/酷狗/咪咕/MusicBrainz，不必部署任何服务），再沿用 MP 原生音乐刮削链路写入标签与封面，对有缺项的文件提供逐项补齐入口。主界面整理分区提供常驻侧栏页，显示扫描流程、状态与失败原因。",
+    "labels": "音乐,刮削",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/tagflow.svg",
+    "author": "JontyLee",
+    "repo_url": "https://github.com/JontyLee/MoviePilot-Plugins",
+    "level": 1,
+    "release": true,
+    "system_version": ">=3.1.6",
+    "history": {
+      "v1.0.0": "首次发布：多平台音乐元数据检索、增量刮削、标签与封面编辑、缺项补齐、运行状态与逐文件改写记录。"
+    }
+  },
+  "XiaoaiSpeaker": {
+    "name": "小爱音箱",
+    "description": "把 MoviePilot 的音乐库推到小爱音箱：支持小米账号密码、扫码与Cookie票据登录，曲库索引、歌单与收藏、签名限时直链、可选本机MP3转码、设备分组、语音口令和定时任务。侧栏提供播放与运行视图，独立配置页管理账号、曲库、播放偏好、口令表与任务定义。",
+    "labels": "音乐,音箱",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/xiaoai.svg",
+    "author": "JontyLee",
+    "repo_url": "https://github.com/JontyLee/MoviePilot-Plugins",
+    "level": 1,
+    "release": true,
+    "system_version": ">=3.1.8",
+    "history": {
+      "v1.0.0": "首次发布：小米登录与音箱控制、本地曲库播放、签名直链、语音点歌、设备分组、睡眠定时和定时任务。"
+    }
+  }
+}
