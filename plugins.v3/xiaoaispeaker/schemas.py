@@ -273,11 +273,12 @@ class PlayIn(BaseModel):
 
 
 class QueueIn(BaseModel):
-    """队列请求。"""
+    """默认替换并起播；append 为真时原子追加到当前队列，不重播当前曲。"""
 
     paths: List[str] = Field(default_factory=list)
     index: int = 0
     device_id: Optional[str] = None
+    append: bool = False
 
 
 class ControlIn(BaseModel):

@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import Config from './__federation_expose_Config-ca-ajX8B.js';
+import Config from './__federation_expose_Config-CkObkI4o.js';
 import { a as activeLine, s as statusColor, m as modeText, b as baseSourceText, c as sourceText, f as fmtSeconds, M as MODE_ITEMS, d as fmtSize, e as fmtTime, w as why, q as query, _ as _export_sfc } from './_plugin-vue_export-helper-n7BX2Zw6.js';
 
 const {defineComponent:_defineComponent} = await importShared('vue');
@@ -642,12 +642,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       return post("/tasks/run", { id: row.id }, "立即执行");
     }
     async function enqueue(path) {
-      const items = (queue.value.items || []).map((i) => i.path);
-      if (items.includes(path)) {
-        notify("这一首已经在队列里了", "warning");
-        return;
-      }
-      await post("/queue", { paths: [...items, path], index: items.length ? queue.value.index : 0 }, "加入队列");
+      await post("/queue", { paths: [path], append: true }, "加入队列");
     }
     function queueDirectory() {
       const paths = browseFiles.value.map((f) => f.path);
@@ -749,7 +744,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
         notify("这个歌单里没有可播放的音频", "warning");
         return;
       }
-      return post("/queue", { paths, index: 0 }, "歌单入队");
+      return post("/queue", { paths, append: true }, "歌单入队");
     }
     const browse = ref({ cwd: "", parent: "", roots: [], dirs: [], files: [], reason: "", truncated: false });
     const search = ref({ keyword: "", items: [], reason: "" });
@@ -2620,6 +2615,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const AppPage = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-c66f2ebd"]]);
+const AppPage = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-37844d32"]]);
 
 export { AppPage as default };

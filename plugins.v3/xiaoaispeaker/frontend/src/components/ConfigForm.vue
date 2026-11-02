@@ -338,7 +338,7 @@ defineExpose({ form, dirty, saving, loaded, cfg, navText, loadConfig, save })
         </label>
         <label class="xcf-toggle">
           <v-switch v-model="form.voice_reply" color="primary" hide-details inset density="compact" />
-          <span><b>播报执行结果</b><em>「已播放 XXX」，没播成也说一句为什么。</em></span>
+          <span><b>播报执行结果</b><em>播报未起播的操作结果或失败原因；成功起播后保持音乐播放。</em></span>
         </label>
         <label class="xcf-toggle">
           <v-switch v-model="form.voice_hint_tts" color="primary" hide-details inset density="compact" />
@@ -348,7 +348,7 @@ defineExpose({ form, dirty, saving, loaded, cfg, navText, loadConfig, save })
           <v-switch v-model="form.voice_memory" color="primary" hide-details inset density="compact" />
           <span>
             <b>记住刚才那首</b>
-            <em>用于「再播一遍」「换一首」这类指代；只留在本机内存里，不落盘。</em>
+            <em>记住成功点歌的说法与路径，同一句话优先重播；保存在本机，30 天后过期。</em>
           </span>
         </label>
       </div>

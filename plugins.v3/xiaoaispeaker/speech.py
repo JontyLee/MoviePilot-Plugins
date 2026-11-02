@@ -14,8 +14,8 @@ speech.py — 对话监听：轮询、时间基线、去重与处理回调。
 3. **说话到播放之间有小爱的回答**。插件回调按命中的动作决定是否抢占声道，
    点歌等动作可先 pause+stop，音量、播放方式等状态操作不打断当前歌曲。
 
-轮询节奏与上游一致：默认 2 秒，失败退避到 30 秒封顶，空闲加倍（开了 AI 对话时
-不加倍，因为对话的追问窗口依赖及时轮询）。轮询由宿主的周期任务驱动，插件不自建线程。
+默认每 2 秒轮询，失败退避到 30 秒封顶，成功后恢复配置间隔。
+轮询由宿主周期任务驱动，同一监听器只允许一轮读取，AI 处理由回调独立分发。
 
 口令表与匹配在 voice.py，选曲打分在 text.py/library.py。本模块把新记录交给 handler，
 并把回执交给 speak；动作选择与设备控制由插件主类负责，可用替身回调独立验证监听行为。
@@ -32,7 +32,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 DEFAULT_POLL_SECONDS = 2.0
 MIN_POLL_SECONDS = 1.0
 MAX_POLL_SECONDS = 30.0
-IDLE_POLL_SECONDS = 5.0
 # 侧栏页要能看到"小爱最近听到了什么"，留这么几条在内存里
 RECORD_BUFFER = 50
 # 去重表上限（上游 LRU 1000）：一台音箱一天说不了几百句，超出后丢最旧的
@@ -49,15 +48,15 @@ class SpeechListener:
                  get_client: Callable[[], Tuple[Optional[Any], str]],
                  get_devices: Callable[[], List[Dict[str, Any]]],
                  speak: Optional[Callable[[str, str], None]] = None,
-                 interval: float = DEFAULT_POLL_SECONDS,
-                 chat_active: Any = False) -> None:
+                 interval: float = DEFAULT_POLL_SECONDS) -> None:
         self._handler = handler
         self._get_client = get_client
         self._get_devices = get_devices
         self._speak_fn = speak or (lambda _device_id, _text: None)
         self._interval = _clamp_interval(interval)
-        self._chat_active = chat_active
         self._lock = threading.Lock()
+        self._poll_lock = threading.Lock()
+        self._generation = 0
         self._baseline: Dict[str, int] = {}
         self._primed: Dict[str, bool] = {}
         self._seen: "OrderedDict[str, float]" = OrderedDict()
@@ -70,10 +69,8 @@ class SpeechListener:
 
     # ---------------- 配置 ----------------
 
-    def configure(self, interval: float, chat_active: Any = None) -> None:
+    def configure(self, interval: float) -> None:
         self._interval = _clamp_interval(interval)
-        if chat_active is not None:
-            self._chat_active = chat_active
 
     @property
     def handled(self) -> int:
@@ -97,9 +94,20 @@ class SpeechListener:
 
     def tick(self, devices: Optional[List[Dict[str, Any]]] = None) -> int:
         """宿主周期任务调一次。返回本轮处理的记录条数（0 也可能是"还没到点"）。"""
+        if not self._poll_lock.acquire(blocking=False):
+            return 0
+        try:
+            return self._poll(devices)
+        finally:
+            self._poll_lock.release()
+
+    def _poll(self, devices: Optional[List[Dict[str, Any]]]) -> int:
+        """一次互斥的读取；配置重置后丢弃尚在网络中的旧响应。"""
         now = time.time()
         if now < self._next_at:
             return 0
+        generation = self._generation
+        self._last_error = ""
         self._last_poll_at = now
         client, error = self._get_client()
         if client is None:
@@ -114,32 +122,30 @@ class SpeechListener:
             try:
                 records = client.get_latest_ask(device_id, str(device.get("hardware") or ""))
             except Exception as err:  # 鉴权失效之类，整轮退避但不打断其它设备
+                if generation != self._generation:
+                    return handled
                 # 异常原文多半是英文的 HTTP 串，页面上直接挂出来就是一句英文提示
                 name = str(device.get("name") or device.get("alias") or "").strip() or device_id[:8]
                 self._last_error = f"{name}：读不到对话记录（{err}）"
                 continue
+            if generation != self._generation:
+                return handled
             if records is None:
                 # 取不到 ≠ 没有记录：基线不推进，下一轮还会看到这些话
                 self._last_error = f"{device_id}: 读对话记录失败"
                 continue
-            handled += self._consume(device_id, records)
+            handled += self._consume(device_id, records, str(device.get("hardware") or ""), generation)
+        if generation != self._generation:
+            return handled
         if self._last_error:
             self._backoff(self._last_error)
             return handled
         self._failures = 0
-        # 空闲降频：没有 AI 对话在等追问时才拉长间隔
-        gap = self._interval if (handled or self._chat_on()) else min(
-            self._interval * 2, IDLE_POLL_SECONDS)
         # 从本轮**结束**起算，不是从开始：一轮问小米要几秒，从开始算的话慢轮一跑完
         # 「下次时间」就已经在过去，宿主下一次 tick 立刻又发一轮 —— 配 2 秒实际是贴着
         # 打，两轮还会重叠，刷出一堆 skipped 告警。
-        self._next_at = time.time() + gap
+        self._next_at = time.time() + self._interval
         return handled
-
-    def _chat_on(self) -> bool:
-        """对话窗口是否还开着：`chat_active` 可以是布尔常量，也可以是插件给的可调用。"""
-        value = self._chat_active
-        return bool(value() if callable(value) else value)
 
     def _backoff(self, error: str) -> None:
         self._last_error = error
@@ -151,18 +157,21 @@ class SpeechListener:
     def reset(self) -> None:
         """换设备/改配置后调用：时间基线与去重表都不再适用。"""
         with self._lock:
+            self._generation += 1
             self._baseline.clear()
             self._primed.clear()
             self._seen.clear()
             self._next_at = 0.0
             self._failures = 0
+            self._last_error = ""
 
     def forget_device(self, device_id: str) -> None:
         with self._lock:
             self._baseline.pop(device_id, None)
             self._primed.pop(device_id, None)
 
-    def _consume(self, device_id: str, records: List[Dict[str, Any]]) -> int:
+    def _consume(self, device_id: str, records: List[Dict[str, Any]],
+                 hardware: str = "", generation: Optional[int] = None) -> int:
         if not self._primed.get(device_id):
             # 首轮整批只对齐基线，一条都不执行。小米回的是**按时间升序**的最近若干条：
             # 把第一条（最旧的那条）当基线、剩下几条当新命令，等于让音箱在宿主一重启就把
@@ -180,6 +189,8 @@ class SpeechListener:
             return 0
         handled = 0
         for record in records:
+            if generation is not None and generation != self._generation:
+                break
             timestamp = int(record.get("timestamp_ms") or 0)
             text = str(record.get("question") or "").strip()
             if not timestamp:
@@ -195,7 +206,7 @@ class SpeechListener:
             handled += 1
             self._handled += 1
             try:
-                reply = self._handler(text, device_id, "")
+                reply = self._handler(text, device_id, hardware)
             except Exception as err:
                 self._last_error = f"处理口令失败: {err}"
                 reply = ""

@@ -1,58 +1,58 @@
 
 /* 仅插件内局部样式；含 .v- 的类名选择器会被构建的 postcss 门禁整条删掉，所以只碰自己的类。
    配色全部取宿主 --v-theme-*，深浅色跟着主程序走。 */
-.xcf[data-v-ca97576b] {
+.xcf[data-v-e85489f0] {
   display: flex; flex-direction: column; gap: 12px;
   --xcf-radius: 14px;
   --xcf-ink: rgba(var(--v-theme-on-surface), .92);
   --xcf-ink-faint: rgba(var(--v-theme-on-surface), .5);
   --xcf-line: rgba(var(--v-border-color), var(--v-border-opacity));
 }
-.xcf-group[data-v-ca97576b] {
+.xcf-group[data-v-e85489f0] {
   padding: 15px 16px 16px;
   border-radius: var(--xcf-radius);
   border: 1px solid var(--xcf-line);
   background: rgba(var(--v-theme-on-surface), .028);
   transition: border-color .18s ease, background .18s ease, transform .18s ease;
 }
-.xcf-group[data-v-ca97576b]:hover {
+.xcf-group[data-v-e85489f0]:hover {
   border-color: rgba(var(--v-theme-primary), .32);
   background: rgba(var(--v-theme-on-surface), .042);
 }
-.xcf-group-title[data-v-ca97576b] {
+.xcf-group-title[data-v-e85489f0] {
   display: flex; align-items: center; gap: 7px; margin-bottom: 11px;
   font-size: 12px; font-weight: 650; letter-spacing: .3px; color: var(--xcf-ink);
 }
-.xcf-grid[data-v-ca97576b] { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+.xcf-grid[data-v-e85489f0] { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
 }
-.xcf-toggle[data-v-ca97576b] {
+.xcf-toggle[data-v-e85489f0] {
   display: flex; align-items: flex-start; gap: 4px; padding: 7px 0;
   border-radius: 10px; cursor: pointer;
 }
-.xcf-toggle > span[data-v-ca97576b] { min-width: 0; padding-top: 2px;
+.xcf-toggle > span[data-v-e85489f0] { min-width: 0; padding-top: 2px;
 }
-.xcf-toggle b[data-v-ca97576b] { display: block; font-size: 13px; font-weight: 600; color: var(--xcf-ink);
+.xcf-toggle b[data-v-e85489f0] { display: block; font-size: 13px; font-weight: 600; color: var(--xcf-ink);
 }
-.xcf-toggle em[data-v-ca97576b] {
+.xcf-toggle em[data-v-e85489f0] {
   display: block; margin-top: 1px; font-style: normal;
   font-size: 11.5px; line-height: 1.6; color: var(--xcf-ink-faint);
 }
-.xcf-hint[data-v-ca97576b] { margin-top: 8px; font-size: 11.5px; line-height: 1.65; color: var(--xcf-ink-faint);
+.xcf-hint[data-v-e85489f0] { margin-top: 8px; font-size: 11.5px; line-height: 1.65; color: var(--xcf-ink-faint);
 }
-.xcf-hint b[data-v-ca97576b] { color: var(--xcf-ink); font-weight: 600;
+.xcf-hint b[data-v-e85489f0] { color: var(--xcf-ink); font-weight: 600;
 }
-.xcf-note[data-v-ca97576b] {
+.xcf-note[data-v-e85489f0] {
   padding: 10px 13px; border-radius: 12px;
   font-size: 12px; line-height: 1.65; color: var(--xcf-ink);
   background: rgba(var(--v-theme-info), .08);
   border: 1px solid rgba(var(--v-theme-info), .18);
 }
-.xcf-note-warn[data-v-ca97576b] {
+.xcf-note-warn[data-v-e85489f0] {
   background: rgba(var(--v-theme-warning), .08);
   border-color: rgba(var(--v-theme-warning), .2);
 }
 @media (max-width: 760px) {
-.xcf-group[data-v-ca97576b] { padding: 13px;
+.xcf-group[data-v-e85489f0] { padding: 13px;
 }
 }
 

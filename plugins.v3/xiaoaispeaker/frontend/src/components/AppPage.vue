@@ -366,15 +366,9 @@ function runTask(row: TaskRow) {
   return post('/tasks/run', { id: row.id }, '立即执行')
 }
 
-// 「加入队列」不另开接口：/queue 是整本替换，所以把现有队列取回来加上这一条再提交，
-// 当前位置保持不变（队列为空时从 0 开始播）。
+// 由服务端原子追加并去重，避免页面旧快照覆盖语音点歌后的队列。
 async function enqueue(path: string) {
-  const items = (queue.value.items || []).map(i => i.path)
-  if (items.includes(path)) {
-    notify('这一首已经在队列里了', 'warning')
-    return
-  }
-  await post('/queue', { paths: [...items, path], index: items.length ? queue.value.index : 0 }, '加入队列')
+  await post('/queue', { paths: [path], append: true }, '加入队列')
 }
 
 function queueDirectory() {
@@ -502,7 +496,7 @@ function queuePlaylistSongs() {
     notify('这个歌单里没有可播放的音频', 'warning')
     return
   }
-  return post('/queue', { paths, index: 0 }, '歌单入队')
+  return post('/queue', { paths, append: true }, '歌单入队')
 }
 
 // ---------------- 音乐库 ----------------

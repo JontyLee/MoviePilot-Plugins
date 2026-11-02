@@ -523,7 +523,7 @@ const _sfc_main$4 = /* @__PURE__ */ _defineComponent$4({
               }, null, 8, ["modelValue"]),
               _cache[44] || (_cache[44] = _createElementVNode$4("span", null, [
                 _createElementVNode$4("b", null, "播报执行结果"),
-                _createElementVNode$4("em", null, "「已播放 XXX」，没播成也说一句为什么。")
+                _createElementVNode$4("em", null, "播报未起播的操作结果或失败原因；成功起播后保持音乐播放。")
               ], -1))
             ]),
             _createElementVNode$4("label", _hoisted_34$1, [
@@ -551,7 +551,7 @@ const _sfc_main$4 = /* @__PURE__ */ _defineComponent$4({
               }, null, 8, ["modelValue"]),
               _cache[46] || (_cache[46] = _createElementVNode$4("span", null, [
                 _createElementVNode$4("b", null, "记住刚才那首"),
-                _createElementVNode$4("em", null, "用于「再播一遍」「换一首」这类指代；只留在本机内存里，不落盘。")
+                _createElementVNode$4("em", null, "记住成功点歌的说法与路径，同一句话优先重播；保存在本机，30 天后过期。")
               ], -1))
             ])
           ]),
@@ -633,7 +633,7 @@ const _sfc_main$4 = /* @__PURE__ */ _defineComponent$4({
   }
 });
 
-const ConfigForm = /* @__PURE__ */ _export_sfc(_sfc_main$4, [["__scopeId", "data-v-ca97576b"]]);
+const ConfigForm = /* @__PURE__ */ _export_sfc(_sfc_main$4, [["__scopeId", "data-v-e85489f0"]]);
 
 const {computed: computed$4,inject,ref: ref$4} = await importShared('vue');
 function useApi(props, after) {

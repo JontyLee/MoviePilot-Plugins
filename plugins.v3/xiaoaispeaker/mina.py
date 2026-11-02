@@ -980,12 +980,16 @@ class XiaoaiClient:
         """播放状态：{code, status, volume, position}；读不到时 status=-1。"""
         result = self._ubus(device_id, "player_get_play_status", "mediaplayer", {})
         info = self._parse_info(result)
+        detail = info.get("play_song_detail")
+        detail = detail if isinstance(detail, dict) else {}
         return {
             "code": int(result.get("code") or 0) if isinstance(result, dict) else -1,
             "status": int(info.get("status") or 0) if isinstance(info.get("status"), (int, float)) else -1,
             "volume": info.get("volume"),
-            "position": info.get("position"),
-            "duration": info.get("duration"),
+            "position": info.get("position") if info.get("position") is not None else detail.get("position"),
+            "duration": info.get("duration") if info.get("duration") is not None else detail.get("duration"),
+            "audio_id": str(detail.get("audio_id") or info.get("audio_id") or ""),
+            "stream_url": str(detail.get("url") or info.get("url") or ""),
             "raw": info,
         }
 

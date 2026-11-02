@@ -20,6 +20,7 @@ import json
 import re
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime
@@ -159,10 +160,11 @@ class _FakeClient:
     """XiaoaiClient 的替身：只记调用，返回插件要看的那几种形状。"""
 
     def __init__(self, devices=None, status=None, play_ok=True, tts_ok=True,
-                 volume=30, asks=None) -> None:
+                 volume=30, asks=None, play_api="player_play_url") -> None:
         self._devices = devices if devices is not None else []
         self._status = status or {"status": 1, "volume": 30, "position": 1000, "duration": 60000}
         self._play_ok = play_ok
+        self._play_api = play_api
         self._tts_ok = tts_ok
         self._volume = volume
         self._asks = asks
@@ -185,7 +187,7 @@ class _FakeClient:
 
     def play(self, device_id, url, hardware="", play_mode="auto", keep_light=False):
         self.calls.append(("play", device_id, url, hardware, play_mode, keep_light))
-        return {"ok": self._play_ok, "api": "player_play_url",
+        return {"ok": self._play_ok, "api": self._play_api,
                 "error": "" if self._play_ok else "被设备拒绝"}
 
     def play_operation(self, device_id, action):
@@ -255,6 +257,23 @@ def _device(device_id: str = "D1", name: str = "客厅", hardware: str = "L05B",
 # ---------------- mina：协议请求形状 ----------------
 
 class MinaProtocolTest(unittest.TestCase):
+    def test_oh2_nested_playback_details_are_normalized(self) -> None:
+        client = mina.XiaoaiClient(_token())
+        client._ubus = lambda *args: {"code": 0, "data": {"info": json.dumps({
+            "status": 2, "volume": 44,
+            "play_song_detail": {"audio_id": "official-song", "position": 7863, "duration": 30041},
+        })}}
+        status = client.get_status("D1")
+        self.assertEqual(status["position"], 7863)
+        self.assertEqual(status["duration"], 30041)
+        self.assertEqual(status.get("audio_id"), "official-song")
+        self.assertEqual(status["status"], 2)
+
+    def test_missing_playback_status_is_unknown(self) -> None:
+        client = mina.XiaoaiClient(_token())
+        client._ubus = lambda *args: {"code": 0, "data": {"info": "{}"}}
+        self.assertEqual(client.get_status("D1")["status"], -1)
+
     def test_client_sign_vector(self) -> None:
         self.assertEqual(
             mina._client_sign("1701", "abc123"),
@@ -1059,8 +1078,9 @@ class PluginQueueTest(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def _plugin(self, status=None, auto_next=True):
-        client = _FakeClient(devices=[_device()], status=status)
+    def _plugin(self, status=None, auto_next=True, play_api="player_play_url", tts_ok=True):
+        client = _FakeClient(devices=[_device()], status=status, play_api=play_api,
+                             tts_ok=tts_ok)
         plugin = x.XiaoaiSpeaker()
         plugin.init_plugin({**media_defaults, "music_dirs": str(self.root),
                             "auto_next": auto_next})
@@ -1080,6 +1100,339 @@ class PluginQueueTest(unittest.TestCase):
         plugin, _ = self._plugin()
         out = plugin._set_queue_state(self.tracks, 99, "D1")
         self.assertEqual(out.index, 0)
+
+    def test_single_play_replaces_the_previous_playlist(self) -> None:
+        plugin, client = self._plugin()
+        plugin.api_queue(x.schemas.QueueIn(paths=self.tracks[:2], index=0))
+        result = plugin.api_play(x.schemas.PlayIn(path=self.tracks[2]))
+        self.assertTrue(result.ok)
+        self.assertEqual([row.path for row in result.queue.items], [self.tracks[2]])
+        plugin._tick_advance()
+        last = plugin.get_data("last")
+        last["started_at"] = time.time() - 120
+        plugin.save_data("last", last)
+        client._status["status"] = 0
+        before = len([row for row in client.calls if row[0] == "play"])
+        plugin._tick_advance()
+        plugin._tick_advance()
+        self.assertEqual(len([row for row in client.calls if row[0] == "play"]), before)
+
+    def test_external_play_disarms_the_library_queue(self) -> None:
+        plugin, _ = self._plugin()
+        plugin.api_queue(x.schemas.QueueIn(paths=self.tracks))
+        result = plugin.api_play(x.schemas.PlayIn(url="https://audio.example/new.mp3"))
+        self.assertTrue(result.ok)
+        self.assertEqual(plugin._queue_state()["items"], [])
+        self.assertEqual(result.playing.source, "url")
+
+    def test_queue_index_tracks_the_played_file_after_filtering(self) -> None:
+        plugin, _ = self._plugin()
+        a, b, c = self.tracks
+        result = plugin.api_queue(x.schemas.QueueIn(
+            paths=[a, str(self.foreign), b, c], index=2))
+        self.assertTrue(result.ok)
+        self.assertEqual(result.queue.index, 1)
+        self.assertEqual(result.queue.items[result.queue.index].path, b)
+        self.assertEqual(plugin.get_data("last")["path"], b)
+
+    def test_append_merges_server_queue_without_restarting(self) -> None:
+        plugin, client = self._plugin()
+        plugin.api_queue(x.schemas.QueueIn(paths=self.tracks[:2], index=1))
+        last = plugin.get_data("last")
+        before = len([row for row in client.calls if row[0] == "play"])
+        result = plugin.api_queue(x.schemas.QueueIn(paths=[self.tracks[2]], append=True))
+        self.assertTrue(result.ok)
+        self.assertEqual([row.path for row in result.queue.items], self.tracks)
+        self.assertEqual(result.queue.index, 1)
+        self.assertEqual(plugin.get_data("last"), last)
+        self.assertEqual(len([row for row in client.calls if row[0] == "play"]), before)
+
+    def test_append_validates_new_paths_without_needing_a_default_device(self) -> None:
+        plugin, client = self._plugin()
+        plugin.api_queue(x.schemas.QueueIn(paths=self.tracks[:1]))
+        plugin._default_device_id = "missing-default"
+        result = plugin.api_queue(x.schemas.QueueIn(paths=[self.tracks[1]], append=True))
+        self.assertTrue(result.ok)
+        self.assertEqual(result.queue.device_id, "D1")
+        self.assertFalse(plugin.api_queue(x.schemas.QueueIn(paths=[str(self.foreign)], append=True)).ok)
+        self.assertEqual(len([row for row in client.calls if row[0] == "play"]), 1)
+
+    def test_append_to_an_empty_queue_starts_first_valid_path(self) -> None:
+        plugin, _ = self._plugin()
+        result = plugin.api_queue(x.schemas.QueueIn(paths=[str(self.foreign), self.tracks[1]], append=True))
+        self.assertTrue(result.ok)
+        self.assertEqual(result.playing.path, self.tracks[1])
+        self.assertEqual(result.queue.index, 0)
+
+    def test_old_advance_cannot_restore_a_replaced_playlist(self) -> None:
+        plugin, _ = self._plugin()
+        plugin.api_queue(x.schemas.QueueIn(paths=self.tracks[:2]))
+        reached = threading.Event()
+        release = threading.Event()
+        replaced = threading.Event()
+        original = plugin._playing_out
+        errors = []
+
+        def block_old_result(*args, **kwargs):
+            if threading.current_thread().name == "old-advance":
+                reached.set()
+                if not release.wait(2):
+                    raise RuntimeError("advance test barrier timed out")
+            return original(*args, **kwargs)
+
+        def advance():
+            try:
+                plugin._advance("next")
+            except Exception as exc:
+                errors.append(exc)
+
+        def replace():
+            try:
+                plugin.api_queue(x.schemas.QueueIn(paths=[self.tracks[2]]))
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                replaced.set()
+
+        plugin._playing_out = block_old_result
+        old = threading.Thread(target=advance, name="old-advance")
+        new = threading.Thread(target=replace)
+        old.start()
+        self.assertTrue(reached.wait(2))
+        new.start()
+        try:
+            # 在旧回调尚未提交时给新请求机会执行，结束后以实际状态而非线程时序断言。
+            replaced.wait(0.1)
+        finally:
+            release.set()
+            old.join(2)
+            new.join(2)
+        self.assertFalse(old.is_alive() or new.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual([row["path"] for row in plugin._queue_state()["items"]], [self.tracks[2]])
+        self.assertEqual(plugin.get_data("last")["path"], self.tracks[2])
+
+    def test_stale_tick_response_cannot_advance_a_new_session(self) -> None:
+        plugin, _ = self._plugin()
+        plugin.api_queue(x.schemas.QueueIn(paths=self.tracks[:2]))
+        plugin._tick_advance()
+        plugin.__dict__["_idle_ticks"] = 1
+        last = plugin.get_data("last")
+        last["started_at"] = time.time() - 120
+        plugin.save_data("last", last)
+        original = plugin._device_status
+        responses = 0
+
+        def swapped_status(device_id, force=False):
+            nonlocal responses
+            responses += 1
+            if responses == 1:
+                plugin.api_queue(x.schemas.QueueIn(paths=[self.tracks[2], self.tracks[0]]))
+                return {"status": 0}
+            return original(device_id, force=force)
+
+        plugin._device_status = swapped_status
+        plugin._tick_advance()
+        self.assertEqual(plugin.get_data("last")["path"], self.tracks[2])
+        self.assertEqual(plugin._queue_state()["index"], 0)
+        self.assertEqual(plugin.__dict__.get("_idle_ticks"), 0,
+                         "旧响应连停止计数也不能带到新播放会话")
+
+    def test_stale_playing_response_cannot_clear_a_new_pause(self) -> None:
+        plugin, client = self._plugin()
+        plugin.api_queue(x.schemas.QueueIn(paths=self.tracks))
+        original = plugin._device_status
+        responses = 0
+
+        def paused_during_status(device_id, force=False):
+            nonlocal responses
+            responses += 1
+            if responses == 1:
+                plugin._control("pause")
+                return {"status": 1}
+            return original(device_id, force=force)
+
+        plugin._device_status = paused_during_status
+        plugin._tick_advance()
+        self.assertEqual(plugin._queue_state().get("paused_token"),
+                         plugin._queue_token(plugin._queue_state()))
+
+    def test_same_track_replay_rejects_old_playing_response(self) -> None:
+        plugin, _ = self._plugin()
+        plugin.api_queue(x.schemas.QueueIn(paths=self.tracks))
+        original = plugin._device_status
+        responses = 0
+
+        def replayed_during_status(device_id, force=False):
+            nonlocal responses
+            responses += 1
+            if responses == 1:
+                plugin._advance("0")
+                return {"status": 1}
+            return original(device_id, force=force)
+
+        plugin._device_status = replayed_during_status
+        plugin._tick_advance()
+        self.assertIsNone(plugin.__dict__.get("_advance_seen"))
+
+    def test_unknown_status_breaks_consecutive_stops(self) -> None:
+        plugin, client = self._plugin()
+        plugin.api_queue(x.schemas.QueueIn(paths=self.tracks))
+        plugin._tick_advance()
+        last = plugin.get_data("last")
+        last["started_at"] = time.time() - 120
+        plugin.save_data("last", last)
+        before = len([row for row in client.calls if row[0] == "play"])
+        for status in (0, -1, 0):
+            client._status = {"status": status}
+            plugin._tick_advance()
+        self.assertEqual(len([row for row in client.calls if row[0] == "play"]), before)
+
+    def test_queue_must_belong_to_the_last_pushed_track_and_device(self) -> None:
+        for changed in ({"path": self.tracks[2]}, {"device_id": "D2"}):
+            with self.subTest(changed=changed):
+                plugin, client = self._plugin()
+                plugin.api_queue(x.schemas.QueueIn(paths=self.tracks))
+                last = plugin.get_data("last")
+                last.update(started_at=time.time() - 120, **changed)
+                plugin.save_data("last", last)
+                plugin._tick_advance()
+                before = len([row for row in client.calls if row[0] == "play"])
+                client._status = {"status": 0}
+                plugin._tick_advance()
+                plugin._tick_advance()
+                self.assertEqual(len([row for row in client.calls if row[0] == "play"]), before)
+
+    def test_announcement_precedes_auto_next_push(self) -> None:
+        plugin, client = self._plugin()
+        plugin._tts_announce = True
+        plugin.api_queue(x.schemas.QueueIn(paths=self.tracks))
+        plugin._tick_advance()
+        last = plugin.get_data("last")
+        last["started_at"] = time.time() - 120
+        plugin.save_data("last", last)
+        client.calls.clear()
+        client._status = {"status": 0}
+        plugin._tick_advance()
+        plugin._tick_advance()
+        self.assertEqual([row[0] for row in client.calls if row[0] in ("tts", "play")],
+                         ["tts", "play"])
+
+    def test_tts_suspends_auto_next_until_explicit_resume(self) -> None:
+        plugin, client = self._plugin()
+        plugin.api_queue(x.schemas.QueueIn(paths=self.tracks))
+        plugin._tick_advance()
+        last = plugin.get_data("last")
+        last["started_at"] = time.time() - 120
+        plugin.save_data("last", last)
+        self.assertTrue(plugin.api_tts(x.schemas.TtsIn(text="测试播报")).ok)
+        client._status = {"status": 0}
+        before = len([row for row in client.calls if row[0] == "play"])
+        plugin._tick_advance()
+        plugin._tick_advance()
+        self.assertEqual(len([row for row in client.calls if row[0] == "play"]), before)
+        self.assertTrue(plugin._control("play").ok)
+        self.assertEqual(plugin.get_data("last")["path"], self.tracks[0])
+        self.assertEqual(len([row for row in client.calls if row[0] == "play"]), before + 1)
+        self.assertNotIn("suspended", plugin._queue_state())
+
+    def test_rejected_tts_keeps_the_queue_alive(self) -> None:
+        """播报被设备拒绝时声道没被占走，不该顺手停用连播。"""
+        plugin, client = self._plugin(tts_ok=False)
+        plugin.api_queue(x.schemas.QueueIn(paths=self.tracks))
+        plugin._tick_advance()
+        last = plugin.get_data("last")
+        last["started_at"] = time.time() - 120
+        plugin.save_data("last", last)
+        self.assertFalse(plugin.api_tts(x.schemas.TtsIn(text="测试播报")).ok)
+        self.assertNotIn("suspended", plugin._queue_state())
+        client._status = {"status": 0}
+        before = len([row for row in client.calls if row[0] == "play"])
+        plugin._tick_advance()
+        plugin._tick_advance()
+        self.assertEqual(len([row for row in client.calls if row[0] == "play"]), before + 1)
+
+    def test_pause_and_unknown_do_not_establish_playback(self) -> None:
+        for state in (2, -1):
+            with self.subTest(state=state):
+                plugin, client = self._plugin(status={"status": state})
+                plugin.api_queue(x.schemas.QueueIn(paths=self.tracks))
+                plugin._control("pause")
+                token = plugin._queue_token(plugin._queue_state())
+                plugin._tick_advance()
+                self.assertEqual(plugin._queue_state().get("paused_token"), token)
+                self.assertIsNone(plugin.__dict__.get("_advance_seen"))
+
+    def test_official_audio_cannot_resume_the_previous_queue(self) -> None:
+        # 现场 OH2 走 play_music：播官方试听时云端回的是另一个 audio_id
+        plugin, client = self._plugin(play_api="player_play_music")
+        plugin.api_queue(x.schemas.QueueIn(paths=self.tracks))
+        self.assertEqual(plugin.get_data("last")["audio_id"], mina.DEFAULT_MUSIC_AUDIO_ID)
+        client._status.update(status=1, audio_id="455908638179983399")
+        plugin._tick_advance()
+        last = plugin.get_data("last")
+        last["started_at"] = time.time() - 120
+        plugin.save_data("last", last)
+        client._status = {"status": 0}
+        before = len([row for row in client.calls if row[0] == "play"])
+        plugin._tick_advance()
+        plugin._tick_advance()
+        self.assertEqual(len([row for row in client.calls if row[0] == "play"]), before)
+
+    def test_play_music_entry_url_is_not_compared_as_foreign(self) -> None:
+        """play_music 的条目由 audioID 认定：云端另报一个 url 不该被当成外部音频。"""
+        plugin, client = self._plugin(play_api="player_play_music")
+        plugin.api_queue(x.schemas.QueueIn(paths=self.tracks))
+        client._status.update(status=1, audio_id=mina.DEFAULT_MUSIC_AUDIO_ID,
+                              stream_url="https://static.mis.example/cloud-item.mp3")
+        plugin._tick_advance()
+        last = plugin.get_data("last")
+        last["started_at"] = time.time() - 120
+        plugin.save_data("last", last)
+        client._status = {"status": 0, "audio_id": mina.DEFAULT_MUSIC_AUDIO_ID}
+        before = len([row for row in client.calls if row[0] == "play"])
+        plugin._tick_advance()
+        plugin._tick_advance()
+        self.assertEqual(len([row for row in client.calls if row[0] == "play"]), before + 1)
+        self.assertEqual(plugin._queue_state()["index"], 1)
+
+    def test_url_identity_uses_the_signed_link_not_its_punctuation(self) -> None:
+        plugin, client = self._plugin()
+        plugin.api_queue(x.schemas.QueueIn(paths=self.tracks))
+        ours = plugin.get_data("last")["url"]
+        # 小米会把 `&` 换成空格：签名参数一致就算同一条直链
+        client._status.update(status=1, stream_url=ours.replace("?", "?x=1&"))
+        plugin._tick_advance()
+        self.assertEqual(plugin.__dict__.get("_advance_seen")[0],
+                         plugin._queue_token(plugin._queue_state()))
+        client._status.update(status=1, stream_url="https://stream.example/other.m4a")
+        plugin._tick_advance()
+        self.assertTrue(plugin._queue_state().get("suspended"))
+        self.assertFalse([row for row in client.calls if row[0] == "play"][1:])
+
+    def test_url_push_without_reported_identity_still_advances(self) -> None:
+        """型号不报 audio_id 与 url 时不能凭空认定外部音频，否则连播再也不工作。"""
+        plugin, client = self._plugin()
+        plugin.api_queue(x.schemas.QueueIn(paths=self.tracks))
+        plugin._tick_advance()
+        last = plugin.get_data("last")
+        last["started_at"] = time.time() - 120
+        plugin.save_data("last", last)
+        client._status = {"status": 0}
+        before = len([row for row in client.calls if row[0] == "play"])
+        plugin._tick_advance()
+        plugin._tick_advance()
+        self.assertEqual(len([row for row in client.calls if row[0] == "play"]), before + 1)
+
+    def test_external_url_suspends_an_observed_library_track(self) -> None:
+        plugin, client = self._plugin()
+        plugin.api_queue(x.schemas.QueueIn(paths=self.tracks))
+        plugin._tick_advance()
+        client._status.update(status=1, stream_url="https://audio.example/official.mp3")
+        plugin._tick_advance()
+        self.assertTrue(plugin._queue_state().get("suspended"))
+        self.assertTrue(plugin._control("next").ok)
+        self.assertNotIn("suspended", plugin._queue_state())
 
     def test_next_and_prev_walk_the_queue(self) -> None:
         plugin, client = self._plugin()
@@ -1127,9 +1480,7 @@ class PluginQueueTest(unittest.TestCase):
         stopped = {"status": 0, "volume": 10, "position": 0, "duration": 0}
         playing = {"status": 1, "volume": 10, "position": 1000, "duration": 60000}
         plugin, client = self._plugin(status=playing)
-        plugin._set_queue_state(self.tracks, 0, "D1")
-        plugin.save_data("last", {"device_id": "D1", "path": self.tracks[0],
-                                  "started_at": time.time(), "title": "一"})
+        plugin.api_queue(x.schemas.QueueIn(paths=self.tracks))
         before = len([c for c in client.calls if c[0] == "play"])
         plugin._tick()
         self.assertEqual(len([c for c in client.calls if c[0] == "play"]), before)
@@ -1170,13 +1521,15 @@ class PluginQueueTest(unittest.TestCase):
         playing = {"status": 1, "volume": 10, "position": 1000, "duration": 60000}
         stopped = {"status": 0, "volume": 10, "position": 0, "duration": 0}
         plugin, client = self._plugin(status=playing)
-        plugin._set_queue_state(self.tracks, 0, "D1")
+        plugin.api_queue(x.schemas.QueueIn(paths=self.tracks))
         plugin._tick()
         self.assertTrue(plugin._control("pause").ok)
         self.assertEqual(plugin._queue_state().get("paused_token"),
                          plugin._queue_token(plugin._queue_state()))
         client._status = stopped
-        plugin.save_data("last", {"device_id": "D1", "started_at": time.time() - 600})
+        last = plugin.get_data("last")
+        last["started_at"] = time.time() - 600
+        plugin.save_data("last", last)
         before = len([c for c in client.calls if c[0] == "play"])
         for _ in range(4):
             plugin._tick()
@@ -1198,7 +1551,7 @@ class PluginQueueTest(unittest.TestCase):
         playing = {"status": 1, "volume": 10, "position": 1000, "duration": 60000}
         stopped = {"status": 0, "volume": 10, "position": 0, "duration": 0}
         plugin, client = self._plugin(status=playing)
-        plugin._set_queue_state(self.tracks, 0, "D1")
+        plugin.api_queue(x.schemas.QueueIn(paths=self.tracks))
         plugin._tick()
         plugin._control("pause")
         client._status = stopped
@@ -1208,7 +1561,9 @@ class PluginQueueTest(unittest.TestCase):
         self.assertNotIn("paused_token", plugin._queue_state(),
                          "设备已经自己播起来了，标记得擦掉")
         client._status = stopped
-        plugin.save_data("last", {"device_id": "D1", "started_at": time.time() - 600})
+        last = plugin.get_data("last")
+        last["started_at"] = time.time() - 600
+        plugin.save_data("last", last)
         before = len([c for c in client.calls if c[0] == "play"])
         plugin._tick()
         plugin._tick()
@@ -1707,6 +2062,244 @@ class PluginVoiceTest(unittest.TestCase):
         self._listener_tick(plugin, client, [record])
         self.assertIn(("set_volume", "D1", 30), client.calls)
 
+    def test_listener_success_clears_error_and_backoff(self) -> None:
+        plugin, client = self._plugin(asks=None)
+        self._listener_tick(plugin, client, None)
+        listener = plugin._listener()
+        self.assertTrue(listener.status()["error"])
+        for _ in range(4):
+            self._listener_tick(plugin, client, [])
+            self.assertEqual(listener.status()["error"], "")
+            self.assertLessEqual(listener.status()["next_in"], 2.1)
+        listener._last_error = "stale"
+        listener.reset()
+        self.assertEqual(listener.status()["error"], "")
+
+    def test_listener_reset_discards_late_responses_and_errors(self) -> None:
+        for failure in (False, True):
+            with self.subTest(failure=failure):
+                plugin, client = self._plugin()
+                listener = plugin._listener()
+                listener._primed["D1"] = True
+
+                def reset_during_fetch(*args):
+                    listener.reset()
+                    if failure:
+                        raise RuntimeError("old request failed")
+                    return [{"timestamp_ms": int(time.time() * 1000), "question": "播放歌曲稻香"}]
+
+                client.get_latest_ask = reset_during_fetch
+                self.assertEqual(listener.tick(), 0)
+                self.assertEqual(listener._baseline, {})
+                self.assertEqual(listener.status()["error"], "")
+                self.assertFalse([row for row in client.calls if row[0] == "play"])
+
+    def test_listener_does_not_overlap_cloud_reads(self) -> None:
+        plugin, client = self._plugin()
+        listener = plugin._listener()
+        entered, release = threading.Event(), threading.Event()
+        calls = []
+
+        def blocked_fetch(*args):
+            calls.append(args)
+            entered.set()
+            release.wait(2)
+            return []
+
+        client.get_latest_ask = blocked_fetch
+        worker = threading.Thread(target=listener.tick)
+        worker.start()
+        try:
+            self.assertTrue(entered.wait(1))
+            self.assertEqual(listener.tick(), 0)
+            self.assertEqual(len(calls), 1)
+        finally:
+            release.set()
+            worker.join(2)
+        self.assertFalse(worker.is_alive())
+
+    def test_child_song_command_does_not_require_ai(self) -> None:
+        plugin, _ = self._plugin()
+        match = plugin._match_voice("播放儿歌小跳蛙")
+        self.assertIsNotNone(match)
+        self.assertEqual((match.kind, match.argument), ("play_song", "小跳蛙"))
+
+    def test_failed_voice_selection_neither_memorizes_nor_advances(self) -> None:
+        plugin, client = self._plugin(config={"voice_hint_tts": False, "ai_enabled": False})
+        plugin._play_file(self.tracks[0], device_id="D1", queue_paths=self.tracks)
+        plugin._tick_advance()
+        last = plugin.get_data("last")
+        last["started_at"] = time.time() - 120
+        plugin.save_data("last", last)
+        plugin._library_rebuild = lambda **kwargs: False
+        reply = plugin._on_voice_text("播放歌曲查无此曲", "D1", "OH2")
+        self.assertIn("没找到", reply)
+        self.assertFalse(plugin.get_data("voice_memory"))
+        client._status["status"] = 0
+        before = len([row for row in client.calls if row[0] == "play"])
+        plugin._tick_advance()
+        plugin._tick_advance()
+        self.assertEqual(len([row for row in client.calls if row[0] == "play"]), before)
+
+    def test_voice_test_execution_uses_takeover_and_failure_suspension(self) -> None:
+        plugin, client = self._plugin(config={"voice_hint_tts": False})
+        plugin._play_file(self.tracks[0], device_id="D1", queue_paths=self.tracks)
+        plugin._library_rebuild = lambda **kwargs: False
+        out = plugin.api_voice_test(x.schemas.VoiceIn(text="播放儿歌查无此曲", execute=True))
+        self.assertIn("没找到", out.reply)
+        self.assertIn(("interrupt", "D1"), client.calls)
+        self.assertTrue(plugin._queue_state().get("suspended"))
+        self.assertFalse(plugin.get_data("voice_memory"))
+
+    def test_unverified_legacy_memory_is_not_used(self) -> None:
+        plugin, _ = self._plugin()
+        plugin.save_data("voice_memory", [{"key": "play_song|来点旧歌", "path": self.tracks[0],
+                                           "at": time.time()}])
+        self.assertIsNone(plugin._match_voice("来点旧歌", use_ai=False))
+
+    def test_failed_device_push_does_not_create_voice_memory(self) -> None:
+        plugin, client = self._plugin(config={"voice_hint_tts": False})
+        plugin._play_file(self.tracks[1], device_id="D1", queue_paths=self.tracks)
+        client._play_ok = False
+        reply = plugin._on_voice_text("播放歌曲稻香", "D1", "OH2")
+        self.assertIn("拒绝", reply)
+        self.assertFalse(plugin.get_data("voice_memory"))
+
+    def test_repeated_voice_command_uses_its_successful_memory(self) -> None:
+        plugin, _ = self._plugin()
+        plugin._on_voice_text("播放歌曲稻香", "D1", "OH2")
+        plugin._library().search_song = lambda query: [(100, plugin._library().get(self.tracks[1]).as_dict())]
+        plugin._on_voice_text("播放歌曲稻香", "D1", "OH2")
+        self.assertEqual(plugin.get_data("last")["path"], self.tracks[0])
+
+    def test_config_changes_discard_pending_ai_result(self) -> None:
+        for action in ("save", "reload", "stop", "disable_monitor", "select", "logout"):
+            with self.subTest(action=action):
+                plugin, client = self._plugin(config={"ai_enabled": True})
+                entered, release = threading.Event(), threading.Event()
+
+                class Analyzer:
+                    def analyze(self, text):
+                        entered.set()
+                        release.wait(2)
+                        return x._voice.Match("play_song", "", "ai", "稻香", text)
+
+                plugin._ai_available = lambda: True
+                plugin._analyzer = lambda: Analyzer()
+                plugin._on_voice_text("来点我喜欢的", "D1", "OH2", background_ai=True)
+                try:
+                    self.assertTrue(entered.wait(1))
+                    if action == "save":
+                        plugin.api_config(x.schemas.ConfigIn(ai_enabled=False))
+                    elif action == "reload":
+                        plugin.init_plugin(plugin._config_snapshot())
+                    elif action == "stop":
+                        plugin.stop_service()
+                    elif action == "disable_monitor":
+                        plugin._task_monitor("disable_monitor")
+                    elif action == "select":
+                        plugin.api_device_select(x.schemas.DeviceSelectIn(device_id="D1"))
+                    else:
+                        plugin.api_logout()
+                finally:
+                    release.set()
+                    plugin.__dict__["_voice_ai_thread"].join(2)
+                self.assertFalse([row for row in client.calls if row[0] in ("play", "tts")])
+                self.assertFalse(plugin.get_data("voice_memory"))
+
+    def test_voice_test_cannot_execute_ai_result_after_a_stop(self) -> None:
+        plugin, client = self._plugin(config={"ai_enabled": True})
+        entered, release = threading.Event(), threading.Event()
+        outputs = []
+
+        class Analyzer:
+            def analyze(self, text):
+                entered.set()
+                release.wait(2)
+                return x._voice.Match("play_song", "", "ai", "稻香", text)
+
+        plugin._ai_available = lambda: True
+        plugin._analyzer = lambda: Analyzer()
+        worker = threading.Thread(target=lambda: outputs.append(plugin.api_voice_test(
+            x.schemas.VoiceIn(text="来点我喜欢的", execute=True))))
+        worker.start()
+        try:
+            self.assertTrue(entered.wait(1))
+            plugin._control("stop")
+        finally:
+            release.set()
+            worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(outputs[0].ok)
+        self.assertFalse([row for row in client.calls if row[0] == "play"])
+
+    def test_successful_voice_play_has_no_followup_tts(self) -> None:
+        plugin, client = self._plugin(config={"voice_hint_tts": False, "voice_reply": True})
+        listener = plugin._listener()
+        listener._primed["D1"] = True
+        self._listener_tick(plugin, client, [{"timestamp_ms": int(time.time() * 1000),
+            "question": "播放歌曲稻香", "request_id": "play"}])
+        self.assertTrue([row for row in client.calls if row[0] == "play"])
+        self.assertFalse([row for row in client.calls if row[0] == "tts"])
+        memory = plugin.get_data("voice_memory")
+        self.assertEqual(memory[0]["path"], self.tracks[0])
+
+    def test_rejected_interrupt_is_reported_in_logs(self) -> None:
+        plugin, client = self._plugin(config={"voice_hint_tts": False})
+        client.interrupt = lambda device_id: {"ok": False, "pause_ok": False, "error": "device rejected stop"}
+        mark = len(_logger.lines)
+        plugin._on_voice_text("播放歌曲稻香", "D1", "OH2")
+        self.assertIn("device rejected stop", "\n".join(_logger.lines[mark:]))
+
+    def test_ai_pending_does_not_block_stop_or_play_late(self) -> None:
+        plugin, client = self._plugin(config={"ai_enabled": True, "ai_chat": False})
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+        class Analyzer:
+            def analyze(self, text):
+                entered.set()
+                release.wait(0.6)
+                finished.set()
+                return x._voice.Match("play_song", "", "ai", "稻香", text)
+        plugin._ai_available = lambda: True
+        plugin._analyzer = lambda: Analyzer()
+        listener = plugin._listener()
+        listener._primed["D1"] = True
+        now = int(time.time() * 1000)
+        started = time.monotonic()
+        try:
+            self._listener_tick(plugin, client, [{"timestamp_ms": now,
+                "question": "来点我喜欢的", "request_id": "ai"}])
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 0.3, "监听在等待 AI，后续停止口令无从进入")
+            self.assertTrue(entered.wait(1))
+            self._listener_tick(plugin, client, [{"timestamp_ms": now + 1000,
+                "question": "停止播放", "request_id": "stop"}])
+            self.assertIn(("play_operation", "D1", "stop"), client.calls)
+        finally:
+            release.set()
+            finished.wait(1)
+            worker = plugin.__dict__.get("_voice_ai_thread")
+            if worker:
+                worker.join(1)
+        self.assertFalse([row for row in client.calls if row[0] == "play"], "停止后的 AI 结果不应再起播")
+
+    def test_artist_queue_includes_all_matches_in_natural_order(self) -> None:
+        plugin, _ = self._plugin()
+        index = plugin._library()
+        index._songs = [library.Song(f"/music/歌手/专辑/{i} - 歌.mp3", f"{i} - 歌.mp3",
+                                    f"歌{i}", "歌手", "专辑", 1, 1, 1)
+                        for i in (12, 2, 10, 1, 11, 4, 3, 6, 5, 8, 7, 9)]
+        paths, _ = x._intents.Selection(index, []).artist("歌手")
+        self.assertEqual([Path(path).name for path in paths], [f"{i} - 歌.mp3" for i in range(1, 13)])
+
+    def test_album_queue_accepts_equivalent_chinese_metadata(self) -> None:
+        plugin, _ = self._plugin()
+        index = plugin._library()
+        index._songs = [library.Song(f"/music/歌手/专辑/{i}.mp3", f"{i}.mp3", str(i), "歌手", album, 1, 1, 1)
+                        for i, album in [(2, "葉惠美"), (1, "叶惠美")]]
+        paths = x._intents.Selection(index, [])._neighbours(index._songs[1])
+        self.assertEqual(paths, ["/music/歌手/专辑/1.mp3", "/music/歌手/专辑/2.mp3"])
+
     def test_voice_test_endpoint_judges_without_playing(self) -> None:
         plugin, client = self._plugin()
         out = plugin.api_voice_test(x.schemas.VoiceIn(text="我想听稻香"))
@@ -2030,22 +2623,34 @@ class PluginVoiceTest(unittest.TestCase):
             self._without_assistant()
 
     def test_ai_timeout_is_applied_to_the_host_call(self) -> None:
-        """ai_timeout 不是摆设：它真的当成 wait_for 的 timeout 用（宿主 get_llm 没这一项）。"""
-        self._host_assistant("好，接着放。")
-        seen: Dict[str, Any] = {}
-        real = asyncio.wait_for
+        """推理超时及时返回，同时仍把模型交还宿主。"""
+        helper = self._host_assistant()
+        closed = threading.Event()
+        workers = []
 
-        async def spy(coro, *args, **kwargs):
-            seen["timeout"] = kwargs.get("timeout", args[0] if args else None)
-            return await real(coro, *args, **kwargs)
+        async def slow_invoke(model, messages):
+            workers.append(threading.current_thread())
+            await asyncio.sleep(1)
 
-        assistant = x.intents.Assistant(7)
-        asyncio.wait_for = spy
+        async def close_model(model):
+            model.closed = True
+            closed.set()
+
+        assistant = x.intents.Assistant()
+        assistant.timeout = 0.03
+        started = time.monotonic()
         try:
-            self.assertEqual(assistant.ask("系统提示", "说一句"), "好，接着放。")
+            with mock.patch.object(_stub_env._FakeLLM, "ainvoke", slow_invoke), \
+                    mock.patch.object(helper, "close_llm", close_model):
+                self.assertEqual(assistant.ask("系统提示", "说一句"), "")
+                self.assertLess(time.monotonic() - started, 0.3)
+                self.assertTrue(closed.wait(1))
+                for worker in workers:
+                    worker.join(1)
+            self.assertIn("调用失败", assistant.error)
+            self.assertTrue(helper.instances[0].closed)
         finally:
-            asyncio.wait_for = real
-        self.assertEqual(seen.get("timeout"), 7)
+            self._without_assistant()
 
     def test_ai_unavailable_without_host_settings(self) -> None:
         """宿主没配助手时不许假装可用：口令没命中就是没命中，状态里说清缺哪一项。"""
@@ -2135,6 +2740,14 @@ class PluginGroupTest(unittest.TestCase):
         self.assertFalse(plugin.api_group_save(x.schemas.GroupIn(name="没有", remove=True)).ok)
         self.assertTrue(plugin.api_group_save(x.schemas.GroupIn(name="全屋", remove=True)).ok)
         self.assertEqual(plugin._groups(), [])
+
+    def test_group_member_stop_suspends_the_shared_queue(self) -> None:
+        plugin, _ = self._plugin()
+        plugin.api_group_save(x.schemas.GroupIn(name="全屋", device_ids=["D1", "D2"]))
+        plugin.api_queue(x.schemas.QueueIn(paths=[str(self.track)], device_id="D1"))
+        self.assertTrue(plugin._control("stop", "D2").ok)
+        self.assertEqual(plugin._queue_state().get("paused_token"),
+                         plugin._queue_token(plugin._queue_state()))
 
     def test_membership_is_exclusive(self) -> None:
         plugin, _client = self._plugin()
@@ -2977,6 +3590,100 @@ class LoginMethodTest(unittest.TestCase):
         plugin.save_data("token", {**_token(), "login_method": "qrcode"})
         plugin._client = lambda: (_FakeClient(devices=[_device()]), "")
         self.assertEqual(plugin._status(force_devices=True).login_method, "qrcode")
+
+
+class AssistantDeadlineTest(unittest.TestCase):
+    def test_result_waits_for_loop_and_child_cleanup(self) -> None:
+        assistant = x._intents.Assistant()
+        child_closed = threading.Event()
+        loops = []
+
+        async def child():
+            try:
+                await asyncio.sleep(10)
+            finally:
+                child_closed.set()
+
+        async def invoke():
+            loop = asyncio.get_running_loop()
+            loops.append(loop)
+            loop.create_task(child())
+            await asyncio.sleep(0)
+            return "ready"
+
+        self.assertEqual(assistant.call(invoke()), "ready")
+        self.assertTrue(child_closed.is_set(), "模型创建的子任务需要取消并等待清理")
+        self.assertTrue(loops[0].is_closed(), "结果返回前要完成 worker 回收")
+        self.assertEqual(assistant.call(asyncio.sleep(0, result="again")), "again")
+
+    def test_cancel_unblocks_caller_and_keeps_one_underlying_worker(self) -> None:
+        assistant = x._intents.Assistant()
+        assistant.timeout = 2
+        entered, release, caller_done = threading.Event(), threading.Event(), threading.Event()
+        workers, outcomes = [], []
+
+        async def blocked():
+            workers.append(threading.current_thread())
+            entered.set()
+            release.wait(2)
+            return "late"
+
+        def call():
+            try:
+                outcomes.append(assistant.call(blocked()))
+            except Exception as exc:
+                outcomes.append(exc)
+            finally:
+                caller_done.set()
+
+        caller = threading.Thread(target=call)
+        caller.start()
+        try:
+            self.assertTrue(entered.wait(1))
+            assistant.cancel()
+            self.assertTrue(caller_done.wait(0.3), "取消不能等待不响应取消的第三方代码")
+            self.assertIsInstance(outcomes[0], RuntimeError)
+            for _ in range(3):
+                with self.assertRaisesRegex(RuntimeError, "尚未结束"):
+                    assistant.call(asyncio.sleep(0))
+            self.assertEqual(len(workers), 1)
+        finally:
+            release.set()
+            caller.join(2)
+            for worker in workers:
+                worker.join(2)
+        self.assertEqual(assistant.call(asyncio.sleep(0, result="recovered")), "recovered")
+
+    def test_timeout_covers_model_creation(self) -> None:
+        class Helper:
+            @staticmethod
+            async def get_llm(**kwargs):
+                await asyncio.sleep(0.2)
+                return _stub_env._FakeLLM(["late"], {})
+            @staticmethod
+            async def close_llm(model):
+                model.closed = True
+        assistant = x._intents.Assistant()
+        assistant.timeout = 0.03
+        started = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            assistant.call(assistant._invoke(Helper, [], {}))
+        self.assertLess(time.monotonic() - started, 0.15)
+
+    def test_timeout_covers_model_cleanup(self) -> None:
+        class Helper:
+            @staticmethod
+            async def get_llm(**kwargs):
+                return _stub_env._FakeLLM(["ready"], {})
+            @staticmethod
+            async def close_llm(model):
+                await asyncio.sleep(0.2)
+        assistant = x._intents.Assistant()
+        assistant.timeout = 0.03
+        started = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            assistant.call(assistant._invoke(Helper, [], {}))
+        self.assertLess(time.monotonic() - started, 0.15)
 
 
 class ReleaseFieldsTest(unittest.TestCase):

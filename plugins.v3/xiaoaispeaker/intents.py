@@ -19,10 +19,12 @@ import asyncio
 import json
 import random
 import re
+import threading
 import time
+from concurrent.futures import Future
 from typing import Any, Dict, List, Optional, Tuple
 
-from .text import chinese_to_number
+from .text import chinese_to_number, normalize
 from .voice import Match
 
 # 睡眠定时的上限：300 分钟。给到几小时没意义（音箱会自己休眠），
@@ -127,6 +129,9 @@ class Memory:
         key = f"{kind}|{text}"
         now = time.time()
         for item in self._rows():
+            # 没有成功标记的导入记忆可能来自失败点歌，不能用它跳过选曲。
+            if item.get("verified") is not True:
+                continue
             if str(item.get("key") or "") != key:
                 continue
             if now - float(item.get("at") or 0) > MEMORY_TTL_SECONDS:
@@ -139,7 +144,7 @@ class Memory:
             return
         key = f"{kind}|{text}"
         rows = [item for item in self._rows() if str(item.get("key") or "") != key]
-        rows.append({"key": key, "path": path, "at": time.time()})
+        rows.append({"key": key, "path": path, "at": time.time(), "verified": True})
         rows.sort(key=lambda item: float(item.get("at") or 0), reverse=True)
         self._save(rows[:MEMORY_LIMIT])
 
@@ -154,12 +159,89 @@ class Assistant:
     """
 
     def __init__(self, timeout: int = 6) -> None:
+        self.configure(timeout)
+        self._gate = threading.Lock()
+        self._state_lock = threading.Lock()
+        self._loop = None
+        self._task = None
+        self._future = None
+        self._cancelled = False
+
+    def configure(self, timeout: int) -> None:
+        """重读宿主配置，但保留进行中调用的限额，重载不能绕过旧 worker。"""
         self.timeout = max(2, min(int(timeout or 6), 30))
         self.settings, self.error = self._read()
 
     def call(self, value: Any) -> Any:
-        """跑掉宿主返回的协程。测试里换成同步实现，就能替掉整条 LLM 通路。"""
-        return self._resolve(value)
+        """有界等待完整 AI 调用；底层不响应取消时保留单一 worker，拒绝累积任务。"""
+        if not asyncio.iscoroutine(value):
+            return value
+        if not self._gate.acquire(blocking=False):
+            value.close()
+            raise RuntimeError("上一条 AI 调用尚未结束，请稍后再试")
+        done = Future()
+        with self._state_lock:
+            self._cancelled = False
+            self._future = done
+
+        async def invoke() -> Any:
+            with self._state_lock:
+                self._loop = asyncio.get_running_loop()
+                self._task = asyncio.current_task()
+                cancelled = self._cancelled
+            if cancelled:
+                value.close()
+                raise asyncio.CancelledError()
+            return await value
+
+        def run() -> None:
+            result, error = None, None
+            try:
+                # asyncio.run 同时清理模型创建的子任务、异步生成器和 executor。
+                # 清理若被第三方阻塞，调用方仍按截止时间返回，限额保持占用。
+                result = asyncio.run(invoke())
+            except BaseException as exc:
+                error = exc
+            finally:
+                with self._state_lock:
+                    self._loop = self._task = None
+                    self._future = None
+                    self._gate.release()
+                    # 先释放资源再交付结果，连续的意图解析/聊天不会误报上一轮仍忙。
+                    if not done.done():
+                        if error is not None:
+                            done.set_exception(error)
+                        else:
+                            done.set_result(result)
+
+        worker = threading.Thread(target=run, name="xiaoai-ai-call", daemon=True)
+        try:
+            worker.start()
+        except BaseException:
+            value.close()
+            with self._state_lock:
+                self._future = None
+                self._gate.release()
+            raise
+        try:
+            return done.result(timeout=max(0.001, self.timeout))
+        except TimeoutError:
+            self.cancel()
+            raise TimeoutError(f"AI 调用超过 {self.timeout:g} 秒（包括初始化与清理）") from None
+        except asyncio.CancelledError:
+            raise RuntimeError("AI 调用已取消") from None
+
+    def cancel(self) -> None:
+        """取消尚未结束的模型调用，不等待第三方资源回收。"""
+        with self._state_lock:
+            self._cancelled = True
+            if self._future is not None and not self._future.done():
+                self._future.set_exception(RuntimeError("AI 调用已取消"))
+            if self._loop is not None and self._task is not None:
+                try:
+                    self._loop.call_soon_threadsafe(self._task.cancel)
+                except RuntimeError:
+                    pass
 
     @staticmethod
     def _read() -> Tuple[Optional[Dict[str, Any]], str]:
@@ -227,6 +309,7 @@ class Assistant:
         # 宿主 get_llm 不收 response_format：要 JSON 全靠提示词约束，_parse 也容得下围栏与散文。
         try:
             text = self.call(self._invoke(LLMHelper, messages, kwargs))
+            self.error = ""
         except Exception as exc:
             self.error = f"智能助手调用失败：{exc}"
             text = ""
@@ -234,14 +317,10 @@ class Assistant:
 
     async def _invoke(self, helper: Any, messages: List[Any],
                       kwargs: Dict[str, Any]) -> str:
-        """建模型、限时取回复、把模型交还宿主：整段跑在 self.call 起的那个事件循环里。
-
-        超时用宿主自己的写法（asyncio.wait_for 包 ainvoke）：get_llm 没有 timeout 参数，
-        只有在这里等，配置页那项 ai_timeout 才真的管用。
-        """
+        """模型与连接在同一事件循环创建和释放，完整截止时间由 call 负责。"""
         llm = await helper.get_llm(streaming=False, **kwargs)
         try:
-            response = await asyncio.wait_for(llm.ainvoke(messages), timeout=self.timeout)
+            response = await llm.ainvoke(messages)
         finally:
             closer = getattr(helper, "close_llm", None)
             if callable(closer):
@@ -251,25 +330,6 @@ class Assistant:
         if callable(extract):
             return str(extract(content, fallback_to_string=True) or "")
         return str(content or "")
-
-    @staticmethod
-    def _resolve(value: Any) -> Any:
-        """跑掉协程：没有事件循环就直接 asyncio.run，已经有了就另起一个循环。
-
-        语音监听在自己的线程里，正常走前者；从 API 线程进来时可能已经有 loop，
-        `asyncio.run` 在那个上下文里会直接报错，所以退到新建循环并关掉。
-        """
-        if not asyncio.iscoroutine(value):
-            return value
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            return asyncio.run(value)
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(value)
-        finally:
-            loop.close()
 
 
 class AIAnalyzer:
@@ -419,15 +479,15 @@ class Selection:
         for item in self._index.songs(100000):
             if _dirname(str(item.get("path") or "")) != directory:
                 continue
-            if album and str(item.get("album") or "") and str(item.get("album") or "") != album:
+            if album and str(item.get("album") or "") and normalize(str(item.get("album"))) != normalize(album):
                 continue
             paths.append(str(item.get("path") or ""))
-        return paths or [str(song.path if hasattr(song, "path") else song.get("path") or "")]
+        return sorted(paths, key=_natural_path) or [str(song.path if hasattr(song, "path") else song.get("path") or "")]
 
     # ---- 批量 ----
 
     def artist(self, name: str) -> Tuple[List[str], str]:
-        rows = self._index.find_songs_by_artist(name)
+        rows = self._index.find_songs_by_artist(name, limit=100000)
         paths: List[str] = []
         for _, song in rows:
             path = str(song.get("path") or "")
@@ -436,7 +496,7 @@ class Selection:
         if not paths:
             return [], ""
         artist = str(rows[0][1].get("artist") or name)
-        return paths, f"{artist} 的 {len(paths)} 首歌"
+        return sorted(paths, key=_natural_path), f"{artist} 的 {len(paths)} 首歌"
 
     def playlist(self, name: str) -> Tuple[List[str], str]:
         target = (name or "").strip()
@@ -494,6 +554,12 @@ def parse_volume_number(text: str) -> Optional[int]:
 
 def _dirname(path: str) -> str:
     return str(path).rsplit("/", 1)[0] if "/" in str(path) else ""
+
+
+def _natural_path(path: str) -> tuple:
+    """目录、碟号与文件音轨按自然顺序排列；数字段不按字典序排成 1/10/2。"""
+    return tuple((0, int(part)) if part.isdigit() else (1, normalize(part))
+                 for part in re.split(r"(\d+)", str(path)))
 
 
 def _label(song: Any) -> str:

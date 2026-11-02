@@ -2,14 +2,14 @@ const currentImports = {};
       const exportSet = new Set(['Module', '__esModule', 'default', '_export_sfc']);
       let moduleMap = {
 "./AppPage":()=>{
-      dynamicLoadingCss(["__federation_expose_AppPage-m_hLvhk9.css","__federation_expose_Config-aZptrW6-.css"], false, './AppPage');
-      return __federation_import('./__federation_expose_AppPage-t2If-G_O.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
+      dynamicLoadingCss(["__federation_expose_AppPage-M3NsG34z.css","__federation_expose_Config-8kR-AU8a.css"], false, './AppPage');
+      return __federation_import('./__federation_expose_AppPage-CPUw-jGp.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
 "./Page":()=>{
       dynamicLoadingCss(["__federation_expose_Page-BCAlx25Y.css"], false, './Page');
       return __federation_import('./__federation_expose_Page-D-YJ2r2k.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
 "./Config":()=>{
-      dynamicLoadingCss(["__federation_expose_Config-aZptrW6-.css"], false, './Config');
-      return __federation_import('./__federation_expose_Config-ca-ajX8B.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},};
+      dynamicLoadingCss(["__federation_expose_Config-8kR-AU8a.css"], false, './Config');
+      return __federation_import('./__federation_expose_Config-CkObkI4o.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},};
       const seen = {};
       const dynamicLoadingCss = (cssFilePaths, dontAppendStylesToHead, exposeItemName) => {
         const metaUrl = import.meta.url;

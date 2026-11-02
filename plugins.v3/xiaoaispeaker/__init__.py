@@ -16,11 +16,15 @@ xiaoaispeaker — MoviePilot v3 插件（插件名：小爱音箱）
 - 定时任务按星期/几号触发，不做法定节假日调休：上游把 holiday-cn 数据集编进插件产物，宿主
   容器里的插件既没有那份数据也没有更新渠道。
 - 队列连播靠轮询 player_get_play_status 判「播完」，不是音箱侧的真实播放列表。
-  接口只有 0/1、分不清暂停与播完，所以本进程没亲眼见过这一首在播就不推进
-  （重启后保持安静），插件自己发出的暂停/停止也落标记、见标记不推进。
+  0/1/2 分别是停止、在播、暂停，读不到或读不懂算未知：未知不建立「亲眼见播」的依据，
+  所以本进程没见过这一首在播就不推进（重启后保持安静），插件自己发出的暂停/停止也落标记。
+  设备报告的音频身份（audioID 或直链签名）与插件推的那条对不上、或点歌失败/被播报与停止
+  接管时，旧队列停用不自动接回 —— 要接回来得明确「继续播放」（重推当前项）或再点一首。
 - 语音监听首轮那批对话整批只对齐时间基线、一条都不执行：小米回的是按时间**升序**的最近
   若干条，只对齐第一条等于把几小时前说过的「播放…」当成刚说的新命令重放。同一分钟内
   触发过的定时任务也落盘去重，宿主重启正好落在那一分钟不会把「播放歌单」补触发一次。
+- AI 兜底不占监听线程：口令表没命中的句子交给一个有界 worker，配置的重叠轮询直接被拒；
+  新口令、播放、控制、重载与停用会推进语音代际，晚到的判定既不播报也不写记忆。
 - /stream 必须匿名可达（音箱不会带上 MP 的登录态），因此用「路径 + 过期时间」的 HMAC 签名
   收敛成「只能取配置目录内、在有效期内的音频文件」，签名不匹配或路径越库一律 403。
 - AI 兜底与自由对话不自备第二份密钥与端点：借主程序「设定 → AI 大模型」配好的那个助手，
@@ -267,7 +271,7 @@ class XiaoaiSpeaker(_PluginBase):
         "库内目录浏览与搜索、远程命令；播放直链由插件签名限时，不依赖媒体服务器。"
     )
     plugin_icon = "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/xiaoai.svg"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "JontyLee"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "xiaoaispeaker_"
@@ -309,7 +313,7 @@ class XiaoaiSpeaker(_PluginBase):
         """读取配置并准备运行态（登录会话、缓存、锁）。可重复调用。"""
         # 锁与运行态放实例 __dict__ 并用 setdefault：保存配置会重跑 init_plugin，
         # 直接把进行中的登录会话或连播计数重置掉，等于把人正在填的验证码丢掉。
-        self.__dict__.setdefault("_op_lock", threading.Lock())
+        self.__dict__.setdefault("_op_lock", threading.RLock())
         self.__dict__.setdefault("_login_lock", threading.Lock())
         self.__dict__.setdefault("_auth", None)
         self.__dict__.setdefault("_auth_state", "")
@@ -322,9 +326,8 @@ class XiaoaiSpeaker(_PluginBase):
         self.__dict__.setdefault("_stop_flag", threading.Event())
         self.__dict__.setdefault("_library_index", _library.LibraryIndex())
         self.__dict__.setdefault("_speech_listener", None)
-        # 每次重跑都丢掉助手缓存：宿主设定里换了 provider/模型或补上 key，状态面板
-        # 得立刻反映新的，不能继续报上一次读到的那一家
-        self.__dict__.pop("_assistant_cache", None)
+        # 使旧判定失效；保留助手的底层 worker 限额，避免重载累积未收尾的调用。
+        self._invalidate_voice()
         self.__dict__.setdefault("_library_error", "")
 
         if config:
@@ -365,6 +368,10 @@ class XiaoaiSpeaker(_PluginBase):
                 self.__dict__["_auth_state"] = ""
                 self.__dict__["_devices_cache"] = {}
                 self.__dict__["_status_cache"] = {}
+
+        assistant = self.__dict__.get("_assistant_cache")
+        if isinstance(assistant, _intents.Assistant):
+            assistant.configure(self._ai_timeout)
 
     @staticmethod
     def _clamp_play_mode(raw: Any) -> str:
@@ -905,6 +912,9 @@ class XiaoaiSpeaker(_PluginBase):
             "url": url,
             "source": source,
             "api": api,
+            "audio_id": str(getattr(client, "audio_id", "") or _mina.DEFAULT_MUSIC_AUDIO_ID)
+                        if api == "player_play_music" else "",
+            "session": secrets.token_hex(8),
             "started_at": time.time(),
             "at": self._now_text(),
         })
@@ -929,7 +939,7 @@ class XiaoaiSpeaker(_PluginBase):
                       + self._group_suffix(members, failures)), api
 
     def _play_file(self, path_text: str, device_id: Optional[str] = None,
-                   queue_paths: Optional[List[str]] = None) -> PlayOut:
+                   queue_paths: Optional[List[str]] = None, *, keep_queue: bool = False) -> PlayOut:
         """播放库内一个文件（可同时设定队列）。"""
         base_url, _ = self._effective_base_url()
         if not base_url:
@@ -942,20 +952,25 @@ class XiaoaiSpeaker(_PluginBase):
             return PlayOut(ok=False, message=err)
         url = _media.stream_url(base_url, self._plugin_id(), self._secret(), real, self._stream_ttl)
         with self._play_lock():
+            self._invalidate_voice()
             ok, message, api = self._push(
                 url, device, title=_media.strip_index(real.name),
                 path=str(real), source="library")
-        queue = None
-        if ok:
-            paths = [str(p) for p in (queue_paths or []) if str(p).strip()]
-            if paths:
-                queue = self._set_queue_state(paths, self._index_of(paths, str(real)),
-                                              str(device.get("device_id") or ""))
-            else:
-                queue = self._queue_out()
-        return PlayOut(ok=ok, message=message, api=api,
-                       playing=self._playing_out(device, path=str(real), url=url) if ok else None,
-                       queue=queue)
+            queue = None
+            if ok:
+                if keep_queue:
+                    queue = self._queue_out()
+                else:
+                    paths = [str(p) for p in (queue_paths or [str(real)]) if str(p).strip()]
+                    normalized = self._queue_items(paths)
+                    canonical = [row["path"] for row in normalized]
+                    if str(real) not in canonical:
+                        canonical.insert(0, str(real))
+                    queue = self._set_queue_state(canonical, canonical.index(str(real)),
+                                                  str(device.get("device_id") or ""))
+            return PlayOut(ok=ok, message=message, api=api,
+                           playing=self._playing_out(device, path=str(real), url=url) if ok else None,
+                           queue=queue)
 
     def _play_url(self, url: str, device_id: Optional[str] = None) -> PlayOut:
         """播放调用方给定的一条外部直链（不签名、不改写，原样推给音箱）。"""
@@ -966,11 +981,14 @@ class XiaoaiSpeaker(_PluginBase):
         if not device:
             return PlayOut(ok=False, message=err)
         with self._play_lock():
+            self._invalidate_voice()
             ok, message, api = self._push(text, device, title=text.rsplit("/", 1)[-1][:80],
                                          path="", source="url")
-        return PlayOut(ok=ok, message=message, api=api,
-                       playing=self._playing_out(device, url=text) if ok else None,
-                       queue=self._queue_out())
+            if ok:
+                self._set_queue_state([], -1, str(device.get("device_id") or ""))
+            return PlayOut(ok=ok, message=message, api=api,
+                           playing=self._playing_out(device, url=text) if ok else None,
+                           queue=self._queue_out())
 
     def _play_keyword(self, keyword: str, device_id: Optional[str] = None) -> PlayOut:
         """按曲名在库内搜索，播第一个命中（远程命令用的快捷入口）。"""
@@ -980,39 +998,46 @@ class XiaoaiSpeaker(_PluginBase):
         paths = [hit["path"] for hit in hits]
         return self._play_file(paths[0], device_id=device_id, queue_paths=paths)
 
-    def _set_queue_state(self, paths: List[str], index: int, device_id: str) -> QueueOut:
-        """只写队列状态，不推流（推流由调用方负责，避免两处各推一次）。"""
+    def _queue_items(self, paths: List[str]) -> List[Dict[str, Any]]:
+        """规范化并去重库内曲目，调用者按实际路径选择播放位置。"""
         items: List[Dict[str, Any]] = []
+        seen = set()
         for raw in paths:
             real, reason = _media.resolve_playable(raw, self._roots(), self._exts())
             if not real:
                 logger.warning(f"{_LOG} 队列丢弃 {raw}: {reason}")
                 continue
+            if str(real) in seen:
+                continue
+            try:
+                size = real.stat().st_size
+            except OSError:
+                continue
+            seen.add(str(real))
             items.append({"path": str(real), "name": real.name,
-                          "title": _media.strip_index(real.name), "size": real.stat().st_size})
-        safe_index = index if 0 <= index < len(items) else (0 if items else -1)
-        # 播放方式是"这台音箱现在怎么播"，换一批曲目不该把它重置：
-        # 说"随机播放"之后切歌单还应该是随机，随机进度则跟着新队列重来
-        mode = str(self._queue_state().get("mode") or "order")
-        state = {
-            "device_id": device_id,
-            "index": safe_index,
-            "items": items,
-            "source": "library",
-            "mode": mode,
-            "random_played": [],
-            "updated_at": self._now_text(),
-        }
-        self.save_data(_KEY_QUEUE, state)
-        self.__dict__["_idle_ticks"] = 0
-        return self._queue_out(state)
+                          "title": _media.strip_index(real.name), "size": size})
+        return items
 
-    @staticmethod
-    def _index_of(paths: List[str], target: str) -> int:
-        for position, raw in enumerate(paths):
-            if str(raw) == target:
-                return position
-        return 0
+    def _set_queue_state(self, paths: List[str], index: int, device_id: str) -> QueueOut:
+        """原子替换队列；保留播放方式，过滤后以目标路径确定位置。"""
+        with self._play_lock():
+            target = None
+            if 0 <= index < len(paths):
+                target, _ = _media.resolve_playable(paths[index], self._roots(), self._exts())
+            items = self._queue_items(paths)
+            canonical = [row["path"] for row in items]
+            safe_index = canonical.index(str(target)) if target and str(target) in canonical else (0 if items else -1)
+            mode = str(self._queue_state().get("mode") or "order")
+            state = {
+                "device_id": device_id, "index": safe_index, "items": items,
+                "source": "library", "mode": mode, "random_played": [],
+                "session": secrets.token_hex(8), "updated_at": self._now_text(),
+            }
+            self.save_data(_KEY_QUEUE, state)
+            self.__dict__["_idle_ticks"] = 0
+            self.__dict__.pop("_advance_seen", None)
+            self._invalidate_voice()
+            return self._queue_out(state)
 
     def _queue_state(self) -> Dict[str, Any]:
         data = self.get_data(_KEY_QUEUE)
@@ -1030,7 +1055,7 @@ class XiaoaiSpeaker(_PluginBase):
 
     @staticmethod
     def _queue_token(state: Dict[str, Any]) -> str:
-        """当前队列位置的标识：序号 + 路径，同一串就是同一首。
+        """当前队列位置的标识：队列会话 + 序号 + 路径。
 
         只记序号不稳：「点歌」会把整本队列换掉，序号却可能还是 0，旧位置留下的
         暂停标记会盖到新队列上；带上路径就没这个问题。
@@ -1042,7 +1067,7 @@ class XiaoaiSpeaker(_PluginBase):
             return ""
         if index < 0 or index >= len(items):
             return ""
-        return f"{index}:{items[index].get('path')}"
+        return f"{state.get('session', '')}:{index}:{items[index].get('path')}"
 
     def _queue_out(self, state: Optional[Dict[str, Any]] = None) -> QueueOut:
         state = state or self._queue_state()
@@ -1060,13 +1085,18 @@ class XiaoaiSpeaker(_PluginBase):
             mode=str(state.get("mode") or "order"),
         )
 
-    def _advance(self, direction: str) -> PlayOut:
+    def _advance(self, direction: str, *, announce: bool = False) -> PlayOut:
         """切到下一首/上一首/指定序号（next 也用于连播推进）。
 
         下一首去哪由队列的播放方式决定，这一点与上游 playlist-manager 一致：
         顺序播完就停、列表循环回到第一首、随机跳过已播过的（播完一轮自动清空重来）、
         单曲循环重播当前、单曲播放播完就停。
         """
+        with self._play_lock():
+            return self._advance_locked(direction, announce=announce)
+
+    def _advance_locked(self, direction: str, *, announce: bool = False) -> PlayOut:
+        """在播放锁内读取、推流并提交同一份队列，避免旧快照覆盖新请求。"""
         state = self._queue_state()
         items = state.get("items") or []
         if not items:
@@ -1081,13 +1111,20 @@ class XiaoaiSpeaker(_PluginBase):
         else:
             target = max(min(int(direction), len(items) - 1), 0)
         path = str(items[target].get("path") or "")
-        result = self._play_file(path, device_id=state.get("device_id") or None)
+        if announce and self._tts_announce and target != current:
+            title = str(items[target].get("title") or "").strip()
+            if title:
+                self._tts(f"接下来播放 {title}", device_id=state.get("device_id") or None)
+        result = self._play_file(path, device_id=state.get("device_id") or None, keep_queue=True)
         if result.ok:
             state["index"] = target
             # 手动切歌推流成功说明设备在听指令，旧位置的暂停标记不能再挡连播
             state.pop("paused_token", None)
+            state.pop("suspended", None)
             self._note_played(state, target)
             self.save_data(_KEY_QUEUE, state)
+            self.__dict__.pop("_advance_seen", None)
+            self._invalidate_voice()
             result.queue = self._queue_out(state)
         return result
 
@@ -1132,15 +1169,22 @@ class XiaoaiSpeaker(_PluginBase):
 
         队列为空时也写：说"随机播放"的人要的是"接下来都随机"，不是"这堆里现在随机"。
         """
-        state = self._queue_state()
-        state["mode"] = mode
-        if mode != "random":
-            state["random_played"] = []
-        self.save_data(_KEY_QUEUE, state)
+        with self._play_lock():
+            state = self._queue_state()
+            state["mode"] = mode
+            if mode != "random":
+                state["random_played"] = []
+            self.save_data(_KEY_QUEUE, state)
         return True
 
     def _control(self, action: str, device_id: Optional[str] = None) -> PlayOut:
         """播放控制：play/pause/stop 交给音箱，next/prev/数字由插件自己推队列位置。"""
+        with self._play_lock():
+            self._invalidate_voice()
+            return self._control_locked(action, device_id)
+
+    def _control_locked(self, action: str, device_id: Optional[str]) -> PlayOut:
+        """与队列提交串行的设备控制。"""
         if action in ("next", "prev") or action.isdigit():
             return self._advance(action)
         if action == "toggle":
@@ -1154,6 +1198,13 @@ class XiaoaiSpeaker(_PluginBase):
         client, err = self._client()
         if not client:
             return PlayOut(ok=False, message=err)
+        state = self._queue_state()
+        queue_device = str(state.get("device_id") or "")
+        controls_queue = not queue_device or queue_device in self._fanout_ids(
+            str(device.get("device_id") or ""))
+        if action == "play" and controls_queue and state.get("suspended") and state.get("items"):
+            # stop/TTS/官方试听可能已销毁音箱端的直链；明确继续时重新推当前项。
+            return self._advance_locked(str(max(0, int(state.get("index") or 0))))
         try:
             result = client.play_operation(str(device.get("device_id") or ""), action)
         except MinaAuthError as exc:
@@ -1161,21 +1212,21 @@ class XiaoaiSpeaker(_PluginBase):
         except MinaError as exc:
             return PlayOut(ok=False, message=f"控制失败：{exc}")
         label = {"play": "继续播放", "pause": "已暂停", "stop": "已停止"}[action]
-        if action == "stop":
-            self.__dict__["_idle_ticks"] = 0
-        if result.get("ok"):
+        if result.get("ok") and controls_queue:
             # 插件自己发的暂停/停止是人的意图，落标记后巡检见标记就不推进；
             # 意图是播放就擦掉，靠设备侧直接按暂停键的场景由巡检见到 status=1 时擦
             state = self._queue_state()
             token = self._queue_token(state)
             if token:
+                self.__dict__["_idle_ticks"] = 0
+                self.__dict__.pop("_advance_seen", None)
                 if action in ("pause", "stop"):
-                    if state.get("paused_token") != token:
-                        state["paused_token"] = token
-                        self.save_data(_KEY_QUEUE, state)
-                elif state.get("paused_token"):
+                    state["paused_token"] = token
+                    if action == "stop":
+                        state["suspended"] = "用户停止"
+                else:
                     state.pop("paused_token", None)
-                    self.save_data(_KEY_QUEUE, state)
+                self.save_data(_KEY_QUEUE, state)
 
         def follow(target: Dict[str, Any]) -> Tuple[bool, str]:
             outcome = client.play_operation(str(target.get("device_id") or ""), action)
@@ -1215,6 +1266,10 @@ class XiaoaiSpeaker(_PluginBase):
                          playing=self._playing_out(device, force=True) if result.get("ok") else None)
 
     def _tts(self, text: str, device_id: Optional[str] = None) -> ActionOut:
+        with self._play_lock():
+            return self._tts_locked(text, device_id)
+
+    def _tts_locked(self, text: str, device_id: Optional[str]) -> ActionOut:
         device, err = self._target_device(device_id)
         if not device:
             return ActionOut(ok=False, message=err)
@@ -1233,6 +1288,10 @@ class XiaoaiSpeaker(_PluginBase):
         failures = self._group_follow(device, follow)
         suffix = self._group_suffix(len(self._fanout_devices(str(device.get("device_id") or ""))), failures)
         ok = result.get("ok")
+        if ok is not False:
+            # 声道被播报占走（或回执超时但很可能已播出）之后，那首歌多半回不来：
+            # 停用旧队列，等人明确「继续播放」或再点一首。设备直接拒绝就不动队列。
+            self._suspend_queue("语音播报", str(device.get("device_id") or ""))
         if ok is None:
             return ActionOut(ok=True,
                              message=str(result.get("error") or "音箱回执超时，可能已播报") + suffix,
@@ -1284,12 +1343,12 @@ class XiaoaiSpeaker(_PluginBase):
         listener = self.__dict__.get("_speech_listener")
         if not isinstance(listener, _speech.SpeechListener):
             listener = _speech.SpeechListener(
-                handler=self._on_voice_text,
+                handler=lambda text, device_id, hardware: self._on_voice_text(
+                    text, device_id, hardware, background_ai=True),
                 get_client=self._client,
                 get_devices=self._voice_monitored,
                 speak=lambda device_id, text: self._tts(text, device_id=device_id),
                 interval=float(self._voice_poll),
-                chat_active=self._chat_active,
             )
             self.__dict__["_speech_listener"] = listener
         listener.configure(float(self._voice_poll))
@@ -1309,25 +1368,108 @@ class XiaoaiSpeaker(_PluginBase):
         return [device for device in devices
                 if str(device.get("device_id") or "") in wanted]
 
-    def _on_voice_text(self, text: str, device_id: str, hardware: str) -> str:
-        """一句话 → 要做的事 → 要播报的话。硬件参数留着，型号不同要换接口的地方在 _push。"""
+    def _invalidate_voice(self) -> int:
+        """新意图或播放状态取代未完成的 AI 请求，返回当前请求代际。"""
+        with self._play_lock():
+            generation = int(self.__dict__.get("_voice_generation", 0)) + 1
+            self.__dict__["_voice_generation"] = generation
+            assistant = self.__dict__.get("_assistant_cache")
+            if isinstance(assistant, _intents.Assistant):
+                assistant.cancel()
+            return generation
+
+    def _on_voice_text(self, text: str, device_id: str, hardware: str,
+                       *, background_ai: bool = False) -> str:
+        """确定口令直接执行，监听中的 AI 单独处理，停止口令无需等待模型。"""
         text = (text or "").strip()
         if not text:
             return ""
+        generation = self._invalidate_voice()
         logger.info(f"{_LOG} 语音「{text}」设备 {device_id or '-'}")
-        match = self._match_voice(text)
+        match = self._match_voice(text, use_ai=False)
         if match is None:
-            return self._chat_reply(text, device_id)
-        if self._voice_interrupt and match.kind in _voice.AUDIO_TAKEOVER_KINDS:
-            self._interrupt(device_id)
-        if self._voice_hint_tts and match.kind in _voice.SEARCH_TYPES:
-            self._tts(self._voice_hint_text, device_id=device_id or None)
-        reply = self._run_intent(match, device_id)
-        if reply and match.kind in _voice.SEARCH_TYPES and self._voice_memory:
-            self._remember(match, text)
-        return reply if self._voice_reply else ""
+            if not self._ai_available():
+                logger.info(f"{_LOG} 口令未接手：{text}（未启用可用的 AI）")
+                return ""
+            if background_ai:
+                self._start_voice_ai(text, device_id, generation)
+                return ""
+            match = self._analyzer().analyze(text)
+            if match is None:
+                return self._chat_reply(text, device_id, generation=generation)
+        return self._execute_voice_match(match, device_id, generation)
 
-    def _match_voice(self, text: str) -> Optional[_voice.Match]:
+    def _start_voice_ai(self, text: str, device_id: str, generation: int) -> None:
+        """每实例最多一个 AI 语音 worker；结果返回时必须仍属于当前意图。"""
+        with self._play_lock():
+            if generation != self.__dict__.get("_voice_generation") or self._stop_event().is_set():
+                return
+            worker = self.__dict__.get("_voice_ai_thread")
+            if worker is not None and worker.is_alive():
+                logger.warning(f"{_LOG} AI 仍在收尾，本句未接手：{text}")
+                return
+            analyzer = self._analyzer()
+
+            def run() -> None:
+                started = time.monotonic()
+                try:
+                    match = analyzer.analyze(text)
+                    with self._play_lock():
+                        if generation != self.__dict__.get("_voice_generation") or self._stop_event().is_set():
+                            logger.info(f"{_LOG} 丢弃已过时 AI 判定：{text}")
+                            return
+                    if match is not None:
+                        reply = self._execute_voice_match(match, device_id, generation)
+                    else:
+                        reply = self._chat_reply(text, device_id, generation=generation)
+                    if reply:
+                        with self._play_lock():
+                            if generation == self.__dict__.get("_voice_generation") and not self._stop_event().is_set():
+                                self._tts(reply, device_id=device_id or None)
+                    logger.info(f"{_LOG} AI 口令处理结束：{text}，耗时 {time.monotonic() - started:.1f} 秒")
+                except Exception as exc:
+                    logger.warning(f"{_LOG} AI 口令处理失败：{type(exc).__name__}")
+
+            worker = threading.Thread(target=run, name="xiaoai-voice-ai", daemon=True)
+            self.__dict__["_voice_ai_thread"] = worker
+            worker.start()
+
+    def _execute_voice_match(self, match: _voice.Match, device_id: str,
+                             generation: int, *, audible: bool = True) -> str:
+        """在播放事务内执行仍有效的意图，只有成功推流才写入播放记忆。"""
+        with self._play_lock():
+            if generation != self.__dict__.get("_voice_generation") or self._stop_event().is_set():
+                return ""
+            before = (self.get_data(_KEY_LAST) or {}).get("session")
+            logger.info(f"{_LOG} 口令命中 {match.kind}，来源={match.keyword}，设备={device_id or '默认'}")
+            if match.kind in _voice.AUDIO_TAKEOVER_KINDS:
+                self._suspend_queue("语音接管中", device_id)
+                if self._voice_interrupt:
+                    self._interrupt(device_id)
+            if self._voice_hint_tts and match.kind in _voice.SEARCH_TYPES:
+                self._tts(self._voice_hint_text, device_id=device_id or None)
+            reply = self._run_intent(match, device_id)
+            last = self.get_data(_KEY_LAST) or {}
+            played = bool(last.get("session") and last["session"] != before)
+            logger.info(f"{_LOG} 口令执行结果：{reply or '已完成'}，起播={'是' if played else '否'}")
+            # 起播后的确认 TTS 会再次抢占新歌；仅把成功文案返回给页面，语音侧保持安静。
+            return reply if not audible or (self._voice_reply and not played) else ""
+
+    def _suspend_queue(self, reason: str, device_id: str = "") -> None:
+        """接管/外部播放期间停用旧队列自动推进，直到明确的新播放重新绑定队列。"""
+        with self._play_lock():
+            state = self._queue_state()
+            if not state.get("items"):
+                return
+            if device_id and state.get("device_id") and state["device_id"] not in self._fanout_ids(device_id):
+                return
+            state["suspended"] = reason
+            state["paused_token"] = self._queue_token(state)
+            self.save_data(_KEY_QUEUE, state)
+            self.__dict__["_idle_ticks"] = 0
+            self.__dict__.pop("_advance_seen", None)
+
+    def _match_voice(self, text: str, *, use_ai: bool = True) -> Optional[_voice.Match]:
         """一句话的三级判定：口令表 → 记忆表 → AI 兜底（顺序与上游一致）。"""
         match = _voice.match_command(text, self._voice_table())
         if match is not None:
@@ -1338,7 +1480,7 @@ class XiaoaiSpeaker(_PluginBase):
             if replay:
                 # 上次这么说播过一首：直接重播，省掉一次搜索也省掉误判
                 return _voice.Match("play_song", "", "memory", text, text)
-        if self._ai_available():
+        if use_ai and self._ai_available():
             return self._analyzer().analyze(text)
         return None
 
@@ -1442,12 +1584,13 @@ class XiaoaiSpeaker(_PluginBase):
         插件不再自备 api_key/base_url/model —— 主程序设定里配了哪家就用哪家，
         没配就当 AI 兜底不可用，并能在状态里说清是哪一项没配。
         """
-        cached = self.__dict__.get("_assistant_cache")
-        if isinstance(cached, _intents.Assistant):
-            return cached
-        assistant = _intents.Assistant(self._ai_timeout)
-        self.__dict__["_assistant_cache"] = assistant
-        return assistant
+        with self._play_lock():
+            cached = self.__dict__.get("_assistant_cache")
+            if isinstance(cached, _intents.Assistant):
+                return cached
+            assistant = _intents.Assistant(self._ai_timeout)
+            self.__dict__["_assistant_cache"] = assistant
+            return assistant
 
     def _ai_available(self) -> bool:
         return bool(self._ai_enabled and self._assistant().available)
@@ -1458,44 +1601,59 @@ class XiaoaiSpeaker(_PluginBase):
                                     "timeout": self._ai_timeout})
 
     def _chat_active(self) -> bool:
-        """对话窗口还开着就按满速轮询：追问隔 5 秒才读到很出戏。"""
+        """对话窗口是否有效，供状态面板展示。"""
         if not (self._ai_chat and self._ai_available()):
             return False
         return time.time() - float(self.__dict__.get("_chat_at") or 0.0) < _CHAT_WINDOW_SECONDS
 
-    def _chat_reply(self, text: str, device_id: str) -> str:
+    def _chat_reply(self, text: str, device_id: str, *, generation: Optional[int] = None) -> str:
         """口令表没命中时的一次 AI 对话；没开 ai_chat 就什么都不做。
 
         上下文只留在本轮进程内存里，不落 plugindata：家里人跟音箱说的话多半
         不该写进配置库，而且对话窗口本来就是短命的。
         """
-        if not (self._ai_chat and self._ai_available()):
+        if not (self._ai_chat and self._ai_available()) or self._assistant().error:
             return ""
-        history = list(self.__dict__.get("_chat_history") or [])
+        with self._play_lock():
+            if generation is None:
+                generation = self.__dict__.get("_voice_generation")
+            if generation != self.__dict__.get("_voice_generation") or self._stop_event().is_set():
+                return ""
+            history = list(self.__dict__.get("_chat_history") or [])
         answer = self._analyzer().chat(text, history[-_CHAT_TURNS:])
-        if not answer:
-            return ""
-        history += [{"role": "user", "content": text},
-                    {"role": "assistant", "content": answer}]
-        self.__dict__["_chat_history"] = history[-_CHAT_TURNS * 2:]
-        self.__dict__["_chat_at"] = time.time()
-        return answer
+        with self._play_lock():
+            if (not answer or generation != self.__dict__.get("_voice_generation")
+                    or self._stop_event().is_set()):
+                return ""
+            history += [{"role": "user", "content": text},
+                        {"role": "assistant", "content": answer}]
+            self.__dict__["_chat_history"] = history[-_CHAT_TURNS * 2:]
+            self.__dict__["_chat_at"] = time.time()
+            return answer
 
     def _chat_reset(self) -> None:
         self.__dict__["_chat_history"] = []
         self.__dict__["_chat_at"] = 0.0
 
-    def _interrupt(self, device_id: str) -> None:
-        """抢在小爱的回答之前把声道清出来。失败不打扰用户：顶多听到半句"我帮你找找"。"""
+    def _interrupt(self, device_id: str) -> bool:
+        """尝试暂停并停止官方回复，记录真实设备回执，不假定接管成功。"""
         if not device_id:
-            return
+            device_id = str((self._target_device()[0] or {}).get("device_id") or "")
         client, _err = self._client()
-        if not client:
-            return
+        if not client or not device_id:
+            logger.warning(f"{_LOG} 无法打断：没有可用设备或登录状态")
+            return False
         try:
-            client.interrupt(device_id)
-        except (MinaAuthError, MinaError):
-            pass
+            result = client.interrupt(device_id)
+            ok = bool(result.get("ok"))
+            if not ok:
+                logger.warning(f"{_LOG} 打断未成功：{result.get('error') or '设备未确认停止'}")
+            else:
+                logger.info(f"{_LOG} 打断已受理：pause={bool(result.get('pause_ok'))}，stop=True")
+            return ok
+        except (MinaAuthError, MinaError) as exc:
+            logger.warning(f"{_LOG} 打断请求失败：{exc}")
+            return False
 
     def _current_path(self) -> str:
         """队列里当前这一首的路径；队列空了就退回最近一次推送的记录。"""
@@ -1507,10 +1665,10 @@ class XiaoaiSpeaker(_PluginBase):
         last = self.get_data(_KEY_LAST)
         return str(last.get("path") or "") if isinstance(last, dict) else ""
 
-    def _remember(self, match: _voice.Match, text: str) -> None:
-        path = self._current_path()
-        if path:
-            self._memory().remember(match.kind, text, path)
+    def _remember(self, match: _voice.Match, result: PlayOut) -> None:
+        """只保存此次成功推送的明确路径，不从可能属于上一首的队列猜测结果。"""
+        if self._voice_memory and result.ok and result.playing and result.playing.path:
+            self._memory().remember(match.kind, match.raw, result.playing.path)
 
     def _run_intent(self, match: _voice.Match, device_id: str) -> str:
         """执行一个意图，返回要播报的话（空串 = 没什么可说的）。"""
@@ -1521,12 +1679,13 @@ class XiaoaiSpeaker(_PluginBase):
         if kind == "play_song":
             if not selection.ready:
                 return "曲库还没索引好，请先在侧栏页重建索引"
-            remembered = self._memory().lookup("play_song", match.argument) if self._voice_memory else ""
+            remembered = self._memory().lookup("play_song", match.raw) if self._voice_memory else ""
             path, queue, label = selection.song(match.argument, remembered)
             if not path:
                 self._library_rebuild(force=False)
                 return f"没找到{match.argument}"
             result = self._play_file(path, device_id=target, queue_paths=queue)
+            self._remember(match, result)
             return f"播放 {label}" if result.ok else str(result.message or "播放失败")
 
         if kind == "play_artist":
@@ -1536,6 +1695,7 @@ class XiaoaiSpeaker(_PluginBase):
             if not paths:
                 return f"没找到{match.argument}的歌"
             result = self._play_file(paths[0], device_id=target, queue_paths=paths)
+            self._remember(match, result)
             return f"播放{label}" if result.ok else str(result.message or "播放失败")
 
         if kind == "play_playlist":
@@ -1546,6 +1706,7 @@ class XiaoaiSpeaker(_PluginBase):
                 return f"没找到歌单{match.argument}" if match.argument else "没有可用的歌单"
             index = _library.parse_track_index(match.raw, len(paths)) or 0
             result = self._play_file(paths[index], device_id=target, queue_paths=paths)
+            self._remember(match, result)
             return f"播放歌单 {label}" if result.ok else str(result.message or "播放失败")
 
         if kind == "play_recommend":
@@ -1740,7 +1901,8 @@ class XiaoaiSpeaker(_PluginBase):
             logger.debug(f"{_LOG} 读取播放状态失败: {exc}")
             return {"error": str(exc), "status": -1}
         data = {"status": status.get("status"), "volume": status.get("volume"),
-                "position": status.get("position"), "duration": status.get("duration")}
+                "position": status.get("position"), "duration": status.get("duration"),
+                "audio_id": status.get("audio_id"), "stream_url": status.get("stream_url")}
         cache[device_id] = {"at": time.time(), "data": data}
         return dict(data)
 
@@ -1791,80 +1953,116 @@ class XiaoaiSpeaker(_PluginBase):
         self.__dict__["_index_at"] = now
         self._library_rebuild(force=False)
 
+    @staticmethod
+    def _stream_sign_key(url: str) -> str:
+        """直链里的签名参数 `k`：中间层可能改写地址，签名段本身不会变。"""
+        match = re.search(r"[?&\s]k=([^&\s]+)", str(url or ""))
+        return match.group(1) if match else ""
+
+    def _audio_is_ours(self, status: Dict[str, Any], last: Dict[str, Any]) -> bool:
+        """设备上报的音频是否还是插件推的那一条；认不出来时按原样继续连播。
+
+        `play_music` 用 audioID 认定：现场 OH2 播官方试听时云端回的是另一个 ID，
+        这类型号的条目地址由云端给，不再拿来比对。`player_play_url` 没有 audioID，
+        只能比对直链的签名参数。两边都没报身份时不作判定——宁可少一次保护，
+        也不能让不返回这些字段的型号再也播不到下一首。
+        """
+        our_id = str(last.get("audio_id") or "")
+        if our_id:
+            reported = str(status.get("audio_id") or "")
+            return not reported or reported == our_id
+        reported_url = str(status.get("stream_url") or "")
+        if not reported_url:
+            return True
+        ours = self._stream_sign_key(str(last.get("url") or ""))
+        if not ours:
+            return True
+        return self._stream_sign_key(reported_url) == ours
+
     def _tick_advance(self) -> None:
-        """发现「播完了」就推队列下一首。"""
-        state = self._queue_state()
-        items = state.get("items") or []
-        index = int(state.get("index") or 0)
-        if not items or index < 0 or index >= len(items):
-            return
-        token = self._queue_token(state)
-        device_id = str(state.get("device_id") or "")
-        if not device_id:
-            fallback = self._target_device()[0] or {}
-            device_id = str(fallback.get("device_id") or "")
-        if not device_id:
-            return
-        last = self.get_data(_KEY_LAST)
-        last = last if isinstance(last, dict) else {}
+        """仅推进已观察到本次推流在播的队列；网络响应必须仍属于同一播放会话。"""
+        with self._play_lock():
+            state = self._queue_state()
+            token = self._queue_token(state)
+            last = self.get_data(_KEY_LAST) or {}
+            device_id = str(state.get("device_id") or "")
+            if not token or state.get("suspended") or self._stop_event().is_set():
+                return
+            index = int(state.get("index") or 0)
+            if (not device_id or last.get("device_id") != device_id
+                    or last.get("path") != state["items"][index]["path"]
+                    or last.get("source") not in (None, "", "library")):
+                self.__dict__["_idle_ticks"] = 0
+                self.__dict__.pop("_advance_seen", None)
+                return
+            session = last.get("session") or last.get("started_at")
+            generation = self.__dict__.get("_voice_generation")
+            paused = state.get("paused_token")
+
+        # 读云端时不占播放锁，停止/切歌可以先执行；回来后重新取状态而非回写旧快照。
         status = self._device_status(device_id, force=True)
-        if status.get("error"):
-            return
-        if int(status.get("status") or 0) != 0:
-            # 亲眼见过这一位置在播，才允许后面按「停止」判播完；
-            # 设备侧按键恢复播放时也顺手擦掉旧暂停标记
-            self.__dict__["_advance_seen"] = token
-            self.__dict__["_idle_ticks"] = 0
-            if state.get("paused_token"):
-                state.pop("paused_token", None)
+        with self._play_lock():
+            state = self._queue_state()
+            current = self.get_data(_KEY_LAST) or {}
+            if (self._stop_event().is_set() or generation != self.__dict__.get("_voice_generation")
+                    or token != self._queue_token(state) or state.get("device_id") != device_id
+                    or session != (current.get("session") or current.get("started_at"))
+                    or current.get("path") != last.get("path")
+                    or current.get("device_id") != device_id
+                    or state.get("paused_token") != paused or state.get("suspended")):
+                return
+            try:
+                playback = int(status.get("status"))
+            except (TypeError, ValueError):
+                playback = -1
+            if status.get("error") or playback not in (0, 1, 2):
+                self.__dict__["_idle_ticks"] = 0
+                return
+            if not self._audio_is_ours(status, current):
+                self._suspend_queue("设备正在播放其他音频", device_id)
+                logger.info(f"{_LOG} 设备音频与插件推流不符，暂停旧队列连播")
+                return
+            if playback == 2:
+                state["paused_token"] = token
                 self.save_data(_KEY_QUEUE, state)
-            return
-        if self.__dict__.get("_advance_seen") != token:
-            # 这个 0 是重启前落盘的陈旧状态、或推流根本没被受理，本进程没见过它在播：
-            # 不亲眼见播过就推进，正是「MP 一重启音箱自己唱起来」的根源
+                self.__dict__["_idle_ticks"] = 0
+                return
+            if playback == 1:
+                self.__dict__["_advance_seen"] = (token, session)
+                self.__dict__["_idle_ticks"] = 0
+                if state.get("paused_token"):
+                    state.pop("paused_token", None)
+                    self.save_data(_KEY_QUEUE, state)
+                return
+            if (self.__dict__.get("_advance_seen") != (token, session)
+                    or state.get("paused_token") == token):
+                self.__dict__["_idle_ticks"] = 0
+                return
+            if time.time() - float(current.get("started_at") or 0) < _ADVANCE_GRACE_SECONDS:
+                self.__dict__["_idle_ticks"] = 0
+                return
+            self.__dict__["_idle_ticks"] = int(self.__dict__.get("_idle_ticks") or 0) + 1
+            if self.__dict__["_idle_ticks"] < 2:
+                return
             self.__dict__["_idle_ticks"] = 0
-            return
-        if state.get("paused_token") == token:
-            # 插件自己发出的暂停/停止：这个 0 是人的意图，不是播完
-            self.__dict__["_idle_ticks"] = 0
-            return
-        elapsed = time.time() - float(last.get("started_at") or 0)
-        if elapsed < _ADVANCE_GRACE_SECONDS:
-            return
-        self.__dict__["_idle_ticks"] = int(self.__dict__.get("_idle_ticks") or 0) + 1
-        # 连续两次读到停止：起播初期的瞬时 0 状态不会连着出现两次
-        if self.__dict__["_idle_ticks"] < 2:
-            return
-        self.__dict__["_idle_ticks"] = 0
-        # 「停止」在音箱端既可能是播完也可能是用户按了暂停，接口分不清。
-        # 把设备报告的进度一起落一行：真播完时它接近全曲长，暂停时停在半路，
-        # 明天看一眼日志就知道连播有没有把暂停当成播完。
-        played = int(status.get("position") or 0) // 1000
-        whole = int(status.get("duration") or 0) // 1000
-        logger.info(f"{_LOG} 队列 {index + 1}/{len(items)} 已播完，推进下一首"
-                    f" 设备进度 {played} 秒 / 全曲 {whole or '未知'} 秒")
-        if self._stop_event().is_set():
-            return
-        try:
-            stopped, message = self._timer().on_track_finished()
-        except Exception as err:  # pragma: no cover - 落盘状态被手改坏
-            logger.warning(f"{_LOG} 更新睡眠定时失败: {err}")
-            stopped, message = False, ""
-        if stopped:
-            logger.info(f"{_LOG} {message}，停止连播")
-            self._control("stop", device_id=device_id)
-            return
-        result = self._advance("next")
-        if self._tts_announce and result.ok:
-            advanced = self._queue_state()
-            rows = advanced.get("items") or []
-            position = int(advanced.get("index") or 0)
-            # 顺序播到最后一首、或"单曲播放"模式播完：_advance 会原地返回成功，
-            # 这时并没有"接下来"，别播一句报下一首而音箱已经安静了
-            if position != index and 0 <= position < len(rows):
-                title = str(rows[position].get("title") or "").strip()
-                if title:
-                    self._tts(f"接下来播放 {title}", device_id=device_id)
+            self.__dict__.pop("_advance_seen", None)
+            played = int(status.get("position") or 0) // 1000
+            whole = int(status.get("duration") or 0) // 1000
+            logger.info(f"{_LOG} 队列 {index + 1}/{len(state['items'])} 已播完，推进下一首"
+                        f" 设备进度 {played} 秒 / 全曲 {whole or '未知'} 秒")
+            try:
+                stopped, message = self._timer().on_track_finished()
+            except Exception as err:  # pragma: no cover - 落盘状态被手改坏
+                logger.warning(f"{_LOG} 更新睡眠定时失败: {err}")
+                stopped, message = False, ""
+            if stopped:
+                logger.info(f"{_LOG} {message}，停止连播")
+                self._control("stop", device_id=device_id)
+                return
+            result = self._advance("next", announce=True)
+            if not result.ok:
+                self._suspend_queue("自动切歌失败", device_id)
+                logger.warning(f"{_LOG} 自动切歌失败：{result.message}")
 
     def _voice_tick(self) -> None:
         """宿主周期任务：读一轮小爱对话记录，把新说的话交给口令引擎。
@@ -2058,8 +2256,13 @@ class XiaoaiSpeaker(_PluginBase):
         enable = action == "enable_monitor"
         if self._voice_enabled == enable:
             return True, f"语音监听已经是{'开' if enable else '关'}的"
-        self._voice_enabled = enable
-        self._save_config()
+        with self._play_lock():
+            self._invalidate_voice()
+            self._voice_enabled = enable
+            listener = self.__dict__.get("_speech_listener")
+            if isinstance(listener, _speech.SpeechListener):
+                listener.reset()
+            self._save_config()
         self._refresh_jobs()
         return True, "语音监听已开启" if enable else "语音监听已关闭"
 
@@ -2158,8 +2361,9 @@ class XiaoaiSpeaker(_PluginBase):
     def _stop_event(self) -> threading.Event:
         return self.__dict__.setdefault("_stop_flag", threading.Event())
 
-    def _play_lock(self) -> threading.Lock:
-        return self.__dict__.setdefault("_op_lock", threading.Lock())
+    def _play_lock(self):
+        """播放操作、队列和控制的可重入事务锁。"""
+        return self.__dict__.setdefault("_op_lock", threading.RLock())
 
     def _refresh_jobs(self) -> None:
         """让宿主按当前配置重建本插件的周期任务。
@@ -2317,6 +2521,11 @@ class XiaoaiSpeaker(_PluginBase):
                         logged_in=True, device_count=count)
 
     def _logout(self) -> LoginOut:
+        with self._play_lock():
+            self._invalidate_voice()
+            return self._logout_locked()
+
+    def _logout_locked(self) -> LoginOut:
         for key in (_KEY_TOKEN, _KEY_LAST):
             try:
                 self.del_data(key)
@@ -2327,7 +2536,10 @@ class XiaoaiSpeaker(_PluginBase):
         self.__dict__["_qr_login"] = None
         self.__dict__["_devices_cache"] = {}
         self.__dict__["_status_cache"] = {}
-        self.save_data(_KEY_QUEUE, {"device_id": "", "index": -1, "items": []})
+        self._set_queue_state([], -1, "")
+        listener = self.__dict__.get("_speech_listener")
+        if isinstance(listener, _speech.SpeechListener):
+            listener.reset()
         return LoginOut(state="failed", message="已退出登录并清除本机票据", logged_in=False)
 
     # ---------------- 库浏览 ----------------
@@ -2939,8 +3151,13 @@ class XiaoaiSpeaker(_PluginBase):
         if device_id:
             if not self._device_by_id(device_id):
                 return ActionOut(ok=False, message="该设备不在当前设备列表里，请先刷新")
-        self._default_device_id = device_id
-        self._save_config()
+        with self._play_lock():
+            self._invalidate_voice()
+            self._default_device_id = device_id
+            listener = self.__dict__.get("_speech_listener")
+            if isinstance(listener, _speech.SpeechListener):
+                listener.reset()
+            self._save_config()
         return ActionOut(ok=True, message="已设置默认音箱" if device_id else "已取消默认音箱",
                          playing=self._playing_out(self._device_by_id(device_id) if device_id else None,
                                                    force=True))
@@ -2987,23 +3204,37 @@ class XiaoaiSpeaker(_PluginBase):
         return PlayOut(ok=False, message="请给出 path、url 或 keyword 之一")
 
     def api_queue(self, payload: QueueIn) -> PlayOut:
-        """POST /queue —— 设定队列并从 index 开始播。"""
+        """POST /queue —— 替换起播或服务端原子追加，追加不会重新播放当前曲目。"""
         paths = [str(item) for item in (payload.paths or []) if str(item).strip()]
         if not paths:
             return PlayOut(ok=False, message="队列为空")
-        device, err = self._target_device(payload.device_id)
-        if not device:
-            return PlayOut(ok=False, message=err)
-        index = min(max(int(payload.index or 0), 0), len(paths) - 1)
-        first = paths[index]
-        result = self._play_file(first, device_id=str(device.get("device_id") or ""),
-                                queue_paths=paths)
-        if result.ok:
+        with self._play_lock():
             state = self._queue_state()
-            state["index"] = index
-            self.save_data(_KEY_QUEUE, state)
-            result.queue = self._queue_out(state)
-        return result
+            if payload.append:
+                added = self._queue_items(paths)
+                if not added:
+                    return PlayOut(ok=False, message="没有可追加的库内音频")
+                if state.get("items"):
+                    if payload.device_id and payload.device_id != state.get("device_id"):
+                        return PlayOut(ok=False, message="追加目标与当前队列设备不同，请先切换播放设备")
+                    items = list(state["items"])
+                    seen = {row["path"] for row in items}
+                    for item in added:
+                        if item["path"] not in seen:
+                            items.append(item)
+                            seen.add(item["path"])
+                    count = len(items) - len(state["items"])
+                    state["items"] = items
+                    self.save_data(_KEY_QUEUE, state)
+                    return PlayOut(ok=True, message=f"已追加 {count} 首" if count else "曲目已在队列中",
+                                   queue=self._queue_out(state))
+                paths = [row["path"] for row in added]
+            device, err = self._target_device(payload.device_id)
+            if not device:
+                return PlayOut(ok=False, message=err)
+            index = 0 if payload.append else min(max(int(payload.index or 0), 0), len(paths) - 1)
+            return self._play_file(paths[index], device_id=str(device.get("device_id") or ""),
+                                   queue_paths=paths)
 
     def api_control(self, payload: ControlIn) -> PlayOut:
         """POST /control —— {action: play|pause|stop|toggle|next|prev|<序号>}。"""
@@ -3124,6 +3355,7 @@ class XiaoaiSpeaker(_PluginBase):
         out = self._voice_model(records=True)
         if not text:
             return out.model_copy(update={"ok": False, "message": "请输入一句话"})
+        generation = self._invalidate_voice() if payload.execute else None
         match = self._match_voice(text)
         # 判定过程记一行：口令表命不命中是确定的，AI 兜底每次可能给不同结果，
         # 用户说「同一个词两次结果不一样」时只能靠这行日志分辨是哪一级给的答案。
@@ -3141,7 +3373,11 @@ class XiaoaiSpeaker(_PluginBase):
         out.argument = match.argument
         out.matched = match.keyword or match.kind
         if payload.execute:
-            out.reply = self._run_intent(match, (payload.device_id or "").strip())
+            with self._play_lock():
+                if generation != self.__dict__.get("_voice_generation") or self._stop_event().is_set():
+                    return out.model_copy(update={"ok": False, "message": "请求已被新的播放或控制取代"})
+                out.reply = self._execute_voice_match(
+                    match, (payload.device_id or "").strip(), generation, audible=False)
             out.message = "已执行" + (f"：{out.reply}" if out.reply else "（音箱没有回话）")
         else:
             out.message = "仅判定，未执行；勾上「直接执行」才会真的推到音箱"
@@ -3435,6 +3671,7 @@ class XiaoaiSpeaker(_PluginBase):
         # 是否存在与多久醒一次：改过这些都要请宿主重建
         affects_jobs = any(key in data for key in ("enabled", "voice_enabled", "voice_poll"))
         with self._play_lock():
+            self._invalidate_voice()
             if "music_dirs" in data:
                 self._music_dirs = str(data.pop("music_dirs") or "")
             if "base_url" in data:
@@ -3491,6 +3728,9 @@ class XiaoaiSpeaker(_PluginBase):
                 self._library_limit = _library.clamp_song_limit(data.pop("library_limit"))
             if "library_refresh" in data:
                 self._library_refresh = self._clamp_library_refresh(data.pop("library_refresh"))
+            assistant = self.__dict__.get("_assistant_cache")
+            if isinstance(assistant, _intents.Assistant):
+                assistant.configure(self._ai_timeout)
             self._save_config()
         # 改过语音/设备就要重读配置：监听器的时间基线属于上一批设备，
         # 留着会把旧设备已处理过的序号当成新设备的基线，漏掉第一批口令
@@ -3750,6 +3990,7 @@ class XiaoaiSpeaker(_PluginBase):
     def stop_service(self) -> None:
         """停用：投递停止信号、取消本插件登记的一次性任务、丢掉监听器的时间基线。"""
         self._stop_event().set()
+        self._invalidate_voice()
         listener = self.__dict__.get("_speech_listener")
         if isinstance(listener, _speech.SpeechListener):
             listener.reset()

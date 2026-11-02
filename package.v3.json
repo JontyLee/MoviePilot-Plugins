@@ -35,7 +35,7 @@
     "name": "小爱音箱",
     "description": "把 MoviePilot 的音乐库推到小爱音箱：支持小米账号密码、扫码与Cookie票据登录，曲库索引、歌单与收藏、签名限时直链、可选本机MP3转码、设备分组、语音口令和定时任务。侧栏提供播放与运行视图，独立配置页管理账号、曲库、播放偏好、口令表与任务定义。",
     "labels": "音乐,音箱",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "icon": "https://raw.githubusercontent.com/JontyLee/MoviePilot-Plugins/main/icons/xiaoai.svg",
     "author": "JontyLee",
     "repo_url": "https://github.com/JontyLee/MoviePilot-Plugins",
@@ -44,6 +44,7 @@
     "release": true,
     "system_version": ">=3.1.8",
     "history": {
+      "v1.0.1": "修复 AI 阻塞语音口令、过期结果与旧队列回跳；队列原子追加不重播，校验播放会话与 OH2 状态；仅记忆成功点歌，歌手完整选曲按自然顺序排列。",
       "v1.0.0": "首次发布：小米登录与音箱控制、本地曲库播放、签名直链、语音点歌、设备分组、睡眠定时和定时任务。"
     }
   }

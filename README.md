@@ -2,7 +2,7 @@
 
 **JontyLee 的 MoviePilot V3 个人插件仓库。** 提供 ANi 番剧 STRM 中转、音乐库刮削与小爱音箱播放三个插件，源码与市场索引在本仓库维护。
 
-**当前版本：[v1.0.0](https://github.com/JontyLee/MoviePilot-Plugins/releases/tag/v1.0.0)**
+**仓库基线：[v1.0.0](https://github.com/JontyLee/MoviePilot-Plugins/releases/tag/v1.0.0)**；各插件源码版本见下表。
 
 [插件一览](#插件一览) · [安装与更新](#安装与更新) · [目录结构](#目录结构) · [开发与验证](#开发与验证) · [致谢](#致谢)
 
@@ -60,8 +60,8 @@
 | 插件 ID / 主类 | `XiaoaiSpeaker` |
 | 源码 | [`plugins.v3/xiaoaispeaker/`](plugins.v3/xiaoaispeaker/) |
 | 配置前缀 | `xiaoaispeaker_` |
-| 版本 | 1.0.0 |
-| Release | [XiaoaiSpeaker v1.0.0](https://github.com/JontyLee/MoviePilot-Plugins/releases/tag/XiaoaiSpeaker_v1.0.0) |
+| 版本 | 1.0.1 |
+| Release | [XiaoaiSpeaker v1.0.1](https://github.com/JontyLee/MoviePilot-Plugins/releases/tag/XiaoaiSpeaker_v1.0.1) |
 
 - 支持小米账号密码、扫码与 Cookie 票据登录，设备控制经小米 Mina 云端接口完成。
 - 本机签发限时播放直链，音箱通过 HTTP 从插件取流；非 MP3 可选由本机 ffmpeg 现场转码。
@@ -84,7 +84,7 @@
    通过 `PLUGIN_MARKET` 管理仓库时，将该地址追加到已有列表，多个地址用逗号分隔。
 2. 刷新市场，按上表名称安装插件。V3 插件由 `main` 分支的 [`package.v3.json`](package.v3.json) 提供索引。
 3. 打开插件配置，按对应使用说明设置目录、连接信息与启用开关，再进行首次运行。
-4. Release 页面提供三个插件各自的 ZIP 包；市场安装使用 `插件ID_v版本号` 对应的 Release，仓库标签 `v1.0.0` 标记共同的源码快照。
+4. Release 页面提供三个插件各自的 ZIP 包；市场安装使用 `插件ID_v版本号` 对应的 Release，仓库标签标记整个仓库的源码快照。
 
 目录配置均指 **MoviePilot 运行环境内的路径**。Docker 部署应填写容器挂载路径；音箱和媒体服务器使用的 HTTP 地址则必须从它们各自的网络可达。
 
