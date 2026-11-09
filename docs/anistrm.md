@@ -5,7 +5,7 @@
 | 项目 | 当前值 |
 | --- | --- |
 | 插件 ID / 主类 | `ANiStrmRelay` |
-| 版本 / 宿主要求 | `1.1.0` / MoviePilot `≥ 3.1.6` |
+| 版本 / 宿主要求 | `1.0.1` / MoviePilot `≥ 3.1.6` |
 | Release | [ANiStrmRelay v1.0.0](https://github.com/JontyLee/MoviePilot-Plugins/releases/tag/ANiStrmRelay_v1.0.0) |
 | 源码 | [`plugins.v3/anistrmrelay/`](../plugins.v3/anistrmrelay/) |
 | 配置前缀 | `anistrm_` |

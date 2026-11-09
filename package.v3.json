@@ -3,7 +3,7 @@
     "name": "ANi Strm 自用版（CF中转）",
     "description": "基于 honue 版 ANi-Strm 2.5.1：按上游季度与番剧目录生成STRM，内置CF透传中转，FlareSolverr自动取得cf_clearance与配套UA；解题浏览器、探活和回源共用HTTP代理，内网控制API独立直连。保存后等待凭证验证成功再补齐目录，支持按需改写STRM播放地址。致谢 honue 与 open ANi 字幕组。",
     "labels": "媒体库,动漫",
-    "version": "1.1.0",
+    "version": "1.0.1",
     "icon": "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/anistrm.png",
     "author": "JontyLee",
     "repo_url": "https://github.com/JontyLee/MoviePilot-Plugins",
@@ -13,7 +13,7 @@
     "system_version": ">=3.1.6",
     "history": {
       "v1.0.0": "首次发布：按季度生成STRM，内置Cloudflare中转、FlareSolverr凭证维护、统一出站代理与中转自检。",
-      "v1.1.0": "新增CF凭证停机自动恢复（可配置重试间隔与当日上限）；全季度回填完成或有异常后均自动切回最新季；新增连续空季熔断避免源站503时反复无效冲击；目录请求重试改为指数退避+随机抖动。"
+      "v1.0.1": "新增CF凭证停机自动恢复（可配置重试间隔与当日上限，次日自动重置）；全季度回填完成或异常后均自动切回最新季；新增连续空季熔断避免源站503反复无效冲击；目录请求重试改为指数退避+随机抖动。"
     }
   },
   "TagFlow": {

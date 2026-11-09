@@ -183,7 +183,7 @@ class ANiStrmRelay(_PluginBase):
     plugin_name = "ANi Strm 自用版（CF中转）"
     plugin_desc = "自动获取当季所有番剧生成strm；内置CF中转代理携带cf_clearance直连openani，凭证由FlareSolverr全自动解题续期（插件设置或MP系统设置提供地址，未配置则不启用），无需粘贴cookie（基于 honue 版 ANi-Strm 迭代）"
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/anistrm.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.0.1"
     plugin_author = "JontyLee（基于 honue ANi-Strm）"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "anistrm_"
