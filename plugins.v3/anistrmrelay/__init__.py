@@ -49,6 +49,12 @@ RELAY_ESCALATION_MAX_MISSES = 6
 # 5分钟一拍的心跳上且实测会被探活阻塞推迟（14分钟配置下实际出现过29分钟间隔），
 # 按12分钟留出一拍余量，最坏间隔仍在有效期内
 FLARESOLVER_REFRESH_MINUTES = 12
+# 自动恢复重试间隔（分钟）：__relay_stop 摘除任务后，按此间隔自动排回心跳，
+# 持续重试 FlareSolverr 解题，无需用户手动重载插件；0 或负值禁用自动恢复
+DEFAULT_RELAY_AUTO_RECOVER_MINUTES = 15
+# 自动恢复最大连续失败次数：连续 N 次解题+探活均失败才彻底放弃，避免 FlareSolverr
+# 长期不可用时反复白烧解题时间；每次成功探活计数清零；0 表示不限制
+DEFAULT_RELAY_AUTO_RECOVER_MAX_ATTEMPTS = 8
 # 同一拍内刚换到的新证被探活判挑战页时的冷却（秒）：CF 对出口IP的短时风控升级会连新证
 # 一起拦（同时段中转大批并发请求同样命中挑战页、FlareSolverr 自己也解不出题），此时立刻
 # 二次解题只会白烧 140 秒并把还能用的证顶掉，改为交给短间隔补试重探
@@ -177,7 +183,7 @@ class ANiStrmRelay(_PluginBase):
     plugin_name = "ANi Strm 自用版（CF中转）"
     plugin_desc = "自动获取当季所有番剧生成strm；内置CF中转代理携带cf_clearance直连openani，凭证由FlareSolverr全自动解题续期（插件设置或MP系统设置提供地址，未配置则不启用），无需粘贴cookie（基于 honue 版 ANi-Strm 迭代）"
     plugin_icon = "https://raw.githubusercontent.com/honue/MoviePilot-Plugins/main/icons/anistrm.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     plugin_author = "JontyLee（基于 honue ANi-Strm）"
     author_url = "https://github.com/JontyLee"
     plugin_config_prefix = "anistrm_"
@@ -214,6 +220,11 @@ class ANiStrmRelay(_PluginBase):
     _escalation_misses = 0
     # 中转命中挑战页的上次告警时间戳：CF风控升级时并发播放请求会成片命中，逐条打印会淹掉日志
     _last_challenge_warn_ts = 0.0
+    # 自动恢复相关
+    _auto_recover_attempts = 0
+    _auto_recover_day: str = ""  # 记录本轮自动恢复所属日期（YYYY-MM-DD），跨天自动重置计数
+    _relay_auto_recover_minutes: int = DEFAULT_RELAY_AUTO_RECOVER_MINUTES
+    _relay_auto_recover_max: int = DEFAULT_RELAY_AUTO_RECOVER_MAX_ATTEMPTS
 
     def __init__(self):
         super().__init__()
@@ -294,6 +305,15 @@ class ANiStrmRelay(_PluginBase):
         self._relay_public_base = (config.get("relay_public_base") or "").strip().rstrip("/")
         self._rewrite_existing = bool(config.get("rewrite_existing"))
         self._relay_proxy = (config.get("relay_proxy") or "").strip()
+        # 自动恢复配置：relay_auto_recover_minutes ≤ 0 表示禁用自动恢复（完全依赖手动）
+        _rac_min_raw = config.get("relay_auto_recover_minutes")
+        self._relay_auto_recover_minutes = (
+            DEFAULT_RELAY_AUTO_RECOVER_MINUTES if _rac_min_raw is None else int(_rac_min_raw or 0)
+        )
+        _rac_max_raw = config.get("relay_auto_recover_max")
+        self._relay_auto_recover_max = (
+            DEFAULT_RELAY_AUTO_RECOVER_MAX_ATTEMPTS if _rac_max_raw is None else int(_rac_max_raw or 0)
+        )
         self._upstream_proxy = None
         self._upstream_proxy_source = "TUN/直连"
         self._upstream_proxy_error = ""
@@ -348,6 +368,9 @@ class ANiStrmRelay(_PluginBase):
             f"seasons={self._selected_seasons or []}, storage={self._storageplace}, "
             f"upstream_proxy={self._upstream_proxy_source}"
         )
+        # 每次初始化（重启/保存配置）重置当日自动恢复计数：视为新的一天从头再来
+        self._auto_recover_attempts = 0
+        self._auto_recover_day = ""
         self.__update_config()
 
         if not (self._enabled or self._relay_enabled):
@@ -496,6 +519,12 @@ class ANiStrmRelay(_PluginBase):
 
         query_suffix = f"rt={self._relay_token}" if (self._relay_enabled and self._relay_token) else None
 
+        # 连续空季检测：CF 降级/凭证失效时 get_season_entries 返回空列表，若继续逐季
+        # 重试会在源站排队期反复消耗请求配额（实测 31 季全线 503 约 15 分钟），
+        # 连续 2 个季节为空即判定源站当前不可用，跳过剩余季度避免无效冲击。
+        consecutive_empty_seasons = 0
+        MAX_CONSECUTIVE_EMPTY_SEASONS = 2
+
         for season in seasons:
             # 插件被停止/重载时本线程还在跑：立即让位，别继续与新实例并发打源站
             if not self.__generation_active(generation) or not self._enabled:
@@ -506,6 +535,20 @@ class ANiStrmRelay(_PluginBase):
             if not self.__generation_active(generation) or not self._enabled:
                 return
             season_total = len(file_entries)
+            if season_total == 0:
+                consecutive_empty_seasons += 1
+                if consecutive_empty_seasons >= MAX_CONSECUTIVE_EMPTY_SEASONS:
+                    remaining = seasons[seasons.index(season) + 1:]
+                    logger.warning(
+                        f"ANi-Strm季度 {season} 连续第 {consecutive_empty_seasons} 次为空，"
+                        f"判定源站当前不可用（CF降级或凭证失效），"
+                        f"跳过剩余 {len(remaining)} 个季度：{remaining[:5]}"
+                        f"{'...' if len(remaining) > 5 else ''}"
+                    )
+                    total_missing_series += 1  # 计为整体未完成
+                    break
+            else:
+                consecutive_empty_seasons = 0
             season_created = 0
             season_exists = 0
             season_updated = 0
@@ -553,17 +596,21 @@ class ANiStrmRelay(_PluginBase):
             f"新增={total_created}，跳过={total_exists}，改写={total_updated}，失败={total_failed}"
         )
 
-        # 全季度回填只应是一次性动作：完成后自动切回最新季，避免定时任务反复全量拉取冲击配额
+        # 全季度回填只应是一次性动作：完成一轮完整遍历后自动切回最新季，避免定时任务反复全量拉取冲击配额
         with self._state_lock:
             if not self.__generation_active(generation):
                 return
-            if ("all" in self._selected_seasons and total_files
-                    and not total_failed and not total_missing_series):
+            if "all" in self._selected_seasons and total_files > 0:
+                if not total_failed and not total_missing_series:
+                    logger.info("ANi-Strm全季度回填完成，拉取季度已自动切回最新季")
+                else:
+                    logger.warning(
+                        f"ANi-Strm全季度回填有异常（失败={total_failed}，"
+                        f"目录未取得={total_missing_series}），已切回最新季；"
+                        "缺失条目可在 CF 凭证恢复后重新选择全部季度手动补齐"
+                    )
                 self._selected_seasons = ["latest"]
                 self.__update_config(generation=generation)
-                logger.info("ANi-Strm全季度回填完成，拉取季度已自动切回最新季")
-            elif "all" in self._selected_seasons:
-                logger.warning("ANi-Strm全季度回填未完整成功，保留全部季度选择，修复后可继续补齐")
 
     def __get_target_seasons(self) -> List[str]:
         """
@@ -945,9 +992,13 @@ class ANiStrmRelay(_PluginBase):
         """
         停用内置CF中转：摘除保活、续期与拉取任务并发送通知，避免死证下持续打源站。
 
+        若配置了自动恢复（relay_auto_recover_minutes > 0 且未超上限），
+        停机后立即排一次单拍 auto-recover 任务（只解题+探活，不跑全量回填），
+        成功后恢复完整保活链，无需用户手动重载。
+
         :param reason: 触发停机的失败摘要
         """
-        logger.warning(f"ANi-Strm内置CF中转运行已暂停（配置开关保留，修复后保存或重载恢复）：{reason}")
+        logger.warning(f"ANi-Strm内置CF中转运行已暂停（配置开关保留）：{reason}")
         self._relay_enabled = False
         self._enabled = False
         self._relay_ready = False
@@ -964,6 +1015,41 @@ class ANiStrmRelay(_PluginBase):
                     self._scheduler.remove_job(job_id)
             except Exception as remove_err:
                 logger.warning(f"ANi-Strm摘除任务 {job_id} 失败：{remove_err}")
+
+        # 自动恢复：排入一次 __relay_auto_recover（30 秒后执行，等 CF 冷却期稍过）
+        can_auto_recover = (
+            self._relay_auto_recover_minutes > 0
+            and self._relay_auto_recover_max > 0
+            and self._auto_recover_attempts < self._relay_auto_recover_max
+            and self._scheduler is not None
+        )
+        if can_auto_recover:
+            self._auto_recover_attempts += 1
+            delay_min = self._relay_auto_recover_minutes
+            next_run = datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(seconds=30)
+            try:
+                self._scheduler.add_job(
+                    func=self.__relay_auto_recover,
+                    trigger="date",
+                    run_date=next_run,
+                    name="ANiStrmRelay自动恢复",
+                    id="anistrm_relay_auto_recover",
+                    args=[self._config_generation, delay_min],
+                    replace_existing=True,
+                )
+                logger.info(
+                    f"ANi-Strm已排自动恢复（第{self._auto_recover_attempts}/"
+                    f"{self._relay_auto_recover_max}次，30秒后解题探活；"
+                    f"成功后按{delay_min}分钟间隔持续保活）"
+                )
+            except Exception as sched_err:
+                logger.warning(f"ANi-Strm自动恢复排程失败：{sched_err}")
+        elif self._relay_auto_recover_max > 0 and self._auto_recover_attempts >= self._relay_auto_recover_max:
+            logger.warning(
+                f"ANi-Strm自动恢复已达上限（{self._relay_auto_recover_max}次），"
+                "彻底停止，需手动保存配置或重载插件恢复"
+            )
+
         self.post_message(
             title="【ANi Strm 中转】CF凭证不可用，运行已暂停（配置保留）",
             text=(
@@ -975,14 +1061,161 @@ class ANiStrmRelay(_PluginBase):
                 "**影响**\n"
                 "- 内置CF中转运行已暂停，strm 播放请求将返回 503；用户开关未关闭\n"
                 "- 保活心跳、凭证续期与定时拉取任务均已摘除，不会自动重试\n"
-                "\n"
-                "**恢复步骤**\n"
-                f"1. 检查 FlareSolverr（地址：{self._fs_url or '未配置'}）是否存活，"
-                "其浏览器需能以本机同一出口IP通过源站人机验证\n"
-                "2. 确认可用后保存配置或重载插件，保活、续期与定时拉取自动恢复；"
-                "cf_clearance 与配套UA全部由 FlareSolverr 现场解题提供，无需手工粘贴任何cookie"
+                + (
+                    f"\n**自动恢复**：今日第{self._auto_recover_attempts}次尝试已排入；"
+                    f"当日连续失败{self._relay_auto_recover_max}次后停止，次日00:00自动从第1次重新开始\n"
+                    if can_auto_recover else ""
+                )
+                + "\n"
+                "**手动恢复**（如需立即尝试）\n"
+                f"检查 FlareSolverr（地址：{self._fs_url or '未配置'}）是否存活并保存配置，"
+                "保活、续期与定时拉取立即恢复；cf_clearance 与配套UA全部由 FlareSolverr 现场解题提供，无需手工粘贴任何cookie"
             ),
         )
+
+    def __relay_auto_recover(self, generation: Optional[int] = None, recover_interval_min: int = DEFAULT_RELAY_AUTO_RECOVER_MINUTES):
+        """
+        自动恢复单拍：先解题换证，再探活验证，成功则恢复完整保活链。
+
+        此任务由 __relay_stop 排入，在停机冷却期（约 30 秒）后执行。
+        成功：重置计数、重新注册心跳（5 分钟间隔）、触发启动补齐。
+        失败：按 recover_interval_min 间隔再排下一拍；达当日上限后推明日零点重启计数重跑。
+        """
+        generation = self._config_generation if generation is None else generation
+        if not self.__generation_active(generation):
+            return
+
+        # 跨天重置：今日已耗尽，明天从第1次重新开始
+        today_str = datetime.now(tz=pytz.timezone(settings.TZ)).strftime("%Y-%m-%d")
+        if self._auto_recover_day and self._auto_recover_day != today_str:
+            logger.info(
+                f"ANi-Strm自动恢复：新的一天（{today_str}），重置计数，开始新一轮尝试"
+            )
+            self._auto_recover_attempts = 0
+        self._auto_recover_day = today_str
+
+        # 1. 解题换证（复用 __fs_refresh，不经过心跳逻辑）
+        refreshed = self.__fs_refresh()
+        if not self.__generation_active(generation):
+            return
+
+        if not refreshed:
+            logger.warning(
+                f"ANi-Strm自动恢复第{self._auto_recover_attempts}次：FlareSolverr解题失败，"
+                f"{recover_interval_min}分钟后重试"
+            )
+            self.__schedule_next_auto_recover(generation, recover_interval_min)
+            return
+
+        # 2. 探活验证
+        try:
+            credentials = (self._cf_clearance, self._cf_user_agent)
+            resp = self.__relay_probe(credentials=credentials)
+            body_head = resp.content[:4096]
+            challenged = any(mark in body_head for mark in CHALLENGE_MARKS) or (
+                resp.status_code in (403, 429, 503)
+                and b"cloudflare" in resp.content.lower()
+            ) or resp.headers.get("cf-mitigated") == "challenge"
+            if challenged:
+                raise RuntimeError("上游仍返回CF人机挑战页（出口IP可能被持续风控）")
+            if resp.status_code != 200:
+                raise RuntimeError(f"上游探活失败：HTTP {resp.status_code}")
+        except Exception as probe_err:
+            logger.warning(
+                f"ANi-Strm自动恢复第{self._auto_recover_attempts}次：探活失败（{probe_err}），"
+                f"{recover_interval_min}分钟后重试"
+            )
+            self.__schedule_next_auto_recover(generation, recover_interval_min)
+            return
+
+        # 3. 成功：恢复完整保活链
+        recovered_attempt = self._auto_recover_attempts  # 先记录，清零后日志用原始值
+        with self._state_lock:
+            if not self.__generation_active(generation):
+                return
+            self._auto_recover_attempts = 0
+            self._heartbeat_misses = 0
+            self._escalation_misses = 0
+            self._relay_enabled = True
+            self._enabled = self._enabled_requested
+            self._relay_ready = True
+            self._relay_pause_reason = ""
+            self._startup_pull_pending = True
+            self._fs_last_ts = time.time()
+            self.__update_config(generation=generation)
+
+        # 摘除本 auto-recover 任务，重新注册正常保活心跳
+        try:
+            if self._scheduler and self._scheduler.get_job("anistrm_relay_auto_recover"):
+                self._scheduler.remove_job("anistrm_relay_auto_recover")
+        except Exception:
+            pass
+        try:
+            if self._scheduler:
+                self._scheduler.add_job(
+                    func=self.__relay_heartbeat,
+                    trigger=IntervalTrigger(minutes=RELAY_HEARTBEAT_MINUTES),
+                    name="ANiStrmRelay中转保活",
+                    id="anistrm_relay_heartbeat",
+                    next_run_time=
+                        datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(seconds=15),
+                    replace_existing=True,
+                    args=[generation],
+                )
+        except Exception:
+            logger.warning("ANi-Strm自动恢复成功但保活任务重注册失败，下次保存配置时恢复")
+
+        self.__schedule_startup_pull()
+        logger.info(
+            f"ANi-Strm自动恢复成功（第{recovered_attempt}次），"
+            "保活心跳已重启，cf_clearance 有效，启动补齐已排程"
+        )
+
+    def __schedule_next_auto_recover(self, generation: int, recover_interval_min: int):
+        """
+        排下一拍自动恢复。
+        策略：
+        - 未达当日上限：按 recover_interval_min 间隔继续重试。
+        - 达到当日上限：标记今日已耗尽，排到明天 00:00 重置计数并重新来一轮；
+          不永久的"彻底放弃"——只要 CF/FlareSolverr 某天恢复就能自动续命。
+        """
+        if self._auto_recover_attempts >= self._relay_auto_recover_max:
+            # 今日 8 次耗尽，推到明天零点重置计数从头再来
+            tomorrow = datetime.now(tz=pytz.timezone(settings.TZ)).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            ) + timedelta(days=1)
+            logger.warning(
+                f"ANi-Strm自动恢复已达当日上限（{self._relay_auto_recover_max}次），"
+                f"今日停止；已排明日{tomorrow.strftime('%Y-%m-%d %H:%M')}自动重置并从第1次重新开始"
+            )
+            self._auto_recover_attempts = self._relay_auto_recover_max + 1  # 标记今日已耗尽
+            self._auto_recover_day = ""  # 清空日期，触发明日的重置逻辑
+            try:
+                self._scheduler.add_job(
+                    func=self.__relay_auto_recover,
+                    trigger="date",
+                    run_date=tomorrow,
+                    name="ANiStrmRelay自动恢复",
+                    id="anistrm_relay_auto_recover",
+                    args=[generation, recover_interval_min],
+                    replace_existing=True,
+                )
+            except Exception as sched_err:
+                logger.warning(f"ANi-Strm自动恢复次日重排失败：{sched_err}")
+            return
+        next_run = datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(minutes=recover_interval_min)
+        try:
+            self._scheduler.add_job(
+                func=self.__relay_auto_recover,
+                trigger="date",
+                run_date=next_run,
+                name="ANiStrmRelay自动恢复",
+                id="anistrm_relay_auto_recover",
+                args=[generation, recover_interval_min],
+                replace_existing=True,
+            )
+        except Exception as sched_err:
+            logger.warning(f"ANi-Strm自动恢复重排失败：{sched_err}")
 
     def __relay_probe(self, credentials: Optional[Tuple[str, str]] = None) -> httpx.Response:
         """
@@ -1523,6 +1756,49 @@ class ANiStrmRelay(_PluginBase):
                                 "component": "VCol",
                                 "props": {
                                     "cols": 12,
+                                    "md": 4,
+                                },
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "relay_auto_recover_minutes",
+                                            "label": "自动恢复间隔(分钟)",
+                                            "placeholder": "15",
+                                            "hint": "CF凭证停机后自动重试FlareSolverr解题的间隔；0或负值禁用自动恢复",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {
+                                    "cols": 12,
+                                    "md": 4,
+                                },
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "relay_auto_recover_max",
+                                            "label": "自动恢复最大次数",
+                                            "placeholder": "8",
+                                            "hint": "连续失败N次后彻底放弃（需手动保存配置恢复）；0表示不限制",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {
+                                    "cols": 12,
                                 },
                                 "content": [
                                     {
@@ -1574,6 +1850,8 @@ class ANiStrmRelay(_PluginBase):
             "rewrite_existing": False,
             "fs_url": "",
             "relay_proxy": "",
+            "relay_auto_recover_minutes": DEFAULT_RELAY_AUTO_RECOVER_MINUTES,
+            "relay_auto_recover_max": DEFAULT_RELAY_AUTO_RECOVER_MAX_ATTEMPTS,
         }
 
     def __build_season_options(self) -> List[Dict[str, str]]:
@@ -1616,6 +1894,8 @@ class ANiStrmRelay(_PluginBase):
                 "rewrite_existing": self._rewrite_existing,
                 "fs_url": self._fs_url_explicit,
                 "relay_proxy": self._relay_proxy,
+                "relay_auto_recover_minutes": self._relay_auto_recover_minutes,
+                "relay_auto_recover_max": self._relay_auto_recover_max,
             })
 
     def get_page(self) -> List[dict]:
@@ -1859,8 +2139,16 @@ class AniStrmClient:
 
     @staticmethod
     def _with_retry(operation, default, tries: int = 3, delay: int = 3):
+        """
+        带指数退避 + 随机抖动的重试。
+
+        使用 Fibonacci 阶梯延迟（delay × Fib[i]），再叠加 0~delay×0.5 的随机抖动，
+        防止多请求并发重试时形成同步冲击波触发上游限速。最大单步等待不超过
+        delay × 8（当前 ≈24s）加上抖动上限 1.5s，整体远小于目录级 1s 间隔。
+        """
+        import math, random
+        fib = [0, 1, 1, 2, 3, 5, 8]  # Fib[tries+1] 覆盖最大重试索引
         remaining = tries
-        wait_seconds = delay
         while remaining > 0:
             try:
                 return operation()
@@ -1869,8 +2157,15 @@ class AniStrmClient:
                 if remaining == 0:
                     logger.warning(f"ANiStrmRelay请求失败，已达到最大重试次数：{err}")
                     break
-                logger.warning(f"未获取到文件信息，{wait_seconds}秒后重试 ...")
-                time.sleep(wait_seconds)
+                fib_idx = min(tries + 1 - remaining + 1, len(fib) - 1)
+                base_wait = delay * fib[fib_idx]
+                # 0 ~ delay*0.5 的随机抖动，避免并发重试同步触发
+                jitter = random.uniform(0, delay * 0.5)
+                total_wait = min(base_wait, 30.0) + jitter  # 上限 30s
+                logger.warning(
+                    f"未获取到文件信息，约 {total_wait:.1f} 秒后重试（尝试 {tries - remaining}/{tries}）..."
+                )
+                time.sleep(total_wait)
         logger.warning("请确保当前季度番剧文件夹存在或检查网络问题")
         return default
 

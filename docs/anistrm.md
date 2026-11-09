@@ -5,7 +5,7 @@
 | 项目 | 当前值 |
 | --- | --- |
 | 插件 ID / 主类 | `ANiStrmRelay` |
-| 版本 / 宿主要求 | `1.0.0` / MoviePilot `≥ 3.1.6` |
+| 版本 / 宿主要求 | `1.1.0` / MoviePilot `≥ 3.1.6` |
 | Release | [ANiStrmRelay v1.0.0](https://github.com/JontyLee/MoviePilot-Plugins/releases/tag/ANiStrmRelay_v1.0.0) |
 | 源码 | [`plugins.v3/anistrmrelay/`](../plugins.v3/anistrmrelay/) |
 | 配置前缀 | `anistrm_` |
@@ -67,6 +67,8 @@
 | 中转访问地址 | `relay_public_base` | 空 | 外部可达的完整 `/api/v1/plugin/<实例ID>/relay` 前缀 |
 | 中转出站代理 | `relay_proxy` | 空 | 解题、探活、媒体与目录回源共用的 HTTP(S) 代理 |
 | 中转访问令牌 | `relay_token` | 空 | 中转请求的 `rt` 参数；留空允许匿名访问 |
+| 自动恢复间隔(分钟) | `relay_auto_recover_minutes` | `15` | 凭证停机后自动重试 FlareSolverr 解题的间隔；`≤0` 禁用自动恢复 |
+| 自动恢复最大次数 | `relay_auto_recover_max` | `8` | 当天失败上限；达到后停止至次日 00:00 自动重置；`0` 不限制 |
 
 `cf_clearance` 与 `cf_user_agent` 是插件自动维护的持久化字段，不再提供手工输入框。没有可用 FlareSolverr 地址时会暂停拉取和中转，不能靠旧 cookie 持续运行。
 
@@ -210,6 +212,7 @@ environment:
 - 首次心跳约在保存后 15 秒触发，之后通常每 5 分钟检查，12 分钟换证阈值在心跳时判断。
 - 命中挑战页后标记急需换证；同一拍刚换新证却再次被拦时，先短间隔重探，避免连续重复解题。
 - 缺 FlareSolverr、中转地址或不兼容代理时暂停；连续验证失败也会暂停任务，但不会把用户配置开关永久改为关闭。
+- 停机后自动恢复（v1.1.0 起）：每次停机后按「自动恢复间隔」自动解题探活，当日上限（默认 8 次）耗尽后停止，次日 00:00 自动重置并重新开始，无需手动重载。
 - 修复后保存配置或重载插件重新验证，确认需要的开关处于开启状态。
 - 上游实际滚动下发的新 cookie 会被保存，但源站不保证滚动续期，持续运行依靠 FlareSolverr。
 
